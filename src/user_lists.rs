@@ -287,6 +287,7 @@ struct SearchOpts {
 }
 
 /// `performSearch`: every word of the term in one of the fields (or the id).
+#[allow(clippy::too_many_arguments)]
 async fn perform_search(
     app: &App,
     s: &Session,

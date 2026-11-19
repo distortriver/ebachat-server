@@ -16,13 +16,18 @@ pub mod posts;
 pub mod preferences;
 pub mod sidebar;
 pub mod status;
+pub mod system;
 pub mod teams;
+pub mod user_edit;
+pub mod user_image;
 pub mod user_lists;
 pub mod users;
 
 /// What the API reports as its version: Mattermost's, whose API this is.
 pub const SERVER_VERSION: &str = "12.1.0";
 pub const SERVER_VERSION_FULL: &str = "12.1.0";
+/// The 12.1.0 release's commit, as the client config reports it.
+pub const BUILD_HASH: &str = "243e3d0135203ab9166fe8f2873b07f697b06fd4";
 
 /// A Go `MM_SQLSETTINGS_DATASOURCE` DSN for sqlx: parameters it does not know are dropped.
 pub fn db_url(dsn: &str) -> String {

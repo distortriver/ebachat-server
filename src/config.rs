@@ -57,10 +57,9 @@ impl Config {
             ("Version", crate::SERVER_VERSION_FULL),
             ("BuildNumber", crate::SERVER_VERSION),
             ("BuildDate", ""),
-            ("BuildHash", ""),
-            ("BuildHashEnterprise", "none"),
+            ("BuildHash", crate::BUILD_HASH),
+            ("BuildHashEnterprise", ""),
             ("BuildEnterpriseReady", "false"),
-            ("ServiceEnvironment", "production"),
             ("IsFipsEnabled", "false"),
         ] {
             put(k, (*v).into());
@@ -75,10 +74,19 @@ impl Config {
             put(k, render(self.get(path)));
         }
         put("SiteURL", self.str("ServiceSettings.SiteURL").trim_end_matches('/').into());
+        put("CWSURL", String::new());
         put("WebsocketURL", self.str("ServiceSettings.WebsocketURL").trim_end_matches('/').into());
         put("DiagnosticId", self.diagnostic_id.clone());
         put("TelemetryId", self.diagnostic_id.clone());
         put("AppsPluginEnabled", "false".into());
+        // GetServiceEnvironment: production unless the environment says otherwise.
+        let env = std::env::var("MM_SERVICEENVIRONMENT").unwrap_or_default().to_lowercase();
+        put("ServiceEnvironment", if env == "dev" || env == "test" { env } else { "production".into() });
+        // FeatureFlags.ToMap: the 12.1.0 defaults, overridden by the config's FeatureFlags.
+        for (k, v) in FEATURE_FLAGS {
+            let set = self.get(&format!("FeatureFlags.{k}"));
+            put(&format!("FeatureFlag{k}"), if set.is_null() { (*v).to_string() } else { render(set) });
+        }
         for (k, v) in LIMITED_FIXED {
             put(k, (*v).into());
         }
@@ -91,6 +99,7 @@ impl Config {
         for (k, v) in FULL_FIXED {
             put(k, (*v).into());
         }
+        put("CWSURL", self.str("CloudSettings.CWSURL").into());
         let giphy = self.str("ServiceSettings.GiphySdkKey");
         put("GiphySdkKey", giphy.into());
         put("IsDefaultMarketplace", "true".into());
@@ -194,6 +203,55 @@ const LIMITED: &[(&str, &str)] = &[
     ("EnableGuestMagicLink", "GuestAccountsSettings.EnableGuestMagicLink"),
 ];
 
+/// `model.FeatureFlags` defaults of 12.1.0.
+const FEATURE_FLAGS: &[(&str, &str)] = &[
+    ("AggregatePluginMetrics", "false"),
+    ("AppsEnabled", "false"),
+    ("AttributeValueMasking", "true"),
+    ("AutoTranslation", "true"),
+    ("BurnOnRead", "true"),
+    ("CJKSearch", "true"),
+    ("ChannelAttributes", "true"),
+    ("ChannelAttributesRequired", "false"),
+    ("ChannelPermissionPolicies", "true"),
+    ("ClassificationMarkings", "true"),
+    ("ClusterGracefulDrain", "true"),
+    ("ContentFlagging", "true"),
+    ("DiscoverableChannels", "false"),
+    ("EnableAIPluginBridge", "false"),
+    ("EnableAIRecaps", "false"),
+    ("EnableDocs", "false"),
+    ("EnableMFIPluginSignaturePublicKey", "true"),
+    ("EnableMattermostEntry", "true"),
+    ("EnableSharedChannelsDMs", "false"),
+    ("EnableShiftEscapeToMarkAllRead", "false"),
+    ("EnableSyncAllUsersForRemoteCluster", "false"),
+    ("EnforceLogPathRoot", "false"),
+    ("HealthDashboard", "false"),
+    ("IntegratedBoards", "false"),
+    ("ManagedChannelCategories", "false"),
+    ("MmBlocksEnabled", "true"),
+    ("MobileEphemeralMode", "false"),
+    ("MobileSSOCodeExchange", "false"),
+    ("MoveThreadsEnabled", "false"),
+    ("NormalizeLdapDNs", "false"),
+    ("NotificationMonitoring", "true"),
+    ("OpenIdAttributeSync", "true"),
+    ("PermissionPolicies", "true"),
+    ("PolicySimulation", "true"),
+    ("PostAttributes", "false"),
+    ("PostDeliveryTracking", "false"),
+    ("PropertyFieldGraph", "true"),
+    ("PropertyFieldRank", "true"),
+    ("RecurringScheduledPosts", "false"),
+    ("ResourceAttributesInPolicies", "true"),
+    ("SessionAttributes", "true"),
+    ("TeamMembershipAccessControl", "true"),
+    ("TestBoolFeature", "false"),
+    ("TestFeature", "off"),
+    ("WysiwygEditor", "false"),
+];
+
 const LIMITED_FIXED: &[(&str, &str)] = &[
     ("EnableLdap", "false"),
     ("LdapLoginFieldName", ""),
@@ -204,7 +262,6 @@ const LIMITED_FIXED: &[(&str, &str)] = &[
     ("EnableSignUpWithOpenId", "false"),
     ("OpenIdButtonText", ""),
     ("OpenIdButtonColor", ""),
-    ("CWSURL", ""),
     ("EnforceMultifactorAuthentication", "false"),
 ];
 
@@ -321,7 +378,7 @@ const FULL_FIXED: &[(&str, &str)] = &[
     ("LockProfileFieldsForEmailUsers", "none"),
     ("ExperimentalEnablePostMetadata", "true"),
     ("ExperimentalTimezone", "true"),
-    ("CWSMock", "false"),
+    ("CWSMock", ""),
     ("ExperimentalEnableAuthenticationTransfer", "true"),
     ("LdapNicknameAttributeSet", "false"),
     ("LdapFirstNameAttributeSet", "false"),
