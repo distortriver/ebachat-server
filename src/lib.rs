@@ -4,16 +4,21 @@ pub mod cache;
 pub mod channels;
 pub mod config;
 pub mod db;
+pub mod drafts;
 pub mod emoji;
 pub mod file_api;
 pub mod files;
 pub mod hub;
 pub mod model;
+pub mod notify;
 pub mod password;
 pub mod perm;
 pub mod posts;
+pub mod reactions;
+pub mod search;
 pub mod sidebar;
 pub mod status;
+pub mod threads;
 pub mod users;
 
 /// What the API reports as its version: Mattermost's, whose API this is.

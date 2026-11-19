@@ -41,7 +41,8 @@ impl<'r, T: DeserializeOwned + Default> Decode<'r, Postgres> for JsonText<T> {
     fn decode(value: PgValueRef<'r>) -> Result<Self, BoxDynError> {
         let s = <&str as Decode<Postgres>>::decode(value)?;
         // Go's StringArray.Scan of an empty string is an empty array.
-        Ok(JsonText(if s.is_empty() { T::default() } else { serde_json::from_str(s)? }))
+        // ... and Go's `null` for a nil map or slice.
+        Ok(JsonText(if s.is_empty() || s == "null" { T::default() } else { serde_json::from_str(s)? }))
     }
 }
 
