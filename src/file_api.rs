@@ -17,7 +17,6 @@ use axum::routing::{get, post};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, new_id, now_ms};
@@ -44,11 +43,12 @@ pub fn routes() -> Router<State> {
 /// What a link in a message gives the post's metadata: an OpenGraph preview, or an image's size.
 #[derive(Clone, Debug, Default)]
 pub struct LinkMeta {
-    /// `{"type", "url", "title", "description", "site_name", "images": [...]}` as Go's `opengraph.OpenGraph`
-    /// after `TruncateOpenGraph`.
-    pub opengraph: Option<Value>,
+    /// Go's `opengraph.OpenGraph` after `TruncateOpenGraph`.
+    pub opengraph: Option<crate::opengraph::OpenGraph>,
     /// `PostImage`: `{"width", "height", "format", "frame_count"}`.
-    pub image: Option<Value>,
+    pub image: Option<crate::opengraph::PostImage>,
+    /// A permalink's preview (built by the posts code, kept in the same link cache).
+    pub permalink: Option<crate::model::post::PreviewPost>,
     /// The URL it was fetched for (the link cache's check against hash collisions).
     pub url: String,
 }

@@ -228,7 +228,7 @@ impl Post {
 #[serde(default)]
 pub struct PostMetadata {
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::null_default")]
-    pub embeds: Vec<Value>,
+    pub embeds: Vec<PostEmbed>,
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::null_default")]
     pub emojis: Vec<Emoji>,
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::null_default")]
@@ -236,13 +236,52 @@ pub struct PostMetadata {
     #[serde(skip_serializing_if = "is_zero")]
     pub redacted_file_count: i64,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "super::null_default")]
-    pub images: BTreeMap<String, Value>,
+    pub images: BTreeMap<String, crate::opengraph::PostImage>,
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::null_default")]
     pub reactions: Vec<Reaction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<PostPriority>,
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "super::null_default")]
     pub acknowledgements: Vec<PostAcknowledgement>,
+}
+
+/// `model.PostEmbed`: `type`, then `url` and `data` when set, in Go's order.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct PostEmbed {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<EmbedData>,
+}
+
+impl PostEmbed {
+    pub fn new(kind: &str, url: &str, data: Option<EmbedData>) -> PostEmbed {
+        PostEmbed { r#type: kind.into(), url: url.into(), data }
+    }
+}
+
+/// What an embed carries, each serialized in its Go struct's field order.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum EmbedData {
+    /// Anything a client sent (read back as it came).
+    Other(Value),
+    OpenGraph(Box<crate::opengraph::OpenGraph>),
+    Permalink(Box<PreviewPost>),
+}
+
+/// `model.PreviewPost`: a permalink's embed.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct PreviewPost {
+    pub post_id: String,
+    pub post: Option<Post>,
+    pub team_name: String,
+    pub channel_display_name: String,
+    pub channel_type: String,
+    pub channel_id: String,
 }
 
 /// `PostPriority` (`PostsPriority`); `PostId` and `ChannelId` keep Go's JSON names.

@@ -22,7 +22,7 @@ use sqlx::postgres::PgRow;
 use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id, now_ms};
 use crate::db::{self, Table};
 use crate::hub::Broadcast;
-use crate::model::post::kind;
+use crate::model::post::{EmbedData, PostEmbed, PreviewPost, kind};
 use crate::model::{
     Channel, Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, Session, Show, User,
     channel,
@@ -963,9 +963,9 @@ impl App {
         }
         let mut og_images: Vec<String> = vec![];
         if post.prop("attachments").is_some() {
-            md.embeds.push(json!({"type": "message_attachment"}));
+            md.embeds.push(PostEmbed::new("message_attachment", "", None));
         } else if let Some(b) = post.prop("boards") {
-            md.embeds.push(json!({"type": "boards", "data": b}));
+            md.embeds.push(PostEmbed::new("boards", "", Some(EmbedData::Other(b.clone()))));
         } else if let Some(link) = link {
             let permalink = self.looks_like_permalink(&link);
             if self.cfg.bool("ServiceSettings.EnableLinkPreviews") || permalink {
@@ -973,31 +973,29 @@ impl App {
                     if self.cfg.bool("ServiceSettings.EnablePermalinkPreviews")
                         && let Some(pp) = self.permalink_preview(&link, post.create_at).await
                     {
-                        md.embeds.push(json!({"type": "permalink", "data": pp}));
+                        md.embeds.push(PostEmbed::new("permalink", "", Some(EmbedData::Permalink(Box::new(pp)))));
                     }
                 } else if let Some(meta) = self.link_metadata_at(&link, post.create_at, is_new).await {
                     if let Some(og) = &meta.opengraph {
-                        if let Some(imgs) = og["images"].as_array() {
-                            for i in imgs {
-                                let u = i["secure_url"].as_str().filter(|s| !s.is_empty()).or(i["url"].as_str());
-                                if let Some(u) = u.filter(|s| !s.is_empty()) {
-                                    og_images.push(u.to_string());
-                                }
+                        for i in og.images.iter().flatten() {
+                            let u = if i.secure_url.is_empty() { &i.url } else { &i.secure_url };
+                            if !u.is_empty() {
+                                og_images.push(u.clone());
                             }
                         }
-                        md.embeds.push(json!({"type": "opengraph", "url": link, "data": og}));
+                        md.embeds.push(PostEmbed::new("opengraph", &link, Some(EmbedData::OpenGraph(Box::new(og.clone())))));
                     } else if let Some(img) = &meta.image {
-                        if img["format"] == "svg" || link.to_lowercase().ends_with(".svg") {
-                            md.embeds.push(json!({"type": "link", "url": link}));
+                        if img.format == "svg" || link.to_lowercase().ends_with(".svg") {
+                            md.embeds.push(PostEmbed::new("link", &link, None));
                         } else {
                             og_images.push(link.clone());
-                            md.embeds.push(json!({"type": "image", "url": link}));
+                            md.embeds.push(PostEmbed::new("image", &link, None));
                         }
                     } else {
-                        md.embeds.push(json!({"type": "link", "url": link}));
+                        md.embeds.push(PostEmbed::new("link", &link, None));
                     }
                 } else {
-                    md.embeds.push(json!({"type": "link", "url": link}));
+                    md.embeds.push(PostEmbed::new("link", &link, None));
                 }
             }
         }
@@ -1015,7 +1013,7 @@ impl App {
             }
             if let Some(meta) = self.link_metadata_at(&u, post.create_at, is_new).await
                 && let Some(img) = &meta.image
-                && img["format"] != "svg"
+                && img.format != "svg"
             {
                 md.images.insert(u, img.clone());
             }
@@ -1024,10 +1022,10 @@ impl App {
     }
 
     /// `getLinkMetadataForPermalink`, cached as Go's link cache (an hour).
-    async fn permalink_preview(&self, url: &str, at: i64) -> Option<Value> {
+    async fn permalink_preview(&self, url: &str, at: i64) -> Option<PreviewPost> {
         let key = format!("pl|{url}|{}", at - at.rem_euclid(3_600_000));
         if let Some(v) = self.caches.open_graph.get(&key) {
-            return v.opengraph.clone();
+            return v.permalink.clone();
         }
         let id = &url[url.len() - 26..];
         let p = self.single_post(id, false).await.ok()?;
@@ -1046,11 +1044,15 @@ impl App {
         } else {
             Box::pin(self.prepare_post_full(&p, Prep { include_priority: true, ..Default::default() })).await
         };
-        let v = json!({
-            "post_id": p.id, "post": p, "team_name": team_name, "channel_display_name": c.display_name,
-            "channel_type": c.r#type, "channel_id": c.id,
-        });
-        let meta = crate::file_api::LinkMeta { opengraph: Some(v.clone()), image: None, url: url.to_string() };
+        let v = PreviewPost {
+            post_id: p.id.clone(),
+            post: Some(p),
+            team_name,
+            channel_display_name: c.display_name.clone(),
+            channel_type: c.r#type.clone(),
+            channel_id: c.id.clone(),
+        };
+        let meta = crate::file_api::LinkMeta { permalink: Some(v.clone()), url: url.to_string(), ..Default::default() };
         self.caches.open_graph.put(key, Arc::new(meta));
         Some(v)
     }
@@ -1085,9 +1087,12 @@ impl App {
     /// so are mentions of channels they may not read.
     pub async fn sanitize_for_user(&self, mut post: Post, user_id: &str) -> Post {
         if let Some(md) = post.metadata.as_mut()
-            && let Some(i) = md.embeds.iter().position(|e| e["type"] == "permalink")
+            && let Some(i) = md.embeds.iter().position(|e| e.r#type == "permalink")
         {
-            let cid = md.embeds[i]["data"]["channel_id"].as_str().unwrap_or("").to_string();
+            let cid = match &md.embeds[i].data {
+                Some(EmbedData::Permalink(pp)) => pp.channel_id.clone(),
+                _ => String::new(),
+            };
             let ok = match self.channel(&cid).await {
                 Ok(Some(c)) => self.user_read_channel(user_id, &c).await.0,
                 _ => false,
@@ -1131,7 +1136,7 @@ impl App {
     pub fn post_for_broadcast(&self, post: &Post) -> Post {
         let mut p = post.clone();
         if let Some(md) = p.metadata.as_mut() {
-            md.embeds.retain(|e| e["type"] != "permalink");
+            md.embeds.retain(|e| e.r#type != "permalink");
         }
         p.props.0.remove("previewed_post");
         if let Some(Value::Object(m)) = p.props.0.remove("channel_mentions") {
@@ -1308,8 +1313,11 @@ impl App {
         if let Some(pid) = probe
             .metadata
             .as_ref()
-            .and_then(|m| m.embeds.iter().find(|e| e["type"] == "permalink"))
-            .and_then(|e| e["data"]["post_id"].as_str())
+            .and_then(|m| m.embeds.iter().find(|e| e.r#type == "permalink"))
+            .and_then(|e| match &e.data {
+                Some(EmbedData::Permalink(pp)) => Some(pp.post_id.as_str()),
+                _ => None,
+            })
         {
             post.props.0.insert("previewed_post".into(), pid.into());
         }

@@ -308,15 +308,11 @@ impl App {
             return None;
         }
         let m = if let Some(provider) = oembed_provider(&url) {
-            LinkMeta { opengraph: self.fetch_oembed(&url, provider).await.map(og_value), image: None, url: url.clone() }
+            LinkMeta { opengraph: self.fetch_oembed(&url, provider).await, url: url.clone(), ..Default::default() }
         } else {
             let (og, image) = self.fetch_link(&url).await;
             self.save_link_metadata(&url, ts, og.as_ref(), image.as_ref()).await;
-            LinkMeta {
-                opengraph: og.map(og_value),
-                image: image.map(|i| serde_json::to_value(i).unwrap()),
-                url: url.clone(),
-            }
+            LinkMeta { opengraph: og, image, url: url.clone(), ..Default::default() }
         };
         let m = Arc::new(m);
         self.caches.open_graph.put(key, m.clone());
@@ -338,12 +334,12 @@ impl App {
         match (kind.as_str(), data) {
             ("opengraph", Some(d)) => {
                 let og = serde_json::from_value::<OpenGraph>(d).unwrap_or_default();
-                m.opengraph = Some(og_value(truncate(og)));
+                m.opengraph = Some(truncate(og));
             }
             ("image", Some(d)) => {
                 let img = serde_json::from_value::<PostImage>(d).ok()?;
                 if img.format != "svg" && !is_svg_url(url) {
-                    m.image = Some(serde_json::to_value(img).unwrap());
+                    m.image = Some(img);
                 }
             }
             _ => {}
@@ -543,10 +539,6 @@ impl App {
 
 fn some(m: Arc<LinkMeta>) -> Option<Arc<LinkMeta>> {
     (m.opengraph.is_some() || m.image.is_some()).then_some(m)
-}
-
-fn og_value(og: OpenGraph) -> Value {
-    serde_json::to_value(og).unwrap()
 }
 
 /// `normalizeDomains` + `isLinkAllowedForPreview`.
