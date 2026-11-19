@@ -871,6 +871,10 @@ impl App {
         u.update_at = u.create_at;
         u.last_password_update = u.create_at;
         u.mfa_active = false;
+        // SanitizeInput: Go saves an empty remote id, not NULL.
+        if u.remote_id.is_none() {
+            u.remote_id = Some(String::new());
+        }
         if u.locale.is_empty() {
             u.locale = "en".into();
         }

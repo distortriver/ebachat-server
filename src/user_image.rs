@@ -62,15 +62,15 @@ pub fn initials_image(username: &str, user_id: &str) -> Vec<u8> {
     let scaled = font.as_scaled(scale);
     let id = font.glyph_id(initial);
     let advance = scaled.h_advance(id);
-    let bounds = font.glyph_bounds(&id.with_scale(scale));
-    let height = bounds.max.y - bounds.min.y;
+    // Go: the origin at x = (128 - advance) / 2 and the baseline at (128 + glyph height) / 2, which centres
+    // the glyph's ink vertically.
     let x = (SIZE as f32 - advance) / 2.0;
-    let y = (SIZE as f32 + height) / 2.0;
-    let glyph = id.with_scale_and_position(scale, ab_glyph::point(x, y - scaled.ascent()));
+    let glyph = id.with_scale_and_position(scale, ab_glyph::point(x, 0.0));
     if let Some(outline) = font.outline_glyph(glyph) {
         let b = outline.px_bounds();
+        let top = ((SIZE as f32 - b.height()) / 2.0).round() as i32;
         outline.draw(|gx, gy, cov| {
-            let (px, py) = (b.min.x as i32 + gx as i32, b.min.y as i32 + gy as i32);
+            let (px, py) = (b.min.x as i32 + gx as i32, top + gy as i32);
             if px < 0 || py < 0 || px >= SIZE as i32 || py >= SIZE as i32 {
                 return;
             }

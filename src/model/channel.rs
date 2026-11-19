@@ -104,9 +104,6 @@ pub fn default_member_notify_props() -> StringMap {
         ("email", "default"),
         ("ignore_channel_mentions", "default"),
         ("channel_auto_follow_threads", "off"),
-        ("desktop_threads", "default"),
-        ("push_threads", "default"),
-        ("email_threads", "default"),
     ] {
         m.insert(k.to_string(), v.to_string());
     }
