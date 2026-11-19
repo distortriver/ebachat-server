@@ -1,0 +1,180 @@
+# Map of the Go server
+
+What the Mattermost 12.1.0 server does, what of it is actually used, and in what order we port it.
+
+## Files
+
+| File | What | How |
+| --- | --- | --- |
+| `docs/map/routes.tsv` | Every REST route of `channels/api4`, one row per method | `make map` (`tools/mmmap`) |
+| `docs/map/ws-events.tsv` | Every websocket event of the model, what emits it, whether EBAChat handles it | `make map` |
+| `docs/prod-traffic.tsv` | Requests to `mm.ebac.app` by method and normalised path, by client | nginx-proxy log on the VM, see below |
+
+Columns of `routes.tsv`:
+
+- `tier`
+- `auth`: the handler wrapper. `APISessionRequired`, `APIHandler` (no session), `...TrustRequester` (no CSRF check).
+- `handler` and `source`, `file:line` under `server/`.
+- `prod_count`: requests in the 4 h sample.
+- `ebachat`: call sites in `ebac-messenger/src`.
+- `permissions`, `ws_events`, `store_calls` and `tables`: everything reachable from the handler through `app` and
+  `sqlstore`.
+- `go_loc_reachable`: lines of Go behind the route.
+- `rust`: empty, to be filled in as routes are ported.
+
+The call graph comes from `go/ast` without type checking: calls are resolved by receiver type and method name. It
+over-approximates, so read `tables`, `ws_events` and `go_loc_reachable` as upper bounds.
+
+## Tiers
+
+| Tier | Rule | Routes | Share of production requests |
+| --- | --- | ---: | ---: |
+| T1 | EBAChat calls it | 123 | 61% |
+| T2 | Not EBAChat, but production traffic (web, desktop, mobile, bots) | 37 | 12% |
+| stub | Production traffic, but an area we do not port (license, plugins, AI). Answer as Team Edition without a license does | 11 | 16% |
+| T3 | Nobody calls it, area kept | 228 | 0 |
+| skip | Nobody calls it, area not ported (cluster, LDAP, SAML, cloud, compliance, ...) | 219 | 0 |
+
+There are 607 routes in all. Another 172 local-mode routes (`APILocal`, for `mmctl --local`) are dropped. The remaining
+11% of production requests are plugins (`/plugins/...`, mostly Calls) and static files.
+
+- **T1 is the first milestone.** EBAChat works against the Rust server.
+- **T1 + T2 + stub is the second.** Stock web, desktop and mobile clients work.
+- **T3 is ported on demand.**
+
+By area: routes with T1/T2/stub, and production requests in 4 h:
+
+| Area | Routes | T1 | T2 | stub | Requests |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| channels | 71 | 30 | 4 | | 84,470 |
+| users | 79 | 22 | 8 | | 72,258 |
+| properties | 13 | | | 4 | 31,256 |
+| posts | 31 | 15 | 5 | | 22,072 |
+| threads | 7 | 6 | 1 | | 19,163 |
+| plugins | 12 | | | 1 | 12,436 |
+| teams | 55 | 18 | 4 | | 11,823 |
+| files | 10 | 6 | 2 | | 8,716 |
+| agents | 2 | | | 2 | 7,701 |
+| notifications | 2 | 1 | 1 | | 7,033 |
+| drafts | 4 | 4 | | | 6,464 |
+| config, license, preferences, emoji, status, roles, reactions, system, hooks, commands, ... | | 17 | 12 | 4 | 9,800 |
+
+**The T1 routes reach about 1,400 Go functions, about 42k lines (upper bound), over 51 tables.** That is the volume
+behind the first milestone, against about 220k lines in `api4` + `app` + `sqlstore` + `model`.
+
+## Websocket
+
+EBAChat handles 31 of the 108 events. Most of the events it handles come from routes in T1, for example `posted`
+(42 routes), `thread_updated` (45), `user_updated` (38), `channel_member_updated` (22) and `ephemeral_message` (46).
+Three events are not emitted by any route:
+
+- `hello`, from the hub on connect;
+- `status_change`, from the status service;
+- `draft_updated`.
+
+In the 4 h sample there were 1,121 websocket connections, all 101. About 330 client connections are open at any time.
+99% of reconnects resume with `connection_id` and `sequence_number`, so the resume buffer (the hub's
+missed-events queue) is T1, not an extra.
+
+## Production: `mm.ebac.app`
+
+Source:
+
+- **Host:** VM `prod-ebac-mattermost` (8 vCPU, 24 GB), docker compose in `/home/ubuntu/mm`.
+- **Services:** Mattermost Team Edition 11.11.2, Postgres 16, `nginx-proxy`.
+- **Not in k8s:** it has no Kibana index and no ingress metrics.
+- **Requests:** the nginx-proxy access log, 2026-11-19 16:59–21:07 UTC (4 h of weekday business hours). It was
+  recreated that day, and rotation keeps only about 30 h anyway.
+- **No latency:** the log format has no `request_time`.
+
+Load:
+
+- **Requests:** 22 req/s on average, 35 req/s in the peak minute, 403 client IPs.
+- **Data:** 1,200 users, 526 sessions, 10.0M posts, 13.4 GB database.
+
+Clients:
+
+| Client | Requests |
+| --- | ---: |
+| Desktop | 59% |
+| Web | 21% |
+| Mobile | 10% |
+| Bots | 6% |
+| `ureq` (EBAChat, presumably) | 4% |
+
+Resources, the baseline to beat:
+
+| Process | CPU | Memory |
+| --- | --- | --- |
+| Mattermost | 0.045 cores on average | 825 MB anon, cgroup peak 2.3 GB |
+| Postgres | 0.14 cores on average, 65% of a core at a snapshot | 7.4 GB cgroup, mostly cache |
+
+**Postgres spends about 3× Mattermost's CPU.** Sequential scans read about 17 billion `Threads` rows and 5.6 billion
+`PostsPriority` rows a day, likely the threads endpoints (`totalsOnly`, `unread`). Same schema, but different queries
+are allowed. This is probably the biggest win of the rewrite, and it lies in SQL, not in the language.
+
+Hot endpoints (4 h):
+
+| Request | Count | Note |
+| --- | ---: | --- |
+| `POST /users/status/ids` | 34.5k | |
+| `POST /channels/members/me/view` | 26.6k | |
+| `GET /channels/{id}/posts` | 19.8k | 96% `since` |
+| `POST /posts` | 15.7k | 79% bots |
+| `POST /users/ids` | 13.5k | `since` |
+| Client bootstrap | about 10.3k each | categories, unread, channels, channel_members, properties, plugins |
+| `GET /users/{id}/teams/{id}/threads` | 9.6k | |
+
+The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
+
+## Decisions
+
+- **Plugins: not now.** Production runs Calls (32k polls in 4 h), Jira (webhook in, settings), gcal and
+  mattermost-ai. Go plugins cannot run in a Rust server, and none of them is ported for now. `/plugins/*` and
+  `GET /api/v4/plugins/webapp` answer as a server with no plugins.
+- **Web client: not served.** The server does not serve the webapp bundle, `/static/*` or the web routes. The web
+  client is a separate deployment that talks to the API.
+- **Open:**
+  - mobile push: `POST /notifications/ack` (7k) and the push proxy. Mobile is 10% of traffic.
+  - bots: about 116 Lambdas (`node` UA) do email lookup → `channels/direct` → `posts`, and there are incoming
+    webhooks. These are T2, but critical.
+
+## ORM: what the prototype showed
+
+The stack is `sqlx` (Postgres) and our own `#[model]` attribute (`macros/`). It is not a full ORM:
+
+- **One struct per table.** It is both the row and the API JSON. The column name is derived (`create_at` →
+  `createat`). The macro generates `SELECT`, `INSERT` and `UPDATE` by id, plus `FromRow`.
+- **Go's JSON rules:**
+  - `#[mm(omitempty)]`;
+  - missing fields and `null` decode to zero values;
+  - map keys sorted (`BTreeMap`);
+  - field order as in Go.
+- **NULL columns read as zero values.** The schema is almost entirely nullable. Plain `sqlx::FromRow` fails on that
+  for non-`Option` fields; Go's stores never see NULL.
+- **Go's storage types:** `StringMap` and `StringInterface` in jsonb, `StringArray` as JSON text in varchar.
+
+SeaORM and Diesel would need a second struct per table, because their column names are not the JSON names. Complex
+queries (unreads, threads, sidebar, search) stay as SQL strings, ported from `sqlstore` and fixed where they scan.
+
+`tests/compat_model.rs` checks this against the Go server on the same database:
+
+- **Read:** a `Users` row read by Rust serialises to exactly what Go sends for `GET /users/me`, keys and order.
+- **Write:** a post inserted by Rust comes back from Go's `GET /posts/{id}` with every field equal.
+
+Found on the way: Go answers `/users/me` from its user cache, one login behind the database's `UpdateAt`. Caches in Go
+are a risk for taking turns on one database: switch servers with a restart, never run both at once.
+
+## Next steps
+
+1. **Dev stand:** `make stand`. Postgres and Go 12.1.0 on `:8065`; the Rust server will listen on `:8066`.
+2. **Skeleton:**
+   - axum, config, `Sessions`-table auth (`MMAUTHTOKEN` cookie and `X-Requested-With` CSRF, bearer token);
+   - Mattermost's error JSON;
+   - permissions from `Roles`/`Schemes`.
+3. **Slice:** login → `/users/me` → teams → channels → posts → `POST /posts` → websocket `posted`. Then measure memory
+   and CPU against Go.
+4. **Diff harness:** the same request sequence against `:8065` and `:8066`, responses diffed after normalising ids
+   and times. Each ported route gets a scenario.
+5. **Order:** T1 by production weight, starting with `status/ids`, `members/me/view`, `channels/{id}/posts`,
+   `posts`, `users/ids` and threads.

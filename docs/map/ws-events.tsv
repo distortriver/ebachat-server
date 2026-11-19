@@ -1,0 +1,101 @@
+event	ebachat_handles	emitted_by_t1_routes	emitted_by_routes
+added_to_team	yes	5	9
+board_created		0	1
+burn_on_read_all_revealed		0	1
+channel_access_control_updated		0	6
+channel_bookmark_created		0	1
+channel_bookmark_deleted		0	1
+channel_bookmark_sorted		0	1
+channel_bookmark_updated		0	1
+channel_converted		1	1
+channel_created		1	1
+channel_deleted	yes	2	3
+channel_join_request_created		0	1
+channel_join_request_updated		1	3
+channel_member_updated	yes	9	22
+channel_restored	yes	1	1
+channel_scheme_updated		0	1
+channel_updated		2	6
+cloud_subscription_changed		0	0
+config_changed		0	0
+custom_profile_attributes_field_created		0	1
+custom_profile_attributes_field_deleted		0	1
+custom_profile_attributes_field_updated		0	1
+custom_profile_attributes_values_updated		0	2
+delete_team	yes	0	1
+direct_added		11	25
+draft_created	yes	1	1
+draft_deleted	yes	2	2
+draft_updated	yes	0	0
+emoji_added	yes	1	1
+ephemeral_message	yes	17	46
+file_download_rejected		3	8
+file_upload_rejected		1	3
+group_added		1	1
+group_member_add		0	1
+group_member_deleted		0	1
+guests_deactivated		0	0
+hello	yes	0	0
+hosted_customer_signup_progress_updated		0	0
+job_updated		0	0
+leave_team		0	0
+license_changed		0	0
+memberrole_updated		0	7
+multiple_channels_viewed	yes	3	6
+new_user		2	2
+open_dialog	yes	0	1
+permission_policy_updated		0	4
+persistent_notification_triggered		0	0
+plugin_disabled		0	0
+plugin_enabled		0	3
+plugin_statuses_changed		0	4
+post_acknowledgement_added		0	1
+post_acknowledgement_removed		0	1
+post_burned		0	1
+post_deleted	yes	1	5
+post_edited	yes	5	9
+post_revealed		0	1
+post_translation_updated		0	0
+post_unread	yes	1	1
+posted	yes	15	42
+preference_changed		0	0
+preferences_changed	yes	3	4
+preferences_deleted	yes	1	1
+property_field_created		0	2
+property_field_deleted		0	2
+property_field_updated		0	5
+property_values_updated		2	8
+reaction_added	yes	1	2
+reaction_removed	yes	1	1
+recap_updated		0	1
+received_group		0	6
+received_group_associated_to_channel		0	2
+received_group_associated_to_team		0	2
+received_group_not_associated_to_channel		0	1
+received_group_not_associated_to_team		0	1
+response		0	0
+restore_team	yes	0	1
+role_updated		0	2
+shared_channel_remote_updated		0	0
+show_toast		0	0
+sidebar_category_created		7	13
+sidebar_category_deleted		1	1
+sidebar_category_order_updated	yes	1	1
+sidebar_category_updated		11	20
+status_change	yes	0	0
+team_access_control_updated		0	6
+thread_follow_changed	yes	3	3
+thread_read_changed	yes	6	9
+thread_updated	yes	17	45
+typing	yes	1	1
+update_team	yes	0	6
+update_team_scheme		0	1
+user_activation_status_change		0	1
+user_added	yes	6	14
+user_removed		2	5
+user_role_updated		0	2
+user_updated	yes	14	38
+view_created		0	2
+view_deleted		0	1
+view_sorted		0	1
+view_updated		0	1

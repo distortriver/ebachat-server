@@ -1,0 +1,15 @@
+[package]
+name = "ebachat-macros"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "The #[model] attribute: one struct for a Mattermost table row and its API JSON"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
