@@ -1,0 +1,5 @@
+ebachat-server
+
+Parts of this program are based on the Mattermost server
+(https://github.com/mattermost/mattermost), Copyright (c) 2015-present Mattermost, Inc.,
+used under the GNU Affero General Public License v3.0.

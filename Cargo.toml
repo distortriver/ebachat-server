@@ -1,0 +1,9 @@
+[package]
+name = "ebachat-server"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Chat server in Rust, compatible with the Mattermost database schema"
+publish = false
+
+[dependencies]
