@@ -2,3 +2,4 @@
 /dev/bin
 /dev/run
 /.claude/worktrees
+__pycache__/
