@@ -2,6 +2,7 @@ pub mod api;
 pub mod app;
 pub mod cache;
 pub mod channels;
+pub mod channels_api;
 pub mod config;
 pub mod db;
 pub mod emoji;
