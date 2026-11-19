@@ -7,14 +7,16 @@ description = "Chat server in Rust, compatible with the Mattermost database sche
 publish = false
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0.104"
-axum = { version = "0.8.9", features = ["ws"] }
+axum = { version = "0.8.9", features = ["ws", "multipart"] }
 base64 = "0.23.1"
 bcrypt = "0.19.3"
 bytes = "1.12.2"
 ebachat-macros = { version = "0.1.0", path = "macros" }
 futures-util = "0.3.34"
 hmac = "0.13.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 lru = "0.19.0"
 object_store = { version = "0.14.2", features = ["aws"] }
 pbkdf2 = "0.13.0"

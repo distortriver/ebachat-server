@@ -17,6 +17,7 @@ pub mod preferences;
 pub mod sidebar;
 pub mod status;
 pub mod teams;
+pub mod user_lists;
 pub mod users;
 
 /// What the API reports as its version: Mattermost's, whose API this is.

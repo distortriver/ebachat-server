@@ -11,6 +11,7 @@ pub fn router(app: State) -> Router {
         .route("/api/v4/system/ping", get(|| async { Json(json!({"status": "OK"})) }))
         .route("/api/v4/websocket", get(crate::hub::connect))
         .merge(crate::users::routes())
+        .merge(crate::user_lists::routes())
         .merge(crate::status::routes())
         .merge(crate::channels::routes())
         .merge(crate::sidebar::routes())

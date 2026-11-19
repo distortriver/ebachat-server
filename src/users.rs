@@ -122,11 +122,40 @@ impl App {
 
 // ---------- reads ----------
 
+/// `GetUserTermsOfService` on the user's own record (or for admins).
+async fn with_terms(app: &App, u: &mut User) -> ApiResult<()> {
+    let t: Option<(String, i64)> =
+        sqlx::query_as("SELECT TermsOfServiceId, COALESCE(CreateAt, 0) FROM UserTermsOfService WHERE UserId = $1")
+            .bind(&u.id)
+            .fetch_optional(&app.db)
+            .await?;
+    if let Some((id, at)) = t {
+        (u.terms_of_service_id, u.terms_of_service_create_at) = (id, at);
+    }
+    Ok(())
+}
+
+/// `getUser` (and `/users/me`): one's own record in full, others' as the privacy settings allow.
+async fn one_user(app: &App, s: &Session, u: Arc<User>) -> ApiResult<Json<User>> {
+    if !app.can_see_user(s, &u.id).await? {
+        return Err(AppError::forbidden_perm(crate::perm::VIEW_MEMBERS));
+    }
+    let show = app.show(s).await;
+    let mut u = (*u).clone();
+    if show.admin || s.user_id == u.id {
+        with_terms(app, &mut u).await?;
+    }
+    if u.id == s.user_id {
+        u.sanitize_own();
+    } else {
+        u.sanitize_profile(show);
+    }
+    Ok(Json(u))
+}
+
 async fn get_me(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<User>> {
     let u = app.user(&s.user_id).await?.ok_or_else(missing_account)?;
-    let mut u = (*u).clone();
-    u.sanitize_own();
-    Ok(Json(u))
+    one_user(&app, &s, u).await
 }
 
 async fn get_user(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<User>> {
@@ -135,60 +164,122 @@ async fn get_user(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> 
         return Err(AppError::invalid_url_param("user_id"));
     }
     let u = app.user(&id).await?.ok_or_else(missing_account)?;
-    Ok(Json(app.profile_for(&u, &s, app.show(&s).await)))
+    one_user(&app, &s, u).await
 }
 
 async fn get_by_username(St(app): St<State>, Auth(s): Auth, Path(name): Path<String>) -> ApiResult<Json<User>> {
-    let u = load_user_by(&app, "u.username = lower($1)", &name).await?.ok_or_else(missing_account)?;
-    Ok(Json(app.profile_for(&u, &s, app.show(&s).await)))
+    let u = load_user_by(&app, "u.username = $1", &name.to_lowercase()).await?.ok_or_else(missing_account)?;
+    one_user(&app, &s, Arc::new(u)).await
 }
 
 async fn get_by_email(St(app): St<State>, Auth(s): Auth, Path(email): Path<String>) -> ApiResult<Json<User>> {
     let show = app.show(&s).await;
     if !show.email {
-        return Err(AppError::forbidden());
+        return Err(AppError::forbidden().with_id("api.user.get_user_by_email.permissions.app_error"));
     }
-    let u = load_user_by(&app, "u.email = lower($1)", &email).await?.ok_or_else(missing_account)?;
-    Ok(Json(app.profile_for(&u, &s, show)))
+    let u = load_user_by(&app, "u.email = $1", &email.to_lowercase()).await?.ok_or_else(missing_account)?;
+    if !app.can_see_user(&s, &u.id).await? {
+        return Err(AppError::forbidden_perm(crate::perm::VIEW_MEMBERS));
+    }
+    let mut u = u;
+    u.sanitize_profile(show);
+    Ok(Json(u))
 }
 
 #[derive(Deserialize)]
 struct SinceQuery {
-    since: Option<i64>,
+    since: Option<String>,
 }
 
-/// `getUsersByIds`: the profile cache, updated since `since`, sorted by username.
+/// `getUsersByIds`: the profile cache (`GetProfileByIds`), updated since `since`, every profile sanitized.
 async fn users_by_ids(
     St(app): St<State>,
     Auth(s): Auth,
     Query(q): Query<SinceQuery>,
-    Body(ids): Body<Vec<String>>,
+    Body(mut ids): Body<Vec<String>>,
 ) -> ApiResult<Json<Vec<User>>> {
+    ids.sort();
     if ids.is_empty() {
         return Err(AppError::invalid_param("user_ids"));
     }
-    let since = q.since.unwrap_or(0);
-    let mut users: Vec<Arc<User>> = app.users(&ids).await?;
+    let since = match q.since.as_deref() {
+        None | Some("") => 0,
+        Some(v) => v.parse::<i64>().map_err(|_| AppError::invalid_param("since"))?,
+    };
+    let mut users: Vec<Arc<User>> = if app.sees_everyone(&s).await {
+        app.users(&ids).await?
+    } else {
+        let cond = format!("u.id = ANY($1) AND {}", restriction(&s.user_id));
+        load_users(&app, &cond, &ids).await?.into_iter().map(Arc::new).collect()
+    };
     if since > 0 {
         users.retain(|u| u.update_at > since);
     }
-    users.sort_by(|a, b| a.username.cmp(&b.username));
     let show = app.show(&s).await;
-    Ok(Json(users.iter().map(|u| app.profile_for(u, &s, show)).collect()))
+    Ok(Json(users.iter().map(|u| sanitized(u, show)).collect()))
+}
+
+pub fn sanitized(u: &User, show: Show) -> User {
+    let mut u = u.clone();
+    u.sanitize_profile(show);
+    u
 }
 
 async fn users_by_usernames(
     St(app): St<State>,
     Auth(s): Auth,
-    Body(names): Body<Vec<String>>,
+    Body(mut names): Body<Vec<String>>,
 ) -> ApiResult<Json<Vec<User>>> {
+    names.sort();
     if names.is_empty() {
         return Err(AppError::invalid_param("usernames"));
     }
-    let mut users = load_users(&app, "u.username = ANY($1)", &names).await?;
+    let mut cond = "u.username = ANY($1)".to_string();
+    if !app.sees_everyone(&s).await {
+        cond = format!("{cond} AND {}", restriction(&s.user_id));
+    }
+    let mut users = load_users(&app, &cond, &names).await?;
     users.sort_by(|a, b| a.username.cmp(&b.username));
     let show = app.show(&s).await;
-    Ok(Json(users.iter().map(|u| app.profile_for(u, &s, show)).collect()))
+    Ok(Json(users.iter().map(|u| sanitized(u, show)).collect()))
+}
+
+/// `applyViewRestrictionsFilter` for a viewer without `view_members`: people in their teams or channels.
+/// `viewer` is a checked id.
+pub fn restriction(viewer: &str) -> String {
+    assert!(is_valid_id(viewer));
+    format!(
+        "(u.id IN (SELECT r.UserId FROM TeamMembers r WHERE r.DeleteAt = 0 AND r.TeamId IN
+            (SELECT TeamId FROM TeamMembers WHERE UserId = '{viewer}' AND DeleteAt = 0))
+          OR u.id IN (SELECT r.UserId FROM ChannelMembers r WHERE r.ChannelId IN
+            (SELECT ChannelId FROM ChannelMembers WHERE UserId = '{viewer}')))"
+    )
+}
+
+/// A bind of [`query_users`].
+pub enum Arg {
+    S(String),
+    V(Vec<String>),
+    I(i64),
+}
+
+/// `usersQuery` with joins, a condition and an order/limit, binds in order.
+pub async fn query_users(app: &App, joins: &str, cond: &str, tail: &str, args: Vec<Arg>) -> ApiResult<Vec<User>> {
+    let sql = format!(
+        "SELECT {}, b.UserId IS NOT NULL AS isbot, COALESCE(b.Description, '') AS botdescription,
+                COALESCE(b.LastIconUpdate, 0) AS botlasticonupdate
+         FROM Users u LEFT JOIN Bots b ON b.UserId = u.Id {joins} WHERE {cond} {tail}",
+        db::cols::<User>("u")
+    );
+    let mut q = sqlx::query_as::<_, WithBot>(sqlx::AssertSqlSafe(sql));
+    for a in args {
+        q = match a {
+            Arg::S(v) => q.bind(v),
+            Arg::V(v) => q.bind(v),
+            Arg::I(v) => q.bind(v),
+        };
+    }
+    Ok(q.fetch_all(&app.db).await?.into_iter().map(|w| w.0).collect())
 }
 
 // ---------- login ----------
