@@ -20,8 +20,9 @@ A chat server in Rust that replaces the Mattermost server (Go) for EBAC's intern
   tracked) at `../ebac-messenger/mattermost/`. Schema: `server/channels/db/migrations/postgres/`. Stores (the SQL
   that reads and writes each table): `server/channels/store/sqlstore/`. Handlers: `server/channels/api4/`. API
   structs and JSON: `server/public/model/`.
-- Production `mm.ebac.app` runs Team Edition 11.11.2, not 12.1. When the two differ, the schema version of the
-  database we actually run on wins.
+- The target is Mattermost 12.1.0: its schema and its API. The schema's migrations are copied verbatim into
+  `migrations/postgres/` (see `migrations/README.md`). Production `mm.ebac.app` still runs Team Edition 11.11.2,
+  so its database has to reach the 12.1.0 schema before this server can run on it.
 - Where the code is unclear, check against a live server: `docker run -d --name mm-preview -p 8065:8065
   mattermost/mattermost-preview`, seeded with `../ebac-messenger/scripts/seed-local.ps1` and `seed-local-more.ps1`
   (accounts `admin` / `Admin-pass-123`, `alice` / `Alice-pass-123`). Compare responses byte for byte.
