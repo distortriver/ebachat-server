@@ -8,12 +8,15 @@ pub mod emoji;
 pub mod file_api;
 pub mod files;
 pub mod hub;
+pub mod i18n;
 pub mod model;
 pub mod password;
 pub mod perm;
 pub mod posts;
+pub mod preferences;
 pub mod sidebar;
 pub mod status;
+pub mod teams;
 pub mod users;
 
 /// What the API reports as its version: Mattermost's, whose API this is.

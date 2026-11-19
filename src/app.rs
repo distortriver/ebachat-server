@@ -297,7 +297,7 @@ impl AppError {
     pub fn new(status: StatusCode, id: &str, message: &str) -> AppError {
         AppError {
             id: id.into(),
-            message: message.into(),
+            message: crate::i18n::t(id).unwrap_or(message).into(),
             detailed_error: String::new(),
             request_id: new_id(),
             status_code: status.as_u16(),

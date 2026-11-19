@@ -17,5 +17,7 @@ pub fn router(app: State) -> Router {
         .merge(crate::posts::routes())
         .merge(crate::file_api::routes())
         .merge(crate::emoji::routes())
+        .merge(crate::preferences::routes())
+        .merge(crate::teams::routes())
         .with_state(app)
 }
