@@ -19,7 +19,8 @@ pub struct Status {
     pub status: String,
     pub manual: bool,
     pub last_activity_at: i64,
-    #[mm(transient, omitempty)]
+    /// Server-side only: `ToJSON`/`StatusListToJSON` drop it.
+    #[mm(transient, skip_json)]
     pub active_channel: String,
     pub dnd_end_time: i64,
     #[mm(skip_json)]

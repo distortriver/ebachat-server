@@ -80,6 +80,9 @@ def diff(a, b, path, shape_only, out):
         for k in common:
             if k in VOLATILE:
                 continue
+            # Go answers users from its profile cache, one login behind the database (see docs/MAP.md).
+            if k == "update_at" and dict(a[1]).get("username") is not None:
+                continue
             # maps keyed by ids: compare by key
             diff(da[k], db[k], f"{path}.{k}", shape_only, out)
         return
