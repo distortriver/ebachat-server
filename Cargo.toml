@@ -13,13 +13,19 @@ base64 = "0.23.1"
 bcrypt = "0.19.3"
 bytes = "1.12.2"
 ebachat-macros = { version = "0.1.0", path = "macros" }
+encoding_rs = "0.8.44"
 futures-util = "0.3.34"
 hmac = "0.13.0"
+html-escape = "0.3.1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp"] }
 lru = "0.19.0"
+mime_guess = "2.0.5"
+multer = "3.1.0"
 object_store = { version = "0.14.2", features = ["aws"] }
 pbkdf2 = "0.13.0"
 rand = "0.10.4"
 regex = "1.13.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
