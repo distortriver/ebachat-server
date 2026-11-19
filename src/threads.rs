@@ -23,10 +23,10 @@ use sqlx::postgres::PgRow;
 use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, now_ms};
 use crate::db::{self, Table};
 use crate::hub::Broadcast;
-use crate::model::{Post, ThreadMembership, ThreadResponse, Threads, User, channel};
+use crate::model::{Post, ThreadMembership, ThreadResponse, Threads, User};
 use crate::notify::Keywords;
 use crate::perm;
-use crate::posts::{Prep, page_params};
+use crate::posts::page_params;
 use crate::users::ok;
 
 pub fn routes() -> Router<State> {
@@ -234,8 +234,12 @@ impl App {
                 out.insert(u.id.clone(), u);
             }
         } else {
+            // `&model.User{Id: id}`, sanitized as the others.
+            let show = self.show_cfg();
             for id in ids {
-                out.insert(id.clone(), User { id: id.clone(), ..Default::default() });
+                let mut u = User { id: id.clone(), ..Default::default() };
+                u.sanitize_profile(show);
+                out.insert(id.clone(), u);
             }
         }
         Ok(out)
@@ -424,7 +428,7 @@ impl App {
                    "previous_unread_replies": prev_replies, "channel_id": root.channel_id}),
             Broadcast { team_id: team_id.into(), user_id: user_id.into(), ..Default::default() },
         );
-        Ok(sanitized(t))
+        Ok(t)
     }
 
     /// `UpdateThreadFollowForUser`.
@@ -466,11 +470,6 @@ impl App {
         .await?;
         Ok(())
     }
-}
-
-/// `sanitizeProfiles` and `SanitizeNonIdentityProps` are done; the post is as stored.
-fn sanitized(t: ThreadResponse) -> ThreadResponse {
-    t
 }
 
 #[derive(Deserialize, Default)]
@@ -660,14 +659,4 @@ async fn set_unread(
         return Err(AppError::bad_request("app.user.update_thread_read_for_user_by_post.app_error", "Unable to update thread read state."));
     }
     Ok(Json(app.update_thread_read(&user_id, &team_id, &thread_id, post.create_at - 1).await?))
-}
-
-/// The prepared root of a thread, for callers that show threads with metadata.
-pub async fn prepared_root(app: &App, p: &Post) -> Post {
-    app.prepare_post(p, Prep::default()).await
-}
-
-/// Whether a channel is a direct or group message, where threads have no team.
-pub fn teamless(c: &crate::model::Channel) -> bool {
-    c.r#type == channel::DIRECT || c.r#type == channel::GROUP
 }

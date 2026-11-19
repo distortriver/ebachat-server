@@ -24,7 +24,7 @@ use crate::db::{self, Table};
 use crate::hub::Broadcast;
 use crate::model::post::kind;
 use crate::model::{
-    Channel, Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, Session, Show, StringArray, User,
+    Channel, Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, Session, Show, User,
     channel,
 };
 use crate::perm;
@@ -411,7 +411,8 @@ impl App {
                     None => {}
                 }
             }
-            p.participants = Some(parts);
+            // Go appends to a nil slice: no participants is `null`.
+            p.participants = (!parts.is_empty()).then_some(parts);
             list.add_ordered(p);
         }
         Ok(list)
@@ -441,7 +442,7 @@ impl App {
             return self.threaded(rows, o.collapsed_threads_extended, false).await;
         }
         let del = if o.include_deleted { "" } else { " AND p.DeleteAt = 0" };
-        let rc = if o.skip_fetch_threads { format!(", {}", reply_count_col("p", o.include_deleted)) } else { ", 0 AS replycount".into() };
+        let rc = if o.skip_fetch_threads { format!(", {}", reply_count_col("p", o.include_deleted)) } else { ", 0::bigint AS replycount".into() };
         let roots = format!(
             "SELECT {}{rc} FROM Posts p WHERE p.ChannelId = $1{del}{ex} ORDER BY p.CreateAt DESC LIMIT $2 OFFSET $3",
             pc("p")
@@ -449,7 +450,7 @@ impl App {
         let q2del = if o.include_deleted { "" } else { "AND q2.DeleteAt = 0" };
         let subdel = if o.include_deleted { "" } else { "AND Posts.DeleteAt = 0" };
         let on = if o.skip_fetch_threads { "q1.RootId = q2.Id" } else { "q1.RootId = q2.Id OR q1.RootId = q2.RootId" };
-        let prc = if o.skip_fetch_threads { format!(", {}", reply_count_col("q2", o.include_deleted)) } else { ", 0 AS replycount".into() };
+        let prc = if o.skip_fetch_threads { format!(", {}", reply_count_col("q2", o.include_deleted)) } else { ", 0::bigint AS replycount".into() };
         let parents = format!(
             "SELECT {}{prc} FROM Posts q2 INNER JOIN (SELECT DISTINCT q3.RootId FROM (SELECT Posts.RootId FROM Posts
                WHERE Posts.ChannelId = $1 {subdel} ORDER BY Posts.CreateAt DESC LIMIT $2 OFFSET $3) q3 WHERE q3.RootId != '') q1
@@ -524,7 +525,7 @@ impl App {
             let (rc1, rc2) = if o.skip_fetch_threads {
                 (format!(", {}", reply_count_col("p1", false)), format!(", {}", reply_count_col("cte", false)))
             } else {
-                (", 0 AS replycount".to_string(), ", 0 AS replycount".to_string())
+                (", 0::bigint AS replycount".to_string(), ", 0::bigint AS replycount".to_string())
             };
             let ex_plain = exclude_membership("Posts", o.exclude_membership);
             let sql = format!(
@@ -741,7 +742,7 @@ impl App {
             let row = row.ok_or_else(post_not_found)?;
             root_id = id.to_string();
             list = self.threaded(vec![row], o.collapsed_threads_extended, false).await?;
-            let sql = format!("SELECT {}, 0 AS replycount FROM Posts p WHERE p.RootId = $1 AND p.DeleteAt = 0{extra}{order}{limit}", pc("p"));
+            let sql = format!("SELECT {}, 0::bigint AS replycount FROM Posts p WHERE p.RootId = $1 AND p.DeleteAt = 0{extra}{order}{limit}", pc("p"));
             let mut q = sqlx::query_as::<_, WithCount>(sqlx::AssertSqlSafe(sql)).bind(&root_id).bind(&o.from_post);
             for a in &args {
                 q = q.bind(*a);
@@ -2353,7 +2354,7 @@ async fn edit_history(St(app): St<State>, Auth(s): Auth, Path(post_id): Path<Str
     if post.user_id != s.user_id {
         return Err(AppError::forbidden_perm(perm::EDIT_POST));
     }
-    let sql = format!("SELECT {}, 0 AS replycount FROM Posts p WHERE p.OriginalId = $1 ORDER BY p.EditAt DESC", pc("p"));
+    let sql = format!("SELECT {}, 0::bigint AS replycount FROM Posts p WHERE p.OriginalId = $1 ORDER BY p.EditAt DESC", pc("p"));
     let posts: Vec<WithCount> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&post_id).fetch_all(&app.db).await?;
     if posts.is_empty() {
         return Err(AppError::not_found("app.post.get_edit_history_for_post.app_error", "Unable to get the post."));
@@ -2851,8 +2852,4 @@ async fn test_notification(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<
         .await
         .map_err(|e| AppError::internal("app.notifications.send_test_message.errors.create_post", e.detailed_error))?;
     Ok(ok())
-}
-
-pub fn file_ids(v: &StringArray) -> &[String] {
-    &v.0
 }

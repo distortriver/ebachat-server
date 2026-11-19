@@ -37,15 +37,13 @@ impl App {
     /// `prepareDraftWithFileInfos`: the user's unattached files of the draft, as its metadata.
     async fn draft_with_files(&self, mut d: Draft) -> Draft {
         if d.file_ids.0.is_empty() {
+            d.metadata = Some(serde_json::json!({}));
             return d;
         }
         let sql = format!("{} WHERE Id = ANY($1) AND DeleteAt = 0", FileInfo::SELECT);
         let infos: Vec<FileInfo> =
             sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&d.file_ids.0).fetch_all(&self.db).await.unwrap_or_default();
         let files: Vec<FileInfo> = infos.into_iter().filter(|f| f.post_id.is_empty() && f.creator_id == d.user_id).collect();
-        if files.is_empty() {
-            return d;
-        }
         let md = PostMetadata { files, ..Default::default() };
         d.metadata = Some(serde_json::to_value(md).unwrap());
         d
@@ -128,7 +126,7 @@ async fn get_drafts(
     St(app): St<State>,
     Auth(s): Auth,
     Path((_user_id, team_id)): Path<(String, String)>,
-) -> ApiResult<Json<Vec<Draft>>> {
+) -> ApiResult<Json<Option<Vec<Draft>>>> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
@@ -154,7 +152,8 @@ async fn get_drafts(
     for d in drafts {
         out.push(app.draft_with_files(d).await);
     }
-    Ok(Json(out))
+    // A nil slice in Go: `null` when there are none.
+    Ok(Json((!out.is_empty()).then_some(out)))
 }
 
 async fn remove_draft(app: &App, s: &Session, headers: &HeaderMap, channel_id: &str, root_id: &str) -> ApiResult<Json<Value>> {
