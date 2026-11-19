@@ -912,6 +912,10 @@ impl App {
             cs.pre_save();
             set_custom_status_prop(&mut u, &cs);
         }
+        // Go stores `[]` for the users it creates (`null` only for bots).
+        if u.mfa_used_timestamps.0.is_none() {
+            u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
+        }
         check_user(&u)?;
         let r = crate::db::insert(&self.db, &u).await;
         if let Err(e) = r {

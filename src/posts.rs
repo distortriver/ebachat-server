@@ -1160,9 +1160,9 @@ pub struct CreateFlags {
     pub trigger_webhooks: bool,
     pub force_notification: bool,
     pub silent: bool,
-    /// `FromIncomingWebhook`: an integration's post (webhooks, slash command responses); the overrides below are
-    /// put back on it after `SanitizeProps`.
+    /// `FromIncomingWebhook`: `from_webhook`, and the display-identity overrides below re-injected.
     pub from_incoming_webhook: bool,
+    pub allow_mm_blocks_actions: bool,
     pub override_username: String,
     pub override_icon_url: String,
     pub override_icon_emoji: String,
@@ -1248,6 +1248,7 @@ impl App {
         if session.is_some_and(|s| s.is_oauth) {
             p.insert("from_oauth_app".into(), "true".into());
         }
+        // Re-inject display-identity overrides under the incoming webhook's authority.
         if flags.from_incoming_webhook {
             for (k, v) in [
                 ("override_username", &flags.override_username),
@@ -1260,7 +1261,7 @@ impl App {
                 }
             }
         }
-        if !user.is_bot && !session.is_some_and(|s| s.is_user_access_token()) {
+        if !user.is_bot && !session.is_some_and(|s| s.is_user_access_token()) && !flags.allow_mm_blocks_actions {
             p.remove("mm_blocks_actions");
         }
         // Channel mentions without the permission: highlighted as text, and the poster is told.
@@ -1404,7 +1405,7 @@ impl App {
         if post.remote_id.is_none() {
             post.remote_id = None;
         }
-        self.validate_post(post)?;
+        self.validate_post(post, self.max_post_size().await as usize)?;
         let mut tx = self.db.begin().await?;
         post.bind(sqlx::query(Post::INSERT)).execute(&mut *tx).await?;
         if !post.root_id.is_empty() {
@@ -1464,7 +1465,8 @@ impl App {
     }
 
     /// `Post.IsValid`.
-    fn validate_post(&self, p: &Post) -> ApiResult<()> {
+    /// `Post.IsValid(maxPostSize)`.
+    fn validate_post(&self, p: &Post, max_post_size: usize) -> ApiResult<()> {
         let bad = |what: &str| AppError::bad_request(&format!("model.post.is_valid.{what}.app_error"), &format!("Invalid {what}."));
         if !is_valid_id(&p.id) {
             return Err(bad("id"));
@@ -1478,7 +1480,7 @@ impl App {
         if !(p.root_id.is_empty() || is_valid_id(&p.root_id)) {
             return Err(bad("root_id"));
         }
-        if p.message.chars().count() > MAX_POST_SIZE {
+        if p.message.chars().count() > max_post_size {
             return Err(bad("message_length"));
         }
         if !kind::VALID.contains(&p.r#type.as_str()) && !p.r#type.starts_with(kind::CUSTOM_PREFIX) {
@@ -1496,11 +1498,17 @@ impl App {
         if p.id.is_empty() {
             p.id = crate::app::new_id();
         }
+        // GenerateActionIds, and AddPostActionCookies after preparing (below, on the prepared copy).
+        crate::integrations::generate_action_ids(&mut p.props.0);
         if p.create_at == 0 {
             p.create_at = now_ms();
         }
-        p.update_at = p.create_at;
-        let p = self.prepare_post(&p, Prep { is_new: true, ..Default::default() }).await;
+        let mut p = self.prepare_post(&p, Prep { is_new: true, ..Default::default() }).await;
+        if (p.props.0.contains_key("attachments") || p.props.0.contains_key("mm_blocks_actions"))
+            && let Ok(k) = self.integration_keys().await
+        {
+            crate::integrations::add_action_cookies(&mut p, &k.cookie);
+        }
         self.hub.publish(
             "ephemeral_message",
             json!({"post": serde_json::to_string(&p).unwrap()}),
@@ -1586,6 +1594,11 @@ impl App {
     /// `App.UpdatePost` (not a safe update): message, pin, props and files; the old version kept as a deleted
     /// row with `OriginalId`, `post_edited` published.
     pub async fn update_post(&self, s: &Session, received: Post, keep_props: bool) -> ApiResult<Post> {
+        self.update_post_opts(s, received, keep_props, false).await
+    }
+
+    /// `UpdatePost` with `AllowMmBlocksActionsUpdate` (an integration's answer may replace its own actions).
+    pub async fn update_post_opts(&self, s: &Session, received: Post, keep_props: bool, allow_mm_blocks: bool) -> ApiResult<Post> {
         let mut received = received;
         received.remote_id = None;
         received.sanitize_props();
@@ -1631,7 +1644,7 @@ impl App {
                 new.props.0.insert(k.into(), v.clone());
             }
         }
-        match old.prop("mm_blocks_actions") {
+        match old.prop("mm_blocks_actions").filter(|_| !allow_mm_blocks || received.prop("mm_blocks_actions").is_none()) {
             Some(v) => {
                 new.props.0.insert("mm_blocks_actions".into(), v.clone());
             }
@@ -1673,9 +1686,10 @@ impl App {
             m.embeds.clear();
             m
         });
-        // SqlPostStore.Update
+        // SqlPostStore.Update (PreCommit)
+        crate::integrations::generate_action_ids(&mut new.props.0);
         new.update_at = now_ms();
-        self.validate_post(&new)?;
+        self.validate_post(&new, self.max_post_size().await as usize)?;
         let mut tx = self.db.begin().await?;
         sqlx::query(
             "UPDATE Posts SET CreateAt=$1, UpdateAt=$2, EditAt=$3, DeleteAt=$4, IsPinned=$5, UserId=$6, ChannelId=$7,
@@ -1913,8 +1927,9 @@ async fn create_post_h(
         return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.post.fill_in_post_props.burn_on_read.license.app_error", "Feature is not available for the current license."));
     }
     let n = post.message.chars().count();
-    if n > MAX_POST_SIZE {
-        return Err(AppError::bad_request("model.post.is_valid.message_length.app_error", &format!("Post Message property is longer than the maximum permitted length: {n} > {MAX_POST_SIZE}.")));
+    let max = app.max_post_size().await as usize;
+    if n > max {
+        return Err(AppError::bad_request("model.post.is_valid.message_length.app_error", &format!("Post Message property is longer than the maximum permitted length: {n} > {max}.")));
     }
     let set_online = q.set_online.as_deref().filter(|s| !s.is_empty()).map(|s| parse_bool(s).unwrap_or(true)).unwrap_or(true);
     let silent = match q.silent.as_deref().filter(|s| !s.is_empty()) {
@@ -2209,7 +2224,7 @@ async fn update_post_h(
     {
         return Err(AppError::bad_request("api.post.update_post.permissions_time_limit.app_error", "Post edit is only allowed for a limited time."));
     }
-    if post.message.chars().count() > MAX_POST_SIZE {
+    if post.message.chars().count() > app.max_post_size().await as usize {
         return Err(AppError::bad_request("model.post.is_valid.message_length.app_error", "Post Message property is longer than the maximum permitted length."));
     }
     if s.user_id != original.user_id && !app.channel_perm(&s, &original.channel_id, perm::EDIT_OTHERS_POSTS).await?.0 {
@@ -2238,7 +2253,8 @@ async fn patch_post_h(
     if edit_time_expired(&app, &original) && more_than_pin {
         return Err(AppError::bad_request("api.post.update_post.permissions_time_limit.app_error", "Post edit is only allowed for a limited time."));
     }
-    if patch.message.as_ref().is_some_and(|m| m.chars().count() > MAX_POST_SIZE) {
+    let max = app.max_post_size().await as usize;
+    if patch.message.as_ref().is_some_and(|m| m.chars().count() > max) {
         return Err(AppError::bad_request("model.post.is_valid.message_length.app_error", "Post Message property is longer than the maximum permitted length."));
     }
     if let Some(ids) = &patch.file_ids {

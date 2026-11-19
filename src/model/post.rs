@@ -26,6 +26,8 @@ pub struct Post {
     #[mm(transient, omitempty)]
     pub message_source: String,
     pub r#type: String,
+    /// What clients see of it: `StripActionIntegrations`.
+    #[serde(serialize_with = "crate::integrations::serialize_props")]
     pub props: StringInterface,
     pub hashtags: String,
     #[mm(skip_json)]
@@ -213,6 +215,7 @@ impl Post {
             self.id = crate::app::new_id();
         }
         self.original_id.clear();
+        crate::integrations::generate_action_ids(&mut self.props.0);
         if self.create_at == 0 {
             self.create_at = now;
         }

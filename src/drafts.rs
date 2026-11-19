@@ -80,7 +80,7 @@ async fn upsert_draft(St(app): St<State>, Auth(s): Auth, headers: HeaderMap, Bod
     d.update_at = now;
     let mut seen = std::collections::HashSet::new();
     d.file_ids.0.retain(|f| seen.insert(f.clone()));
-    if d.message.chars().count() > crate::posts::MAX_POST_SIZE {
+    if d.message.chars().count() > app.max_post_size().await as usize {
         return Err(AppError::bad_request("model.draft.is_valid.message_length.app_error", "Invalid Message property length."));
     }
     if !is_valid_id(&d.channel_id) {

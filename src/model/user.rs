@@ -67,7 +67,8 @@ pub struct User {
     #[mm(omitempty)]
     pub last_login: i64,
     #[mm(omitempty)]
-    pub mfa_used_timestamps: Json<Vec<Value>>,
+    /// JSON `null` in rows Go wrote for bots.
+    pub mfa_used_timestamps: Json<Option<Vec<Value>>>,
 }
 
 impl User {

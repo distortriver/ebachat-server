@@ -302,7 +302,7 @@ impl App {
         };
         let encoded = form_encode(p);
         let mut url = reqwest::Url::parse(&cmd.url).map_err(|e| failed(e.to_string()))?;
-        if !self.integration_url_allowed(&url) {
+        if !self.untrusted_url_allowed(&url) {
             return Err(failed("address forbidden".into()));
         }
         let timeout = std::time::Duration::from_secs(self.cfg.i64("ServiceSettings.OutgoingIntegrationRequestsTimeout").max(1) as u64);
@@ -541,59 +541,11 @@ impl App {
 
     /// `model.GenerateTriggerId`: (the client's id, the signed trigger id the integration gets).
     async fn generate_trigger_id(&self, user_id: &str, channel_id: &str) -> (String, String) {
-        use base64::Engine;
-        use base64::engine::general_purpose::STANDARD;
-        use p256::ecdsa::signature::hazmat::PrehashSigner;
-        use sha2::Digest;
-        let client = new_id();
-        let Some(key) = self.signing_key().await else { return (client, String::new()) };
-        let data = format!("{client}:{user_id}:{}:{channel_id}:", now_ms());
-        let digest = sha2::Sha256::digest(data.as_bytes());
-        let Ok(sig): Result<p256::ecdsa::Signature, _> = key.sign_prehash(&digest) else {
-            return (client, String::new());
-        };
-        let der = sig.to_der();
-        let trigger = STANDARD.encode(format!("{data}{}", STANDARD.encode(der.as_bytes())));
-        (client, trigger)
-    }
-
-    /// The `AsymmetricSigningKey` of `Systems` (P-256), as Go keeps it: `{"ecdsa_key": {"d": <decimal>, ...}}`.
-    async fn signing_key(&self) -> Option<&'static p256::ecdsa::SigningKey> {
-        static KEY: tokio::sync::OnceCell<Option<p256::ecdsa::SigningKey>> = tokio::sync::OnceCell::const_new();
-        KEY.get_or_init(|| async {
-            let v: String = sqlx::query_scalar("SELECT Value FROM Systems WHERE Name = 'AsymmetricSigningKey'")
-                .fetch_optional(&self.db)
-                .await
-                .ok()??;
-            // A big integer: read as text, a JSON number would lose it.
-            let i = v.find("\"d\":")? + 4;
-            let digits: String = v[i..].trim_start().chars().take_while(char::is_ascii_digit).collect();
-            let d = decimal_to_32(&digits)?;
-            p256::ecdsa::SigningKey::from_bytes(&d.into()).ok()
-        })
-        .await
-        .as_ref()
-    }
-}
-
-/// A decimal big integer as 32 big-endian bytes.
-fn decimal_to_32(digits: &str) -> Option<[u8; 32]> {
-    let mut out = [0u8; 32];
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    for d in digits.bytes() {
-        let mut carry = (d - b'0') as u32;
-        for b in out.iter_mut().rev() {
-            let x = *b as u32 * 10 + carry;
-            *b = x as u8;
-            carry = x >> 8;
-        }
-        if carry != 0 {
-            return None;
+        match self.signing_key().await {
+            Ok(key) => crate::integrations::generate_trigger_id(user_id, channel_id, &key),
+            Err(_) => (crate::app::new_id(), String::new()),
         }
     }
-    Some(out)
 }
 
 /// `url.Values.Encode`: sorted by key, values in order.

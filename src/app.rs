@@ -308,6 +308,16 @@ impl AppError {
         self.detailed_error = d.into();
         self
     }
+    /// The message with Go's `{{.Name}}` parameters filled in.
+    pub fn with_params(mut self, args: &[(&str, &str)]) -> AppError {
+        if let Some(m) = crate::i18n::tr(&self.id, args) {
+            self.message = m;
+        }
+        self
+    }
+    pub fn with_param(self, k: &str, v: &str) -> AppError {
+        self.with_params(&[(k, v)])
+    }
     /// The same error under another id (and its message).
     pub fn with_id(mut self, id: &str) -> AppError {
         self.id = id.into();

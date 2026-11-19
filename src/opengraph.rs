@@ -209,19 +209,22 @@ impl App {
         })
     }
 
-    /// `HTTPService.MakeClient(false)` for outgoing integration requests (custom slash commands, post actions):
-    /// internal addresses only as `AllowedUntrustedInternalConnections` lets through, redirects too.
+    fn allowed_untrusted(&self) -> Allowed {
+        Allowed(
+            self.cfg
+                .str("ServiceSettings.AllowedUntrustedInternalConnections")
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    /// `HTTPService.MakeClient(false)` for integrations: no internal addresses unless allowed, Go's redirects.
     pub fn integration_client(&self) -> &'static reqwest::Client {
         static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
         CLIENT.get_or_init(|| {
-            let allowed = Allowed(
-                self.cfg
-                    .str("ServiceSettings.AllowedUntrustedInternalConnections")
-                    .split(|c: char| c.is_whitespace() || c == ',')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-            );
+            let allowed = self.allowed_untrusted();
             let redirect_allowed = allowed.clone();
             reqwest::Client::builder()
                 .user_agent(USER_AGENT)
@@ -242,21 +245,22 @@ impl App {
         })
     }
 
-    /// Whether an integration URL with an IP literal host may be called (names are checked when resolved).
-    pub fn integration_url_allowed(&self, u: &Url) -> bool {
-        self.internal_url_allowed(u)
+    /// `HTTPService.MakeClient(true)`: this server's own plugin routes.
+    pub fn trusted_client(&self) -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .build()
+                .expect("http client")
+        })
     }
 
-    fn internal_url_allowed(&self, u: &Url) -> bool {
-        let allowed = Allowed(
-            self.cfg
-                .str("ServiceSettings.AllowedUntrustedInternalConnections")
-                .split(|c: char| c.is_whitespace() || c == ',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-        );
-        allowed.url(u)
+    /// An IP-literal URL passes the same checks as a resolved address (the resolver never sees it).
+    pub fn untrusted_url_allowed(&self, u: &Url) -> bool {
+        self.allowed_untrusted().url(u)
     }
 
     /// `isLinkAllowedForPreview`: not on a `RestrictLinkPreviews` domain.
@@ -376,7 +380,7 @@ impl App {
     /// `getLinkMetadataForURL`: an image's size, or an HTML page's OpenGraph data.
     async fn fetch_link(&self, url: &str) -> (Option<OpenGraph>, Option<PostImage>) {
         let Ok(u) = Url::parse(url) else { return (None, None) };
-        if !matches!(u.scheme(), "http" | "https") || !self.internal_url_allowed(&u) {
+        if !matches!(u.scheme(), "http" | "https") || !self.untrusted_url_allowed(&u) {
             return (None, None);
         }
         let timeout = Duration::from_millis(self.cfg.i64("ExperimentalSettings.LinkMetadataTimeoutMilliseconds").max(1) as u64);
@@ -469,7 +473,7 @@ impl App {
 
     /// The local image proxy's fetch: another site's picture (at most 50 MB) and its type.
     pub async fn fetch_image(&self, u: &Url) -> Result<(bytes::Bytes, String), String> {
-        if !matches!(u.scheme(), "http" | "https") || !self.internal_url_allowed(u) {
+        if !matches!(u.scheme(), "http" | "https") || !self.untrusted_url_allowed(u) {
             return Err("address forbidden".into());
         }
         let mut res = self.link_client().get(u.clone()).header("Accept", "image/*").send().await.map_err(|e| e.to_string())?;
