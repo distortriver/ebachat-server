@@ -348,3 +348,62 @@ pub const USE_SLASH_COMMANDS: &str = "use_slash_commands";
 pub const GET_PUBLIC_LINK: &str = "get_public_link";
 pub const MANAGE_OAUTH: &str = "manage_oauth";
 pub const SYSCONSOLE_READ_USERMANAGEMENT_USERS: &str = "sysconsole_read_user_management_users";
+
+// ---------- by user id (`HasPermissionTo*`), for checks not tied to the request's session ----------
+
+impl App {
+    /// `HasPermissionTo`: the user's system roles.
+    pub async fn user_has_perm(&self, user_id: &str, permission: &str) -> bool {
+        match self.user(user_id).await {
+            Ok(Some(u)) => self.roles_grant(&u.roles, permission).await,
+            _ => false,
+        }
+    }
+
+    /// `HasPermissionToTeam`: the team membership's roles, then the system roles.
+    pub async fn user_team_perm(&self, user_id: &str, team_id: &str, permission: &str) -> bool {
+        if team_id.is_empty() || user_id.is_empty() {
+            return false;
+        }
+        if let Ok(m) = team_members(self, "tm.teamid = $1 AND tm.userid = $2", &[team_id, user_id]).await
+            && let Some(m) = m.into_iter().next()
+            && m.delete_at == 0
+            && self.roles_grant(&m.roles, permission).await
+        {
+            return true;
+        }
+        self.user_has_perm(user_id, permission).await
+    }
+
+    /// `HasPermissionToChannel`: (allowed, is a member).
+    pub async fn user_channel_perm(&self, user_id: &str, channel_id: &str, permission: &str) -> (bool, bool) {
+        if channel_id.is_empty() || user_id.is_empty() {
+            return (false, false);
+        }
+        let mut is_member = false;
+        if let Ok(ids) = self.member_roles(user_id, true).await
+            && let Some(roles) = ids.get(channel_id)
+        {
+            is_member = true;
+            if self.roles_grant(roles, permission).await {
+                return (true, true);
+            }
+        }
+        match self.channel(channel_id).await {
+            Ok(Some(c)) if !c.team_id.is_empty() => (self.user_team_perm(user_id, &c.team_id, permission).await, is_member),
+            _ => (self.user_has_perm(user_id, permission).await, is_member),
+        }
+    }
+
+    /// `HasPermissionToReadChannel`: read content, or a public channel of a team the user may read.
+    pub async fn user_read_channel(&self, user_id: &str, c: &crate::model::Channel) -> (bool, bool) {
+        let (ok, member) = self.user_channel_perm(user_id, &c.id, READ_CHANNEL_CONTENT).await;
+        if ok {
+            return (true, member);
+        }
+        if c.r#type == crate::model::channel::OPEN && !self.cfg.bool("ComplianceSettings.Enable") {
+            return (self.user_team_perm(user_id, &c.team_id, READ_PUBLIC_CHANNEL).await, false);
+        }
+        (false, false)
+    }
+}

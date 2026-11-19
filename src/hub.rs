@@ -62,7 +62,13 @@ pub struct Broadcast {
     /// `ContainsSensitiveData`: admins only.
     #[serde(skip)]
     pub admin_only: bool,
+    /// Broadcast hooks (`add_mentions`, `add_followers`): fields added to the data for one recipient.
+    #[serde(skip)]
+    pub per_user: Option<PerUser>,
 }
+
+/// Fields to add to an event's data for the user of a connection, if any.
+pub type PerUser = Arc<dyn Fn(&str) -> Option<serde_json::Map<String, Value>> + Send + Sync>;
 
 /// The event as JSON without its closing `"seq":N}`: `{"event":..,"data":..,"broadcast":..,"seq":`.
 fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
@@ -149,16 +155,26 @@ impl Hub {
         }
         let full = prefix(event, &data, &b);
         let sanitized = b.sanitized.as_ref().map(|d| prefix(event, d, &b));
-        if b.channel_id.is_empty() {
+        let event = event.to_string();
+        let channel_id = b.channel_id.clone();
+        // The event for one connection: admin or sanitized data, and the hooks' fields.
+        let render = move |c: &Conn| -> Arc<str> {
+            let base = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
+            let Some(extra) = b.per_user.as_ref().and_then(|f| f(&c.user_id)) else { return base.clone() };
+            let mut d = if c.admin { data.clone() } else { b.sanitized.clone().unwrap_or_else(|| data.clone()) };
+            if let Value::Object(m) = &mut d {
+                m.extend(extra);
+            }
+            prefix(&event, &d, &b)
+        };
+        if channel_id.is_empty() {
             for c in targets {
-                let p = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
-                let _ = c.tx.send(Out::Event(p.clone()));
+                let _ = c.tx.send(Out::Event(render(&c)));
             }
             return;
         }
         // Membership needs the (cached) channel members of each user: done off the caller's path.
         let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
-        let channel_id = b.channel_id.clone();
         tokio::spawn(async move {
             for c in targets {
                 let member = match app.member_roles(&c.user_id, false).await {
@@ -166,8 +182,7 @@ impl Hub {
                     Err(_) => false,
                 };
                 if member {
-                    let p = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
-                    let _ = c.tx.send(Out::Event(p.clone()));
+                    let _ = c.tx.send(Out::Event(render(&c)));
                 }
             }
         });
