@@ -169,16 +169,47 @@ queries (unreads, threads, sidebar, search) stay as SQL strings, ported from `sq
 Found on the way: Go answers `/users/me` from its user cache, one login behind the database's `UpdateAt`. Caches in Go
 are a risk for taking turns on one database: switch servers with a restart, never run both at once.
 
-## Next steps
+## Status
 
-1. **Dev stand:** `make stand`. Postgres and Go 12.1.0 on `:8065`; the Rust server will listen on `:8066`.
-2. **Skeleton:**
-   - axum, config, `Sessions`-table auth (`MMAUTHTOKEN` cookie and `X-Requested-With` CSRF, bearer token);
-   - Mattermost's error JSON;
-   - permissions from `Roles`/`Schemes`.
-3. **Slice:** login → `/users/me` → teams → channels → posts → `POST /posts` → websocket `posted`. Then measure memory
-   and CPU against Go.
-4. **Diff harness:** the same request sequence against `:8065` and `:8066`, responses diffed after normalising ids
-   and times. Each ported route gets a scenario.
-5. **Order:** T1 by production weight, starting with `status/ids`, `members/me/view`, `channels/{id}/posts`,
-   `posts`, `users/ids` and threads.
+**First milestone reached: EBAChat works against the Rust server.**
+
+- **Routes:** every T1 route is ported. So are the T2 routes that matter in production:
+  - incoming webhooks, which bots and Jira use;
+  - mobile session and device routes;
+  - `channel_members` and the other bootstrap calls of the stock clients.
+- **Plugins and licensed features:** they answer as a server without plugins or a license does.
+- **`tools/diff/diff.py`:** runs EBAChat's calls, in the client's order, against Go and Rust. It compares status,
+  keys, key order and values. For writes it also compares the websocket events an observer receives.
+  All 61 calls answer as Go does.
+- **The real client:** EBAChat ran against the Rust server, as a test copy with its own session file
+  (`EBACHAT_SESSION`), and the server logged every request (`LOG_REQUESTS=1`).
+  - Startup, the websocket, and posts, threads, reactions, edits, deletes and DMs from another user all worked.
+  - Every answer was 2xx, and the client logged no errors.
+- **Caches:** Go's caches are reproduced, see `docs/CACHES.md`.
+- **Left:**
+  - mobile push (no push proxy);
+  - email (no SMTP);
+  - T3 routes on demand.
+
+Code by area:
+
+| Area | Files |
+| --- | --- |
+| Core | `app.rs`, `cache.rs`, `perm.rs`, `config.rs`, `hub.rs`, `status.rs`, `db.rs`, `model/` |
+| Users and teams | `users.rs`, `user_*.rs`, `teams.rs`, `preferences.rs`, `emoji.rs`, `system.rs`, `i18n.rs` |
+| Channels | `channels.rs`, `channels_api.rs`, `sidebar.rs` |
+| Posts | `posts.rs`, `notify.rs`, `threads.rs`, `reactions.rs`, `drafts.rs`, `search.rs` |
+| Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
+| Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
+
+## Running
+
+```sh
+make stand                      # Postgres (and Go) of the stand
+./dev/run-go.sh &               # Go 12.1.0 on :8065
+cargo build --release && ./dev/run-rust.sh   # Rust on :8066, the same config and dev/stand.env
+python3 tools/diff/diff.py --writes          # Go and Rust answer the same?
+```
+
+Never run both servers on one database outside the stand. Each keeps its own caches, and neither sees the other's
+writes in them.

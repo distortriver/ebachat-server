@@ -1,4 +1,4 @@
-# Go vs Rust: first measurement
+# Go vs Rust: measurements
 
 2026-11-19. The first slice of the Rust server against Mattermost Team Edition 12.1.0 (Go), on one database, under
 the same load.
@@ -74,6 +74,57 @@ Raw output: `dev/run/bench/*.txt` (not tracked).
 - **Postgres CPU is lower under Rust**, mostly because of what `POST /posts` does not do yet.
 - **Small data:** 30k posts. The thread scans that dominate production's Postgres CPU are not exercised here.
 - **Noise:** one run each, on a laptop. Expect noise of ±10–15%.
+
+## Second measurement: the complete server, with caches
+
+2026-11-20. The Rust server with every T1 route and Go's caches (`docs/CACHES.md`), against Go 12.1.0. The setup and
+mix are those of the first measurement. Each server started fresh, and each ran alone on the database.
+
+| | Go 12.1.0 | Rust | Rust / Go |
+| --- | ---: | ---: | ---: |
+| RSS after start | 114 MB | 15 MB | 1/8 |
+| RSS with 249 websockets | 135 MB | 51 MB | 1/2.6 |
+| RSS under load, `read`, avg / max | 194 / 198 MB | 51 / 61 MB | 1/3.8 / 1/3.2 |
+| RSS under load, `full`, avg / max | 226 / 231 MB | 60 / 78 MB | 1/3.8 / 1/3.0 |
+| Server CPU, `read` | 14.8% of a core | 5.2% | 0.35 |
+| Server CPU, `full` | 30.9% | 14.4% | 0.47 |
+| Postgres CPU, `read` | 13.3% | 7.5% | 0.56 |
+| Postgres CPU, `full` | 19.8% | 13.9% | 0.70 |
+| Websocket events delivered, `full` | 182,692 | 182,688 | same |
+
+Latency (ms), p50 / p99:
+
+| Endpoint | Go `read` | Rust `read` | Go `full` | Rust `full` |
+| --- | ---: | ---: | ---: | ---: |
+| `status/ids` | 1.18 / 1.75 | 0.81 / 1.42 | 1.13 / 3.02 | 0.80 / 2.27 |
+| `members/me/view` | 10.24 / 16.07 | 4.87 / 13.84 | 8.76 / 15.08 | 4.93 / 12.94 |
+| `posts?since` | 0.95 / 6.20 | 0.59 / 8.73 | 7.25 / 15.06 | 6.48 / 11.56 |
+| `users/ids` | 1.29 / 2.00 | 1.03 / 1.77 | 1.24 / 3.21 | 1.01 / 2.46 |
+| `users/me` | 2.77 / 5.49 | 2.60 / 5.21 | 2.14 / 6.24 | 1.80 / 5.09 |
+| `POST /posts` | | | 14.75 / 26.76 | 10.81 / 24.68 |
+
+Raw output: `dev/run/bench/*-2.txt`.
+
+What changed since the first measurement:
+
+- **The work is the same now.**
+  - `POST /posts` does what Go does: mentions, unread counters, threads, notifications' database side,
+    `posted` with mentions and followers.
+  - Posts carry full metadata.
+- **Caches:**
+  - `users/ids` comes from the profile cache.
+  - `posts?since` answers "nothing new" from the last-post-time cache, as Go does. Its p50 is now below Go's.
+- **Postgres works less under Rust:** 0.56 of Go's CPU on reads, 0.70 with writes. The caches are the same, so
+  the difference is in the queries:
+  - unread counts and threads are driven from indexed tables;
+  - Rust makes fewer round trips per request.
+- **Memory:**
+  - Rust's RSS grows with websockets (51 MB with 249 connections), but stays at about a quarter of Go's.
+  - Production holds about 330 connections; Go there has 825 MB anon.
+- **Same data on both runs:** 4 `POST /posts` per run fail on a channel archived during development, on both
+  servers.
+- **Event counts:** the 25 fewer events in Rust's `read` run are `status_change` events on connect. Statuses were
+  already online when Rust started after Go; the view events are identical (checked separately).
 
 ## Reproduce
 

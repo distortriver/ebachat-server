@@ -17,7 +17,7 @@ Two constraints follow from this.
 | `Session` | 35000, `SessionCacheInMinutes` (10 in prod) | every request: token → session with team memberships | `caches.session`, `App::session` |
 | `Status` | 35000, 30 min | `status/ids` (top endpoint), websocket status | `caches.status`, `status.rs` |
 | `seenPendingPostIds` | 25000, 30 s | `POST /posts` retries with the same `pending_post_id` | `caches.seen_pending_post_ids` |
-| `openGraphData` | 10000, 60 min | link previews in post metadata | `caches.open_graph`, `link_metadata` |
+| `openGraphData` / link cache | 10000, 60 min | link previews in post metadata, keyed by URL and hour; then the `LinkMetadata` table (by its primary key) | `caches.open_graph`, `link_metadata_at`; permalink previews too, under their own keys |
 
 ## Store (`localcachelayer`)
 
@@ -37,12 +37,12 @@ Two constraints follow from this.
 | `LastPost` | 20000, 30 min | `GetPosts` first page of 30 or 60 | any post write in the channel | `caches.last_posts` |
 | `Team` | 20000, 30 min | `GetUserTeamIds` | team join/leave | `caches.team_ids_for_user` |
 | `Role` | 20000, 30 min | `GetByName(s)`: every permission check | role save/delete | `caches.role`, `App::roles` |
-| `Scheme` | 20000, 30 min | `Scheme.Get` | scheme save/delete | `caches.scheme` |
+| `Scheme` | 20000, 30 min | `Scheme.Get` | scheme save/delete | not needed: member roles come from the schemes joined in the same query, as Go's member queries do |
 | `Reaction` | 20000, 30 min | `GetForPost` (post metadata) | reaction save/delete | `caches.reactions` |
 | `FileInfo` | 25000, 30 min | `GetForPost`, `GetByIds` (post metadata) | attach, delete | `caches.file_infos` |
 | `EmojiById`, `EmojiByName` | 5000, 30 min (not found: 60 s) | custom emoji in metadata and reactions | emoji save/delete | `caches.emoji_by_id`, `caches.emoji_by_name` |
 | `TermsOfService` | 20000, 30 min | latest terms | save | `caches.terms_of_service` |
-| `Webhook` | 25000, 15 min | incoming webhook by id | webhook update/delete | not yet (incoming webhooks are T2) |
+| `Webhook` | 25000, 15 min | incoming webhook by id (`POST /hooks/{id}`) | webhook update/delete | `caches.webhook`; Go drops the entry on every use (`UpdateIncomingLastUsed`), we update it in place, so it actually hits |
 | `RolePermission` | 20000, 30 min | `ChannelHigherScopedPermissions` (admin console) | role save | not needed by T1 |
 | `PostsUsage`, `ReadReceipt*`, `TemporaryPost`, `ContentFlagging`, `DeliveryTracking`, `PropertyField`, `UserAttributes`, `AccessControlPolicyEtag`, `UserAutoTranslation`, `PostTranslationEtag`, `SessionAttribute` | | licensed, cloud or plugin features | | not ported |
 
