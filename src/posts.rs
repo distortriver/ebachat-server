@@ -1693,6 +1693,8 @@ impl App {
         hist.id = crate::app::new_id();
         hist.bind(sqlx::query(Post::INSERT)).execute(&mut *tx).await?;
         tx.commit().await?;
+        // LastPostAt moved: the cached channel is stale.
+        self.caches.invalidate_channel(&c);
         if new.is_pinned != old.is_pinned {
             self.caches.pinned_count.remove(&new.channel_id);
         }
