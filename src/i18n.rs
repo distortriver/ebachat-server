@@ -37,6 +37,31 @@ pub fn t(id: &str) -> Option<&'static str> {
     table().get(id).map(String::as_str).filter(|s| !s.contains("{{"))
 }
 
+fn plurals() -> &'static HashMap<&'static str, String> {
+    static T: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
+    T.get_or_init(|| {
+        #[derive(serde::Deserialize)]
+        struct Entry<'a> {
+            id: &'a str,
+            translation: serde_json::Value,
+        }
+        let entries: Vec<Entry<'static>> = serde_json::from_str(EN).unwrap_or_default();
+        entries
+            .into_iter()
+            .filter_map(|e| Some((e.id, e.translation.as_object()?.get("one")?.as_str()?.to_string())))
+            .collect()
+    })
+}
+
+/// `T(id, count, params)`: English plural forms, "one" for 1 and "other" otherwise.
+pub fn tr_n(id: &str, count: usize, args: &[(&str, &str)]) -> Option<String> {
+    let mut s = if count == 1 { plurals().get(id).or_else(|| table().get(id)) } else { table().get(id) }?.clone();
+    for (k, v) in args {
+        s = s.replace(&format!("{{{{.{k}}}}}"), v);
+    }
+    Some(s)
+}
+
 /// The English text of `id` with `{{.Name}}` parameters filled in.
 pub fn tr(id: &str, args: &[(&str, &str)]) -> Option<String> {
     let mut s = table().get(id)?.clone();

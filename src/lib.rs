@@ -4,6 +4,7 @@ pub mod cache;
 pub mod channels;
 pub mod channels_api;
 pub mod commands;
+pub mod commands_builtin;
 pub mod config;
 pub mod db;
 pub mod drafts;

@@ -585,7 +585,7 @@ impl CustomStatus {
         self.expires_at.starts_with("0001-01-01")
     }
     /// `CustomStatus.PreSave`.
-    fn pre_save(&mut self) {
+    pub fn pre_save(&mut self) {
         if self.duration.is_empty() && !self.is_zero_time() && self.expires_ms().is_some_and(|t| t >= now_ms()) {
             self.duration = "date_and_time".into();
         }
@@ -654,6 +654,48 @@ fn custom_status_disabled(app: &App) -> ApiResult<()> {
     }
 }
 
+impl App {
+    /// `App.SetCustomStatus`: the emoji must exist; saved on the user, and first among the recent ones.
+    pub async fn set_custom_status(&self, user_id: &str, cs: CustomStatus) -> ApiResult<()> {
+        if cs.emoji.is_empty() && cs.text.is_empty() {
+            return Err(AppError::bad_request("api.custom_status.set_custom_statuses.update.app_error", ""));
+        }
+        if !cs.emoji.is_empty() && !self.emoji_exists(&cs.emoji).await? {
+            return Err(AppError::bad_request("api.custom_status.set_custom_statuses.emoji_not_found", ""));
+        }
+        let mut u = (*self.user(user_id).await?.ok_or_else(missing_account)?).clone();
+        set_custom_status_prop(&mut u, &cs);
+        self.update_user(u, true, false).await?;
+        // addRecentCustomStatus: newest first, one per text, at most 5.
+        let mut recent: Vec<CustomStatus> =
+            match self.preference(user_id, crate::preferences::CUSTOM_STATUS, "recent_custom_statuses").await? {
+                Some(p) if !p.value.is_empty() => serde_json::from_str(&p.value).unwrap_or_default(),
+                _ => vec![],
+            };
+        recent.retain(|r| r.text != cs.text);
+        recent.insert(0, cs);
+        recent.truncate(5);
+        let pref = Preference {
+            user_id: user_id.to_string(),
+            category: crate::preferences::CUSTOM_STATUS.into(),
+            name: "recent_custom_statuses".into(),
+            value: serde_json::to_string(&recent).unwrap(),
+        };
+        if let Err(e) = self.update_preferences(user_id, vec![pref]).await {
+            eprintln!("recent custom statuses of {user_id}: {}", e.message);
+        }
+        Ok(())
+    }
+
+    /// `App.RemoveCustomStatus`.
+    pub async fn remove_custom_status(&self, user_id: &str) -> ApiResult<()> {
+        let mut u = (*self.user(user_id).await?.ok_or_else(missing_account)?).clone();
+        u.props.0.insert("customStatus".into(), String::new());
+        self.update_user(u, true, false).await?;
+        Ok(())
+    }
+}
+
 /// `updateUserCustomStatus` / `SetCustomStatus`.
 async fn set_custom_status(
     St(app): St<State>,
@@ -668,29 +710,7 @@ async fn set_custom_status(
     };
     app.require_user(&s, &user_id).await?;
     cs.pre_save();
-    if !cs.emoji.is_empty() && !app.emoji_exists(&cs.emoji).await? {
-        return Err(AppError::bad_request("api.custom_status.set_custom_statuses.emoji_not_found", ""));
-    }
-    let mut u = (*app.user(&user_id).await?.ok_or_else(missing_account)?).clone();
-    set_custom_status_prop(&mut u, &cs);
-    app.update_user(u, true, false).await?;
-    // addRecentCustomStatus: newest first, one per text, at most 5.
-    let mut recent: Vec<CustomStatus> = match app.preference(&user_id, crate::preferences::CUSTOM_STATUS, "recent_custom_statuses").await? {
-        Some(p) if !p.value.is_empty() => serde_json::from_str(&p.value).unwrap_or_default(),
-        _ => vec![],
-    };
-    recent.retain(|r| r.text != cs.text);
-    recent.insert(0, cs);
-    recent.truncate(5);
-    let pref = Preference {
-        user_id: user_id.clone(),
-        category: crate::preferences::CUSTOM_STATUS.into(),
-        name: "recent_custom_statuses".into(),
-        value: serde_json::to_string(&recent).unwrap(),
-    };
-    if let Err(e) = app.update_preferences(&user_id, vec![pref]).await {
-        eprintln!("recent custom statuses of {user_id}: {}", e.message);
-    }
+    app.set_custom_status(&user_id, cs).await?;
     Ok(ok())
 }
 
@@ -699,9 +719,7 @@ async fn remove_custom_status(St(app): St<State>, Auth(s): Auth, Path(user_id): 
     let user_id = user_param(&s, &user_id)?;
     custom_status_disabled(&app)?;
     app.require_user(&s, &user_id).await?;
-    let mut u = (*app.user(&user_id).await?.ok_or_else(missing_account)?).clone();
-    u.props.0.insert("customStatus".into(), String::new());
-    app.update_user(u, true, false).await?;
+    app.remove_custom_status(&user_id).await?;
     Ok(ok())
 }
 

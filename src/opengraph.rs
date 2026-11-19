@@ -209,6 +209,44 @@ impl App {
         })
     }
 
+    /// `HTTPService.MakeClient(false)` for outgoing integration requests (custom slash commands, post actions):
+    /// internal addresses only as `AllowedUntrustedInternalConnections` lets through, redirects too.
+    pub fn integration_client(&self) -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            let allowed = Allowed(
+                self.cfg
+                    .str("ServiceSettings.AllowedUntrustedInternalConnections")
+                    .split(|c: char| c.is_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            );
+            let redirect_allowed = allowed.clone();
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .dns_resolver(Arc::new(FilteringResolver(allowed)))
+                .redirect(reqwest::redirect::Policy::custom(move |a| {
+                    if a.previous().len() >= 10 {
+                        a.error("stopped after 10 redirects")
+                    } else if !redirect_allowed.url(a.url()) {
+                        a.error("address forbidden")
+                    } else {
+                        a.follow()
+                    }
+                }))
+                .build()
+                .expect("http client")
+        })
+    }
+
+    /// Whether an integration URL with an IP literal host may be called (names are checked when resolved).
+    pub fn integration_url_allowed(&self, u: &Url) -> bool {
+        self.internal_url_allowed(u)
+    }
+
     fn internal_url_allowed(&self, u: &Url) -> bool {
         let allowed = Allowed(
             self.cfg

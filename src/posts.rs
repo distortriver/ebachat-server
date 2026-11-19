@@ -1154,12 +1154,19 @@ fn list_from_value(v: &Value) -> Option<PostList> {
 // ---------- create ----------
 
 /// `CreatePostFlags`.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct CreateFlags {
     pub set_online: bool,
     pub trigger_webhooks: bool,
     pub force_notification: bool,
     pub silent: bool,
+    /// `FromIncomingWebhook`: an integration's post (webhooks, slash command responses); the overrides below are
+    /// put back on it after `SanitizeProps`.
+    pub from_incoming_webhook: bool,
+    pub override_username: String,
+    pub override_icon_url: String,
+    pub override_icon_emoji: String,
+    pub webhook_display_name: String,
 }
 
 impl App {
@@ -1229,6 +1236,9 @@ impl App {
         if user.is_bot {
             p.insert("from_bot".into(), "true".into());
         }
+        if flags.from_incoming_webhook {
+            p.insert("from_webhook".into(), "true".into());
+        }
         if flags.force_notification {
             p.insert("force_notification".into(), crate::app::new_id().into());
         }
@@ -1237,6 +1247,18 @@ impl App {
         }
         if session.is_some_and(|s| s.is_oauth) {
             p.insert("from_oauth_app".into(), "true".into());
+        }
+        if flags.from_incoming_webhook {
+            for (k, v) in [
+                ("override_username", &flags.override_username),
+                ("override_icon_url", &flags.override_icon_url),
+                ("override_icon_emoji", &flags.override_icon_emoji),
+                ("webhook_display_name", &flags.webhook_display_name),
+            ] {
+                if !v.is_empty() {
+                    p.insert(k.into(), v.clone().into());
+                }
+            }
         }
         if !user.is_bot && !session.is_some_and(|s| s.is_user_access_token()) {
             p.remove("mm_blocks_actions");

@@ -270,7 +270,7 @@ impl App {
     }
 
     /// `CheckIfChannelIsRestrictedDM`: with `RestrictDirectMessage` = team, a DM or GM whose people share no team.
-    async fn restricted_dm(&self, c: &Channel) -> ApiResult<bool> {
+    pub(crate) async fn restricted_dm(&self, c: &Channel) -> ApiResult<bool> {
         if self.cfg.str("TeamSettings.RestrictDirectMessage") != "team" || (c.r#type != DIRECT && c.r#type != GROUP) {
             return Ok(false);
         }

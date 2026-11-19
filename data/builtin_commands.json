@@ -1,0 +1,407 @@
+[
+ {
+  "trigger": "away",
+  "display_name": "away",
+  "auto_complete_desc": "Set your status away",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "code",
+  "display_name": "code",
+  "auto_complete_desc": "Display text as a code block",
+  "auto_complete_hint": "[text]"
+ },
+ {
+  "trigger": "collapse",
+  "display_name": "collapse",
+  "auto_complete_desc": "Turn on auto-collapsing of image previews",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "dnd",
+  "display_name": "dnd",
+  "auto_complete_desc": "Do not disturb disables desktop and mobile push notifications.",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "echo",
+  "display_name": "echo",
+  "auto_complete_desc": "Echo back text from your account",
+  "auto_complete_hint": "'message' [delay in seconds]"
+ },
+ {
+  "trigger": "expand",
+  "display_name": "expand",
+  "auto_complete_desc": "Turn off auto-collapsing of image previews",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "groupmsg",
+  "display_name": "message",
+  "auto_complete_desc": "Sends a Group Message to the specified users",
+  "auto_complete_hint": "@[username1],@[username2] 'message'"
+ },
+ {
+  "trigger": "header",
+  "display_name": "header",
+  "auto_complete_desc": "Edit the channel header",
+  "auto_complete_hint": "[text]"
+ },
+ {
+  "trigger": "help",
+  "display_name": "help",
+  "auto_complete_desc": "Show Mattermost help message",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "invite",
+  "display_name": "invite",
+  "auto_complete_desc": "Invite a user to a channel",
+  "auto_complete_hint": "@[username]... ~[channel]..."
+ },
+ {
+  "trigger": "invite_people",
+  "display_name": "invite_people",
+  "auto_complete_desc": "Send an email invite to your Mattermost team",
+  "auto_complete_hint": "[name@domain.com ...]"
+ },
+ {
+  "trigger": "join",
+  "display_name": "join",
+  "auto_complete_desc": "Join the open channel",
+  "auto_complete_hint": "~[channel]"
+ },
+ {
+  "trigger": "kick",
+  "display_name": "kick",
+  "auto_complete_desc": "Remove a member from the channel",
+  "auto_complete_hint": "@[username]"
+ },
+ {
+  "trigger": "leave",
+  "display_name": "leave",
+  "auto_complete_desc": "Leave the current channel",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "logout",
+  "display_name": "logout",
+  "auto_complete_desc": "Logout of Mattermost",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "me",
+  "display_name": "me",
+  "auto_complete_desc": "Do an action",
+  "auto_complete_hint": "[message]"
+ },
+ {
+  "trigger": "mobile-logs",
+  "display_name": "mobile-logs",
+  "auto_complete_desc": "Manage mobile app log attachment for yourself or another user.",
+  "auto_complete_hint": "[on|off|status] [@username]"
+ },
+ {
+  "trigger": "msg",
+  "display_name": "message",
+  "auto_complete_desc": "Send Direct Message to a user",
+  "auto_complete_hint": "@[username] 'message'"
+ },
+ {
+  "trigger": "mute",
+  "display_name": "mute",
+  "auto_complete_desc": "Turns off desktop, email and push notifications for the current channel or the [channel] specified.",
+  "auto_complete_hint": "~[channel]"
+ },
+ {
+  "trigger": "offline",
+  "display_name": "offline",
+  "auto_complete_desc": "Set your status offline",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "online",
+  "display_name": "online",
+  "auto_complete_desc": "Set your status online",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "open",
+  "display_name": "open",
+  "auto_complete_desc": "Join the open channel",
+  "auto_complete_hint": "~[channel]"
+ },
+ {
+  "trigger": "purpose",
+  "display_name": "purpose",
+  "auto_complete_desc": "Edit the channel purpose",
+  "auto_complete_hint": "[text]"
+ },
+ {
+  "trigger": "remove",
+  "display_name": "remove",
+  "auto_complete_desc": "Remove a member from the channel",
+  "auto_complete_hint": "@[username]"
+ },
+ {
+  "trigger": "rename",
+  "display_name": "rename",
+  "auto_complete_desc": "Rename the channel",
+  "auto_complete_hint": "[text]",
+  "autocomplete_data": {
+   "Trigger": "rename",
+   "Hint": "[text]",
+   "HelpText": "Rename the channel",
+   "RoleID": "system_user",
+   "Arguments": [
+    {
+     "Name": "",
+     "HelpText": "[text]",
+     "Type": "TextInput",
+     "Required": true,
+     "Data": {
+      "Hint": "[text]",
+      "Pattern": ""
+     }
+    }
+   ],
+   "SubCommands": []
+  }
+ },
+ {
+  "trigger": "search",
+  "display_name": "search",
+  "auto_complete_desc": "Search text in messages",
+  "auto_complete_hint": "[text]"
+ },
+ {
+  "trigger": "secure-connection",
+  "display_name": "secure-connection",
+  "auto_complete_desc": "Invite secure connections for communication across Mattermost instances.",
+  "auto_complete_hint": "[action]",
+  "autocomplete_data": {
+   "Trigger": "secure-connection",
+   "Hint": "[action]",
+   "HelpText": "Add/remove secure connections. Available actions: create, accept, remove, status",
+   "RoleID": "system_user",
+   "Arguments": [],
+   "SubCommands": [
+    {
+     "Trigger": "create",
+     "Hint": "",
+     "HelpText": "Invite a secure connection",
+     "RoleID": "system_user",
+     "Arguments": [
+      {
+       "Name": "name",
+       "HelpText": "Secure connection name",
+       "Type": "TextInput",
+       "Required": true,
+       "Data": {
+        "Hint": "A unique name for the secure connection",
+        "Pattern": ""
+       }
+      },
+      {
+       "Name": "displayname",
+       "HelpText": "Secure connection display name",
+       "Type": "TextInput",
+       "Required": false,
+       "Data": {
+        "Hint": "A display name for the secure connection",
+        "Pattern": ""
+       }
+      },
+      {
+       "Name": "password",
+       "HelpText": "Invitation password",
+       "Type": "TextInput",
+       "Required": true,
+       "Data": {
+        "Hint": "Password to be used to encrypt the invitation",
+        "Pattern": ""
+       }
+      }
+     ],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "accept",
+     "Hint": "",
+     "HelpText": "Accept an invitation from an external Mattermost instance",
+     "RoleID": "system_user",
+     "Arguments": [
+      {
+       "Name": "name",
+       "HelpText": "Secure connection name",
+       "Type": "TextInput",
+       "Required": true,
+       "Data": {
+        "Hint": "A unique name for the secure connection",
+        "Pattern": ""
+       }
+      },
+      {
+       "Name": "displayname",
+       "HelpText": "Secure connection display name",
+       "Type": "TextInput",
+       "Required": false,
+       "Data": {
+        "Hint": "A display name for the secure connection",
+        "Pattern": ""
+       }
+      },
+      {
+       "Name": "password",
+       "HelpText": "Invitation password",
+       "Type": "TextInput",
+       "Required": true,
+       "Data": {
+        "Hint": "Password to be used to encrypt the invitation",
+        "Pattern": ""
+       }
+      },
+      {
+       "Name": "invite",
+       "HelpText": "Invitation from secure connection",
+       "Type": "TextInput",
+       "Required": true,
+       "Data": {
+        "Hint": "The encrypted invitation from a secure connection",
+        "Pattern": ""
+       }
+      }
+     ],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "remove",
+     "Hint": "",
+     "HelpText": "Removes a secure connection",
+     "RoleID": "system_user",
+     "Arguments": [
+      {
+       "Name": "connectionID",
+       "HelpText": "ID of secure connection to remove.",
+       "Type": "DynamicList",
+       "Required": true,
+       "Data": {
+        "FetchURL": "builtin:secure-connection"
+       }
+      }
+     ],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "status",
+     "Hint": "",
+     "HelpText": "Displays status for all secure connections",
+     "RoleID": "system_user",
+     "Arguments": [],
+     "SubCommands": []
+    }
+   ]
+  }
+ },
+ {
+  "trigger": "settings",
+  "display_name": "settings",
+  "auto_complete_desc": "Open the Settings dialog",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "share-channel",
+  "display_name": "share-channel",
+  "auto_complete_desc": "Shares the current channel with an external Mattermost instance.",
+  "auto_complete_hint": "[action]",
+  "autocomplete_data": {
+   "Trigger": "share-channel",
+   "Hint": "[action]",
+   "HelpText": "Available actions: invite, uninvite, unshare, status",
+   "RoleID": "system_user",
+   "Arguments": [],
+   "SubCommands": [
+    {
+     "Trigger": "invite",
+     "Hint": "",
+     "HelpText": "Invites an external Mattermost instance to the current shared channel",
+     "RoleID": "system_user",
+     "Arguments": [
+      {
+       "Name": "connectionID",
+       "HelpText": "ID of an existing secure connection. See `secure-connection` command to add a secure connection.",
+       "Type": "DynamicList",
+       "Required": true,
+       "Data": {
+        "FetchURL": "builtin:share-channel"
+       }
+      },
+      {
+       "Name": "readonly",
+       "HelpText": "Channel will be shared in read-only mode",
+       "Type": "TextInput",
+       "Required": false,
+       "Data": {
+        "Hint": "[readonly] - 'Y' or 'N'. Defaults to 'N'",
+        "Pattern": "Y|N|y|n"
+       }
+      }
+     ],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "uninvite",
+     "Hint": "",
+     "HelpText": "Uninvites a secure connection from this shared channel",
+     "RoleID": "system_user",
+     "Arguments": [
+      {
+       "Name": "connectionID",
+       "HelpText": "ID of secure connection to uninvite.",
+       "Type": "DynamicList",
+       "Required": true,
+       "Data": {
+        "FetchURL": "builtin:share-channel"
+       }
+      }
+     ],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "unshare",
+     "Hint": "",
+     "HelpText": "Unshares the current channel",
+     "RoleID": "system_user",
+     "Arguments": [],
+     "SubCommands": []
+    },
+    {
+     "Trigger": "status",
+     "Hint": "",
+     "HelpText": "Displays status for this shared channel",
+     "RoleID": "system_user",
+     "Arguments": [],
+     "SubCommands": []
+    }
+   ]
+  }
+ },
+ {
+  "trigger": "shortcuts",
+  "display_name": "shortcuts",
+  "auto_complete_desc": "Displays a list of keyboard shortcuts",
+  "auto_complete_hint": ""
+ },
+ {
+  "trigger": "shrug",
+  "display_name": "shrug",
+  "auto_complete_desc": "Adds ¯\\_(ツ)_/¯ to your message",
+  "auto_complete_hint": "[message]"
+ },
+ {
+  "trigger": "status",
+  "display_name": "status",
+  "auto_complete_desc": "Set or clear your status",
+  "auto_complete_hint": "[:emoji_name:] [status_message] or clear"
+ }
+]
