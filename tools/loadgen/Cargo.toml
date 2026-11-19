@@ -1,0 +1,16 @@
+[package]
+name = "loadgen"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Seeds the stand and runs the same load against the Go and the Rust server"
+
+[dependencies]
+futures-util = "0.3.34"
+rand = "0.10.4"
+reqwest = { version = "0.13.5", features = ["json"] }
+serde_json = "1.0.154"
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-tungstenite = "0.30.0"

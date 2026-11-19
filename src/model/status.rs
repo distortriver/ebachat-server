@@ -1,0 +1,29 @@
+// Based on Mattermost server/public/model/status.go, Copyright (c) 2015-present Mattermost, Inc.
+// Licensed under AGPL-3.0.
+
+use ebachat_macros::model;
+
+pub const ONLINE: &str = "online";
+pub const OFFLINE: &str = "offline";
+
+#[model(table = "status")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Status {
+    #[mm(column = "userid")]
+    pub user_id: String,
+    pub status: String,
+    pub manual: bool,
+    pub last_activity_at: i64,
+    #[mm(transient, omitempty)]
+    pub active_channel: String,
+    pub dnd_end_time: i64,
+    #[mm(skip_json)]
+    pub prev_status: String,
+}
+
+impl Status {
+    /// A user with no `Status` row: offline, as `GetUserStatusesByIds` fills them in.
+    pub fn offline(user_id: &str) -> Status {
+        Status { user_id: user_id.into(), status: OFFLINE.into(), ..Default::default() }
+    }
+}

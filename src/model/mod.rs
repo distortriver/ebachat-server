@@ -2,10 +2,14 @@
 //! sorted (`BTreeMap`, and `serde_json`'s default sorted `Map`).
 
 mod post;
+mod session;
+pub mod status;
 mod types;
 mod user;
 
 pub use post::Post;
+pub use session::Session;
+pub use status::Status;
 pub use types::{JsonText, StringArray, StringInterface, StringMap};
 pub use user::User;
 

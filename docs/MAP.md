@@ -134,6 +134,10 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   `GET /api/v4/plugins/webapp` answer as a server with no plugins.
 - **Web client: not served.** The server does not serve the webapp bundle, `/static/*` or the web routes. The web
   client is a separate deployment that talks to the API.
+- **No user limit.** An unlicensed 12.1 server refuses to create users past 250 (`maxUsersHardLimit`,
+  `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
+  on the database keeps working for existing users, but cannot add any: build it from source without the limit if
+  that is ever needed.
 - **Open:**
   - mobile push: `POST /notifications/ack` (7k) and the push proxy. Mobile is 10% of traffic.
   - bots: about 116 Lambdas (`node` UA) do email lookup → `channels/direct` → `posts`, and there are incoming

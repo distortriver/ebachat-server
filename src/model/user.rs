@@ -96,3 +96,22 @@ impl User {
         }
     }
 }
+
+impl User {
+    /// `App.SanitizeProfile` with the default privacy settings (`ShowEmailAddress`, `ShowFullName` on).
+    pub fn sanitize_profile(&mut self, as_admin: bool) {
+        // ClearNonProfileFields
+        self.password.clear();
+        self.mfa_secret.clear();
+        self.mfa_used_timestamps = Default::default();
+        self.email_verified = false;
+        self.allow_marketing = false;
+        self.last_password_update = 0;
+        if !as_admin {
+            self.auth_data = Some(String::new());
+            self.notify_props = Default::default();
+            self.failed_attempts = 0;
+        }
+        self.sanitize(true, true, false, as_admin, as_admin);
+    }
+}
