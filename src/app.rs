@@ -358,10 +358,16 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+/// `ServiceSettings.EnableDeveloper`: errors keep `detailed_error` only then, as Go's `WipeDetailed`.
+pub static DEVELOPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
+    fn into_response(mut self) -> Response {
         if self.status_code >= 500 {
             eprintln!("error {} {}: {}", self.status_code, self.id, self.detailed_error);
+        }
+        if !DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) {
+            self.detailed_error.clear();
         }
         let status = StatusCode::from_u16(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let rid = self.request_id.clone();
