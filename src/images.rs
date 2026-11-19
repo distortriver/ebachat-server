@@ -6,7 +6,6 @@
 
 use std::io::Cursor;
 
-use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use image::imageops::FilterType;
 use image::metadata::Orientation;
@@ -97,9 +96,14 @@ pub fn preview(img: &DynamicImage) -> DynamicImage {
     if img.width() > PREVIEW_WIDTH { resize(img, PREVIEW_WIDTH, 0) } else { img.clone() }
 }
 
+/// JPEG at quality 90 with 4:2:0 chroma, as Go's `image/jpeg` writes it.
 pub fn jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
+    let rgb = img.to_rgb8();
+    let (w, h) = (u16::try_from(rgb.width()).ok()?, u16::try_from(rgb.height()).ok()?);
     let mut out = vec![];
-    JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode_image(&DynamicImage::ImageRgb8(img.to_rgb8())).ok()?;
+    let mut e = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
+    e.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+    e.encode(rgb.as_raw(), w, h, jpeg_encoder::ColorType::Rgb).ok()?;
     Some(out)
 }
 

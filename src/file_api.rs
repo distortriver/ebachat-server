@@ -6,7 +6,7 @@
 // platform/shared/web/files.go, Copyright (c) 2015-present Mattermost, Inc. Licensed under AGPL-3.0.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use axum::Router;
 use axum::body::Body;
@@ -187,14 +187,32 @@ impl App {
         if !f.mime_type.starts_with("image") || f.mime_type == "image/svg+xml" || f.mini_preview.is_some() {
             return;
         }
-        let Ok(data) = self.files.read(&f.path).await else { return };
+        // Go tries again on every read; an image that cannot be decoded is not read whole again and again here.
+        static FAILED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
+        if FAILED.lock().unwrap().contains(&f.id) {
+            return;
+        }
+        let failed = || {
+            let mut s = FAILED.lock().unwrap();
+            if s.len() > 10_000 {
+                s.clear();
+            }
+            s.insert(f.id.clone());
+        };
+        let Ok(data) = self.files.read(&f.path).await else {
+            failed();
+            return;
+        };
         let mini = tokio::task::spawn_blocking(move || {
             images::decode_upright(&data).and_then(|(img, _)| images::mini_preview(&img))
         })
         .await
         .ok()
         .flatten();
-        let Some(mini) = mini else { return };
+        let Some(mini) = mini else {
+            failed();
+            return;
+        };
         f.mini_preview = Some(Base64(mini));
         if sqlx::query("UPDATE FileInfo SET MiniPreview = $1 WHERE Id = $2")
             .bind(&f.mini_preview)
@@ -203,7 +221,8 @@ impl App {
             .await
             .is_ok()
         {
-            self.invalidate_file_infos(&f.post_id, &[]);
+            // Go invalidates the post's entry only; the file's own entries would keep serving it without one.
+            self.invalidate_file_infos(&f.post_id, std::slice::from_ref(&f.id));
         }
     }
 
@@ -277,13 +296,19 @@ fn read_request(detail: impl Into<String>) -> AppError {
         .detail(detail)
 }
 
-fn too_large(len: i64, limit: i64) -> AppError {
+fn too_large(name: &str, len: i64, limit: i64) -> AppError {
     AppError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         "api.file.upload_file.too_large_detailed.app_error",
-        "Unable to upload file. File is too large.",
+        &format!("Unable to upload file {name}. {len} bytes exceeds the maximum allowed {limit} bytes."),
     )
-    .detail(format!("Length={len} Limit={limit}"))
+}
+
+fn wrong_client_ids(ids: usize, files: usize) -> AppError {
+    AppError::bad_request(
+        "api.file.upload_file.incorrect_number_of_client_ids.app_error",
+        &format!("Unable to upload file(s). Have {ids} client_ids for {files} files."),
+    )
 }
 
 /// `mime.TypeByExtension`: Go's built-in table, then the usual system types; text types get `charset=utf-8`.
@@ -339,8 +364,11 @@ impl Upload {
         if self.user_id == BOOKMARK_OWNER {
             return format!("{BOOKMARK_OWNER}/teams/{NO_TEAM}/channels/{}/{file_id}/", self.channel_id);
         }
-        let (y, m, d) = crate::users::civil_from_days(self.timestamp.div_euclid(86_400_000));
-        format!("{y:04}{m:02}{d:02}/teams/{NO_TEAM}/channels/{}/users/{}/{file_id}/", self.channel_id, self.user_id)
+        // `Timestamp.Format("20060102")` in the server's time zone (`TZ`).
+        let day = chrono::DateTime::from_timestamp_millis(self.timestamp)
+            .map(|t| t.with_timezone(&chrono::Local).format("%Y%m%d").to_string())
+            .unwrap_or_default();
+        format!("{day}/teams/{NO_TEAM}/channels/{}/users/{}/{file_id}/", self.channel_id, self.user_id)
     }
 }
 
@@ -355,7 +383,7 @@ where
         return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.file.upload_file.storage.app_error", "Unable to upload file. Image storage is not configured."));
     }
     if t.content_length > max {
-        return Err(too_large(t.content_length, max));
+        return Err(too_large(&t.name, t.content_length, max));
     }
     let ext = t.name.rfind('.').map(|i| &t.name[i..]).unwrap_or("");
     let mut f = FileInfo {
@@ -402,7 +430,7 @@ where
     }
     if written > max {
         let _ = app.files.remove(&f.path).await;
-        return Err(too_large(t.content_length, max));
+        return Err(too_large(&t.name, t.content_length, max));
     }
     f.size = written;
 
@@ -459,9 +487,8 @@ async fn process_image(app: &App, f: &mut FileInfo, t: &Upload, data: Vec<u8>) -
     if h.width as i64 * h.height as i64 > max_res {
         return Err(AppError::bad_request(
             "api.file.upload_file.large_image_detailed.app_error",
-            "Unable to upload image file. File is too large.",
-        )
-        .detail(format!("Width={} Height={}", h.width, h.height)));
+            &format!("{} dimensions ({} by {} pixels) exceed the limits.", t.name, h.width, h.height),
+        ));
     }
     f.has_preview_image = true;
     let stem = &t.name[..t.name.rfind('.').unwrap_or(t.name.len())];
@@ -515,15 +542,29 @@ async fn upload(
     if !app.cfg.bool("FileSettings.EnableFileAttachments") {
         return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.attachments.disabled.app_error", "File attachments have been disabled on this server."));
     }
+    // Go's `r.ContentLength`: -1 for a chunked body, 0 for none.
+    let chunked = headers.get(header::TRANSFER_ENCODING).is_some();
     let content_length: i64 = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
-        .unwrap_or(-1);
+        .unwrap_or(if chunked { -1 } else { 0 });
+    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let mut q = q;
+    let mut body = body;
+    if ct.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded")) {
+        // `r.ParseForm` reads such a body as a form (only `client_id` is taken from it); the upload is then empty.
+        let raw = axum::body::to_bytes(body, 10 << 20).await.map_err(|e| read_request(e.to_string()))?;
+        for (k, v) in parse_form(&raw).ok_or_else(|| read_request("invalid form body"))? {
+            if k == "client_id" {
+                q.insert(k, v);
+            }
+        }
+        body = Body::empty();
+    }
     if content_length == 0 {
         return Err(read_request("Content-Length should not be 0"));
     }
-    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let is_multipart = ct.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("multipart/form-data"));
     let resp = if is_multipart {
         let boundary = multer::parse_boundary(ct).map_err(|e| read_request(e.to_string()))?;
@@ -532,6 +573,43 @@ async fn upload(
         upload_simple(&app, &s, &q, content_length, body).await?
     };
     Ok((StatusCode::CREATED, axum::Json(resp)).into_response())
+}
+
+/// `url.ParseQuery`: None where Go fails (a `;`, a bad `%` escape).
+fn parse_form(raw: &[u8]) -> Option<Vec<(String, String)>> {
+    fn unescape(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                b'%' => {
+                    let h = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+                    out.push(u8::from_str_radix(h, 16).ok()?);
+                    i += 3;
+                }
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        Some(String::from_utf8_lossy(&out).into_owned())
+    }
+    let text = String::from_utf8_lossy(raw);
+    let mut out = vec![];
+    for kv in text.split('&').filter(|kv| !kv.is_empty()) {
+        if kv.contains(';') {
+            return None;
+        }
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        out.push((unescape(k)?, unescape(v)?));
+    }
+    Some(out)
 }
 
 fn bookmark(q: &HashMap<String, String>) -> bool {
@@ -547,10 +625,10 @@ async fn check_upload_channel(app: &App, s: &Session, channel_id: &str, restrict
         return Err(AppError::forbidden_perm(perm::UPLOAD_FILE));
     }
     let c = app.channel(channel_id).await?.ok_or_else(|| {
-        AppError::bad_request("api.file.upload_file.get_channel.app_error", "Couldn't get the channel.")
+        AppError::bad_request("api.file.upload_file.get_channel.app_error", "Cannot upload file to restricted DM")
     })?;
     if restricted_check && app.restricted_dm(&c).await? {
-        return Err(AppError::bad_request("api.file.upload_file.restricted_dm.error", "Cannot upload a file to this direct message channel."));
+        return Err(AppError::bad_request("api.file.upload_file.restricted_dm.error", "Cannot upload file to restricted DM"));
     }
     Ok(())
 }
@@ -605,7 +683,11 @@ async fn upload_multipart(
         let filename = field.file_name().unwrap_or("").to_string();
         if filename.is_empty() {
             let mut v = field.bytes().await.map_err(|e| {
-                AppError::bad_request("api.file.upload_file.read_form_value.app_error", "Unable to read form value.").detail(e.to_string())
+                AppError::bad_request(
+                    "api.file.upload_file.read_form_value.app_error",
+                    &format!("Unable to upload file(s). Error reading the value for {formname}."),
+                )
+                .detail(e.to_string())
             })?;
             v.truncate(MAX_FORM_VALUE);
             let v = String::from_utf8_lossy(&v).into_owned();
@@ -669,7 +751,7 @@ async fn upload_multipart(
         }
         check_upload_channel(app, s, &channel_id, false).await?;
         if !client_ids.is_empty() && client_ids.len() != files.len() {
-            return Err(AppError::bad_request("api.file.upload_file.incorrect_number_of_client_ids.app_error", "Unable to upload files. Have client_ids for files, but the counts differ."));
+            return Err(wrong_client_ids(client_ids.len(), files.len()));
         }
         for (i, (name, data)) in files.into_iter().enumerate() {
             let t = Upload { name: base(&name), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1 };
@@ -682,7 +764,7 @@ async fn upload_multipart(
         return Ok(UploadResponse { file_infos: infos, client_ids: Some(resp_ids) });
     }
     if expect_client_ids && client_ids.len() != infos.len() {
-        return Err(AppError::bad_request("api.file.upload_file.incorrect_number_of_client_ids.app_error", "Unable to upload files. Have client_ids for files, but the counts differ."));
+        return Err(wrong_client_ids(client_ids.len(), infos.len()));
     }
     Ok(UploadResponse { file_infos: infos, client_ids: Some(resp_ids) })
 }
@@ -825,7 +907,7 @@ async fn serve_file(
         h.insert(k, HeaderValue::from_static(v));
     }
     file_headers(&mut h, content_type, force_download, filename);
-    let not_found = |e: anyhow::Error| AppError::not_found("api.file.file_reader.app_error", "Unable to read the file.").detail(e.to_string());
+    let not_found = |e: anyhow::Error| AppError::not_found("api.file.file_reader.app_error", "Unable to get a file reader.").detail(e.to_string());
     let size = app.files.size(path).await.map_err(not_found)?;
     let modified = update_at / 1000;
     if update_at > 0 {
@@ -899,10 +981,10 @@ async fn get_file(
         .bind(&id)
         .fetch_optional(&app.db)
         .await?
-        .ok_or_else(|| AppError::not_found("api.file.get_file_info.app_error", "Unable to get the file info."))?;
+        .ok_or_else(|| AppError::not_found("api.file.get_file_info.app_error", "Failed to get file info."))?;
     app.channel_or_404(&f.channel_id).await?;
     if f.delete_at != 0 {
-        return Err(AppError::not_found("api.file.get_file_info.app_error", "Unable to get the file info."));
+        return Err(AppError::not_found("api.file.get_file_info.app_error", "Failed to get file info."));
     }
     app.check_file_access(&s, &f).await?;
     serve_file(&app, &f.path, &f.name, &f.mime_type, f.update_at, truthy(&q.download), &method, &headers, None).await
@@ -970,7 +1052,7 @@ async fn get_link(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, hea
         return Err(AppError::invalid_url_param("file_id"));
     }
     if !app.cfg.bool("FileSettings.EnablePublicLink") {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled"));
+        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled."));
     }
     let f = app.readable_file_info(&s, &id).await?;
     if f.post_id.is_empty() && f.creator_id != BOOKMARK_OWNER {
@@ -993,7 +1075,7 @@ async fn get_public(
         return Err(AppError::invalid_url_param("file_id"));
     }
     if !app.cfg.bool("FileSettings.EnablePublicLink") {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled"));
+        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled."));
     }
     let f = app.file_info(&id).await?.ok_or_else(get_info_error)?;
     let want = public_link_hash(&f.id, app.cfg.str("FileSettings.PublicLinkSalt"));
@@ -1210,10 +1292,12 @@ async fn text_search_config(app: &App) -> String {
 /// `SqlFileInfoStore.Search`: at most 100, newest first; errors give nothing, as Go logs and returns empty.
 async fn search_store(app: &App, list: &[SearchParams], user_id: &str, team_id: &str) -> Vec<FileInfo> {
     let cfg = text_search_config(app).await;
-    let cols = select().trim_start_matches("SELECT ").trim_end_matches(" FROM FileInfo");
-    let cols: String = cols
-        .split(", ")
-        .map(|c| if c.starts_with("COALESCE(") { c.replacen("COALESCE(", "COALESCE(FileInfo.", 1) } else { format!("FileInfo.{c}") })
+    let cols: String = <FileInfo as db::Table>::COLUMNS
+        .iter()
+        .map(|c| match *c {
+            "channelid" | "content" | "remoteid" => format!("COALESCE(FileInfo.{c}, '') AS {c}"),
+            c => format!("FileInfo.{c}"),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut sql = format!(
