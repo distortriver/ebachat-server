@@ -78,7 +78,8 @@ pub struct Caches {
     pub status: Lru<String, Status>,
     // app
     pub seen_pending_post_ids: Lru<String, String>,
-    pub open_graph: Lru<String, Arc<serde_json::Value>>,
+    /// `platform.LinkCache`: link metadata by `{hash(url, hour):x}` (see `opengraph.rs`).
+    pub open_graph: Lru<String, Arc<crate::file_api::LinkMeta>>,
     // store: users
     pub user: Lru<String, Arc<User>>,
     pub all_profiles: Lru<(), Arc<Vec<Arc<User>>>>,

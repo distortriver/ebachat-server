@@ -76,4 +76,41 @@ impl FileStore {
         self.store.delete(&self.path(p)).await?;
         Ok(())
     }
+
+    /// A file read as a stream, a range of its bytes or whole.
+    pub async fn stream(&self, p: &str, range: Option<std::ops::Range<u64>>) -> anyhow::Result<Reading> {
+        let opts = object_store::GetOptions { range: range.map(object_store::GetRange::Bounded), ..Default::default() };
+        let r = self.store.get_opts(&self.path(p), opts).await?;
+        let size = r.meta.size;
+        Ok(Reading { stream: r.into_stream(), size })
+    }
+
+    /// A file written in parts as they come, so that an upload never sits whole in memory.
+    pub async fn writer(&self, p: &str) -> anyhow::Result<Writer> {
+        let upload = self.store.put_multipart(&self.path(p)).await?;
+        Ok(Writer(object_store::WriteMultipart::new_with_chunk_size(upload, 5 * 1024 * 1024)))
+    }
+}
+
+/// A file being read: its bytes as they arrive, and the whole object's size.
+pub struct Reading {
+    pub stream: futures_util::stream::BoxStream<'static, object_store::Result<Bytes>>,
+    pub size: u64,
+}
+
+pub struct Writer(object_store::WriteMultipart);
+
+impl Writer {
+    pub async fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.0.wait_for_capacity(4).await?;
+        self.0.write(data);
+        Ok(())
+    }
+    pub async fn finish(self) -> anyhow::Result<()> {
+        self.0.finish().await?;
+        Ok(())
+    }
+    pub async fn abort(self) {
+        let _ = self.0.abort().await;
+    }
 }
