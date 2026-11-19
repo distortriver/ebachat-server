@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let app = App::new(db, cfg)?;
     app.hub.set_app(&app);
     ebachat_server::status::spawn_jobs(app.clone());
+    ebachat_server::reminders::spawn(app.clone());
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("listening on {listen}");
     axum::serve(listener, api::router(app)).await?;

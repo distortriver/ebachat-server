@@ -13,12 +13,14 @@ pub mod files;
 pub mod hub;
 pub mod i18n;
 pub mod images;
+pub mod integrations;
 pub mod model;
 pub mod notify;
 pub mod opengraph;
 pub mod password;
 pub mod perm;
 pub mod posts;
+pub mod reminders;
 pub mod preferences;
 pub mod reactions;
 pub mod search;
@@ -33,6 +35,7 @@ pub mod user_edit;
 pub mod user_image;
 pub mod user_lists;
 pub mod users;
+pub mod webhooks;
 
 /// What the API reports as its version: Mattermost's, whose API this is.
 pub const SERVER_VERSION: &str = "12.1.0";

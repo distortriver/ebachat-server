@@ -115,6 +115,8 @@ pub struct Caches {
     pub emoji_by_id: Lru<String, Option<Arc<Emoji>>>,
     pub emoji_by_name: Lru<String, Option<Arc<Emoji>>>,
     pub terms_of_service: Lru<String, Arc<serde_json::Value>>,
+    /// `Webhook`: incoming webhooks by id.
+    pub webhook: Lru<String, Arc<crate::webhooks::IncomingWebhook>>,
 }
 
 impl Caches {
@@ -145,6 +147,7 @@ impl Caches {
             emoji_by_id: Lru::new(5000, m(30)),
             emoji_by_name: Lru::new(5000, m(30)),
             terms_of_service: Lru::new(20000, m(30)),
+            webhook: Lru::new(25000, m(15)),
         }
     }
 

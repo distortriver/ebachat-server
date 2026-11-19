@@ -66,6 +66,8 @@ fn routes(app: State) -> Router {
         .merge(crate::file_api::routes())
         .merge(crate::emoji::routes())
         .merge(crate::preferences::routes())
+        .merge(crate::webhooks::routes())
+        .merge(crate::integrations::routes())
         .merge(crate::teams::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)

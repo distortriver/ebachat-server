@@ -141,7 +141,7 @@ impl App {
         .ok()
         .flatten();
         let bytes = r.and_then(|r| r.0).unwrap_or(0) as i64;
-        *SIZE.get_or_init(|| (bytes / 4).max(262_144))
+        *SIZE.get_or_init(|| (bytes / 4).max(crate::posts::MAX_POST_SIZE as i64))
     }
 
     /// The public half of the `AsymmetricSigningKey` (P-256), as DER SubjectPublicKeyInfo in base64.

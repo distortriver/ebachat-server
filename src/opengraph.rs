@@ -209,6 +209,60 @@ impl App {
         })
     }
 
+    fn allowed_untrusted(&self) -> Allowed {
+        Allowed(
+            self.cfg
+                .str("ServiceSettings.AllowedUntrustedInternalConnections")
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    /// `HTTPService.MakeClient(false)` for integrations: no internal addresses unless allowed, Go's redirects.
+    pub fn integration_client(&self) -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            let allowed = self.allowed_untrusted();
+            let redirect_allowed = allowed.clone();
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .dns_resolver(Arc::new(FilteringResolver(allowed)))
+                .redirect(reqwest::redirect::Policy::custom(move |a| {
+                    if a.previous().len() >= 10 {
+                        a.error("stopped after 10 redirects")
+                    } else if !redirect_allowed.url(a.url()) {
+                        a.error("address forbidden")
+                    } else {
+                        a.follow()
+                    }
+                }))
+                .build()
+                .expect("http client")
+        })
+    }
+
+    /// `HTTPService.MakeClient(true)`: this server's own plugin routes.
+    pub fn trusted_client(&self) -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .build()
+                .expect("http client")
+        })
+    }
+
+    /// An IP-literal URL passes the same checks as a resolved address (the resolver never sees it).
+    pub fn untrusted_url_allowed(&self, u: &Url) -> bool {
+        self.allowed_untrusted().url(u)
+    }
+
     fn internal_url_allowed(&self, u: &Url) -> bool {
         let allowed = Allowed(
             self.cfg
