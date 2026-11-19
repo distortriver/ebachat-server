@@ -69,7 +69,7 @@ admins at `GET /api/v4/ebachat/caches`; Go exports the same counters as Promethe
 
 | Run | Result |
 | --- | --- |
-| Rust `:8066` | 38/38: every cache hits, and every write is visible at once |
+| Rust `:8066` | 39/39: every cache hits, and every write is visible at once |
 | Go `:8065`, the same steps (answers only) | 21/22 |
 
 **Go's one failure is a bug in Go, not in the check.**
