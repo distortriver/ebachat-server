@@ -7,8 +7,9 @@ description = "Chat server in Rust, compatible with the Mattermost database sche
 publish = false
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0.104"
-axum = { version = "0.8.9", features = ["ws"] }
+axum = { version = "0.8.9", features = ["ws", "multipart"] }
 base64 = "0.23.1"
 bcrypt = "0.19.3"
 bytes = "1.12.2"

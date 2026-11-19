@@ -34,6 +34,7 @@ impl App {
     pub fn new(db: PgPool, cfg: Config) -> anyhow::Result<State> {
         let caches = Caches::new(cfg.i64("ServiceSettings.SessionCacheInMinutes").max(1) as u64);
         let files = FileStore::new(&cfg)?;
+        DEVELOPER.store(cfg.bool("ServiceSettings.EnableDeveloper"), std::sync::atomic::Ordering::Relaxed);
         Ok(Arc::new(App { db, cfg, caches, hub: Hub::default(), files, offline_queue: Default::default() }))
     }
 
@@ -297,7 +298,7 @@ impl AppError {
     pub fn new(status: StatusCode, id: &str, message: &str) -> AppError {
         AppError {
             id: id.into(),
-            message: message.into(),
+            message: crate::i18n::t(id).unwrap_or(message).into(),
             detailed_error: String::new(),
             request_id: new_id(),
             status_code: status.as_u16(),
@@ -305,6 +306,14 @@ impl AppError {
     }
     pub fn detail(mut self, d: impl Into<String>) -> AppError {
         self.detailed_error = d.into();
+        self
+    }
+    /// The same error under another id (and its message).
+    pub fn with_id(mut self, id: &str) -> AppError {
+        self.id = id.into();
+        if let Some(m) = crate::i18n::t(id) {
+            self.message = m.into();
+        }
         self
     }
     /// `SetInvalidParam`.
@@ -366,6 +375,7 @@ impl IntoResponse for AppError {
         if self.status_code >= 500 {
             eprintln!("error {} {}: {}", self.status_code, self.id, self.detailed_error);
         }
+        // Go blocks out the detail when not in developer mode.
         if !DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) {
             self.detailed_error.clear();
         }

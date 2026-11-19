@@ -288,12 +288,18 @@ impl App {
         if self.has_perm(s, permission).await { Ok(()) } else { Err(AppError::forbidden_perm(permission)) }
     }
 
-    /// `SessionHasPermissionToUser`: oneself, or `edit_other_users`.
+    /// `SessionHasPermissionToUser`: system admins, oneself, or `edit_other_users` over a non-admin.
     pub async fn user_perm(&self, s: &Session, user_id: &str) -> bool {
         if user_id.is_empty() {
             return false;
         }
-        s.user_id == user_id || self.has_perm(s, EDIT_OTHER_USERS).await
+        if self.has_perm(s, MANAGE_SYSTEM).await || s.user_id == user_id {
+            return true;
+        }
+        if !self.has_perm(s, EDIT_OTHER_USERS).await {
+            return false;
+        }
+        matches!(self.user(user_id).await, Ok(Some(u)) if !u.is_system_admin())
     }
     pub async fn require_user(&self, s: &Session, user_id: &str) -> ApiResult<()> {
         if self.user_perm(s, user_id).await { Ok(()) } else { Err(AppError::forbidden_perm(EDIT_OTHER_USERS)) }

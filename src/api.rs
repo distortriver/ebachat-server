@@ -3,8 +3,7 @@
 use axum::http::Uri;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{Json, Router};
-use serde_json::json;
+use axum::Router;
 
 use crate::app::{AppError, State};
 
@@ -53,15 +52,21 @@ pub fn router(app: State) -> Router {
 
 fn routes(app: State) -> Router {
     Router::new()
-        .route("/api/v4/system/ping", get(|| async { Json(json!({"status": "OK"})) }))
         .route("/api/v4/websocket", get(crate::hub::connect))
         .merge(crate::users::routes())
+        .merge(crate::user_lists::routes())
+        .merge(crate::user_edit::routes())
+        .merge(crate::user_image::routes())
+        .merge(crate::system::routes())
+        .merge(crate::commands::routes())
         .merge(crate::status::routes())
         .merge(crate::channels::routes())
         .merge(crate::sidebar::routes())
         .merge(crate::posts::routes())
         .merge(crate::file_api::routes())
         .merge(crate::emoji::routes())
+        .merge(crate::preferences::routes())
+        .merge(crate::teams::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(app)

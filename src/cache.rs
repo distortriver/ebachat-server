@@ -42,6 +42,14 @@ impl<K: Hash + Eq, V: Clone> Lru<K, V> {
     pub fn put(&self, k: K, v: V) {
         self.m.lock().unwrap().put(k, (v, Instant::now()));
     }
+    /// An entry that lives `ttl` (shorter than the cache's own), as Go's `SetWithExpiry`.
+    pub fn put_for(&self, k: K, v: V, ttl: Duration) {
+        let at = match self.ttl {
+            Some(t) if t > ttl => Instant::now().checked_sub(t - ttl).unwrap_or_else(Instant::now),
+            _ => Instant::now(),
+        };
+        self.m.lock().unwrap().put(k, (v, at));
+    }
     pub fn remove<Q>(&self, k: &Q)
     where
         K: Borrow<Q>,
