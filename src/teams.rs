@@ -921,6 +921,8 @@ async fn invite_by_email(
             AppError::bad_request("api.team.invite_members.invalid_email.app_error", "The following email addresses do not belong to an accepted domain.")
         } else if deactivated.is_some() {
             AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "This account is deactivated.")
+        } else if app.cfg.str("EmailSettings.SMTPServer") == "localhost" && app.cfg.str("EmailSettings.SMTPPort") == "10025" {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email_with_defaults.app_error", "")
         } else {
             AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email.app_error", "Error while sending the email")
         };

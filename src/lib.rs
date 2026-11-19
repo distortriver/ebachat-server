@@ -18,6 +18,7 @@ pub mod sidebar;
 pub mod status;
 pub mod system;
 pub mod teams;
+pub mod user_agent;
 pub mod user_edit;
 pub mod user_image;
 pub mod user_lists;

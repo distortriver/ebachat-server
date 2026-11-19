@@ -15,7 +15,7 @@ pub struct Session {
     pub last_activity_at: i64,
     pub user_id: String,
     pub device_id: String,
-    #[mm(column = "voipdeviceid", omitempty)]
+    #[mm(column = "voipdeviceid")]
     pub voip_device_id: String,
     pub roles: String,
     #[mm(column = "isoauth")]
@@ -24,7 +24,7 @@ pub struct Session {
     pub props: StringMap,
     #[mm(transient)]
     pub team_members: Vec<TeamMember>,
-    #[mm(transient, omitempty)]
+    #[mm(transient)]
     pub local: bool,
 }
 

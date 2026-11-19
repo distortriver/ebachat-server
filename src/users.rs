@@ -409,17 +409,17 @@ async fn do_login(app: &State, headers: &HeaderMap, b: LoginBody) -> ApiResult<R
 
     // DoLogin
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let mobile = !b.device_id.is_empty() || ua.contains("Mattermost Mobile") || ua.contains("Mobile");
+    let mobile = !b.device_id.is_empty() || crate::user_agent::is_mobile(ua);
     let mut s = Session { user_id: user.id.clone(), roles: user.roles.clone(), device_id: b.device_id.clone(), ..Default::default() };
     let p = &mut s.props.0;
-    p.insert("is_mobile".into(), mobile.to_string());
-    p.insert("is_saml".into(), "false".into());
-    p.insert("is_oauth_user".into(), "false".into());
+    p.insert("isMobile".into(), mobile.to_string());
+    p.insert("isSaml".into(), "false".into());
+    p.insert("isOAuthUser".into(), "false".into());
     p.insert(session::PROP_CSRF.into(), new_id());
-    let (platform, os, browser) = user_agent_props(ua);
-    p.insert("platform".into(), platform);
-    p.insert("os".into(), os);
-    p.insert("browser".into(), browser);
+    let agent = crate::user_agent::parse(ua);
+    p.insert("platform".into(), agent.platform.into());
+    p.insert("os".into(), agent.os.into());
+    p.insert("browser".into(), agent.browser);
     p.insert("is_guest".into(), user.is_guest().to_string());
     let hours = if mobile {
         app.cfg.i64("ServiceSettings.SessionLengthMobileInHours")
@@ -501,21 +501,6 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// A rough `getPlatformName` / `getOSName` / `getBrowserName` from the user agent.
-fn user_agent_props(ua: &str) -> (String, String, String) {
-    let platform = if ua.contains("Windows") {
-        "Windows"
-    } else if ua.contains("Macintosh") || ua.contains("Mac OS") {
-        "Macintosh"
-    } else if ua.contains("Linux") {
-        "Linux"
-    } else {
-        "Unknown"
-    };
-    let browser = ua.split_whitespace().next().unwrap_or("Unknown").to_string();
-    (platform.into(), platform.into(), browser)
 }
 
 async fn logout(St(app): St<State>, Auth(s): Auth) -> Response {

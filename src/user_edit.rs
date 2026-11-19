@@ -974,8 +974,11 @@ async fn get_sessions(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<Str
     app.require_user(&s, &user_id).await?;
     let sql = format!("{} WHERE userid = $1 ORDER BY lastactivityat DESC", Session::SELECT);
     let mut sessions: Vec<Session> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&user_id).fetch_all(&app.db).await?;
+    // SqlSessionStore.GetSessions: each with the user's team memberships.
+    let members = app.session_team_members(&user_id).await?;
     for x in &mut sessions {
         x.sanitize();
+        x.team_members = members.clone();
     }
     Ok(Json(sessions))
 }
