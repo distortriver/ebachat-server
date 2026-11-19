@@ -1583,9 +1583,7 @@ impl App {
             .fetch_all(&self.db)
             .await?;
         for t in &mut teams {
-            if !self.has_team_perm(s, &t.id, perm::MANAGE_TEAM).await {
-                t.sanitize();
-            }
+            self.sanitize_team(s, t).await;
         }
         Ok(teams)
     }
