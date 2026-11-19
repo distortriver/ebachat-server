@@ -13,6 +13,7 @@ pub fn router(app: State) -> Router {
         .merge(crate::user_edit::routes())
         .merge(crate::user_image::routes())
         .merge(crate::system::routes())
+        .merge(crate::commands::routes())
         .merge(crate::status::routes())
         .merge(crate::channels::routes())
         .merge(crate::sidebar::routes())
