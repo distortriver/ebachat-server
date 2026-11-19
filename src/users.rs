@@ -206,11 +206,12 @@ async fn users_by_ids(
         None | Some("") => 0,
         Some(v) => v.parse::<i64>().map_err(|_| AppError::invalid_param("since"))?,
     };
-    let mut users: Vec<Arc<User>> = if app.sees_everyone(&s).await {
-        app.users(&ids).await?
-    } else {
-        let cond = format!("u.id = ANY($1) AND {}", restriction(&s.user_id));
-        load_users(&app, &cond, &ids).await?.into_iter().map(Arc::new).collect()
+    let mut users: Vec<Arc<User>> = match app.restriction_cond(&s).await? {
+        None => app.users(&ids).await?,
+        Some(r) => {
+            let cond = format!("u.id = ANY($1) AND {r}");
+            load_users(&app, &cond, &ids).await?.into_iter().map(Arc::new).collect()
+        }
     };
     if since > 0 {
         users.retain(|u| u.update_at > since);
@@ -235,25 +236,13 @@ async fn users_by_usernames(
         return Err(AppError::invalid_param("usernames"));
     }
     let mut cond = "u.username = ANY($1)".to_string();
-    if !app.sees_everyone(&s).await {
-        cond = format!("{cond} AND {}", restriction(&s.user_id));
+    if let Some(r) = app.restriction_cond(&s).await? {
+        cond = format!("{cond} AND {r}");
     }
     let mut users = load_users(&app, &cond, &names).await?;
     users.sort_by(|a, b| a.username.cmp(&b.username));
     let show = app.show(&s).await;
     Ok(Json(users.iter().map(|u| sanitized(u, show)).collect()))
-}
-
-/// `applyViewRestrictionsFilter` for a viewer without `view_members`: people in their teams or channels.
-/// `viewer` is a checked id.
-pub fn restriction(viewer: &str) -> String {
-    assert!(is_valid_id(viewer));
-    format!(
-        "(u.id IN (SELECT r.UserId FROM TeamMembers r WHERE r.DeleteAt = 0 AND r.TeamId IN
-            (SELECT TeamId FROM TeamMembers WHERE UserId = '{viewer}' AND DeleteAt = 0))
-          OR u.id IN (SELECT r.UserId FROM ChannelMembers r WHERE r.ChannelId IN
-            (SELECT ChannelId FROM ChannelMembers WHERE UserId = '{viewer}')))"
-    )
 }
 
 /// A bind of [`query_users`].

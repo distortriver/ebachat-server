@@ -165,6 +165,17 @@ def main():
     s.check("membership: removed → refused at once",
             s.call(b, "GET", f"/channels/{priv['id']}", ok=None)[0] == 403)
 
+    # --- member roles (GetSchemeRolesForChannel → GetScheme): a promotion is visible at once.
+    s.call(a, "PUT", f"/channels/{cid}/members/{other['id']}/roles", {"roles": "channel_user channel_admin"})
+    got = s.call(b, "GET", f"/channels/{cid}/members/me")[1]
+    s.check("member roles: promotion visible at once", got["scheme_admin"] is True and "channel_admin" in got["roles"],
+            got["roles"])
+    s.call(a, "PUT", f"/channels/{cid}/members/{other['id']}/roles", {"roles": "channel_user"})
+    got = s.call(b, "GET", f"/channels/{cid}/members/me")[1]["scheme_admin"]
+    s.check("member roles: demotion visible at once", got is False, got)
+    code = s.call(a, "PUT", f"/channels/{cid}/members/{other['id']}/roles", {"roles": "system_admin"}, ok=None)[0]
+    s.check("member roles: a system role refused", code == 400, code)
+
     # --- posts: since-cache ("nothing new"), then a new post shows.
     now = int(time.time() * 1000)
     st = s.stats()

@@ -80,6 +80,7 @@ fn routes(app: State) -> Router {
         .merge(crate::webhooks::routes())
         .merge(crate::integrations::routes())
         .merge(crate::teams::routes())
+        .merge(crate::schemes::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(app)

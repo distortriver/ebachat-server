@@ -57,35 +57,70 @@ These are not caches, but they also take load off Postgres.
 
 ## Verification
 
-**`tools/diff/caches.py`** checks every cache that EBAChat's paths read, one server at a time on the database:
+**Every cache in the tables above that the Rust server has is checked.** Each one must:
 
-1. It does the cached read twice.
-2. It does the write that must invalidate it.
-3. It reads again.
+- hit when its read is repeated;
+- drop the entry on the write that makes it stale;
+- answer fresh after that write.
 
-The answers must show the write at once. On the Rust server, the counters must also show a hit for the repeated
-read and an invalidation for the write. Each cache keeps Go's hit, miss and invalidation counters, served to system
-admins at `GET /api/v4/ebachat/caches`; Go exports the same counters as Prometheus metrics.
+Each cache keeps Go's hit, miss and invalidation counters. System admins can read them at
+`GET /api/v4/ebachat/caches`; Go exports the same counters as Prometheus metrics.
+
+**Caches on EBAChat's paths, through the API (`tools/diff/caches.py`).** One server at a time on the database:
+
+1. Do the cached read twice.
+2. Do the write that must invalidate it.
+3. Read again.
+
+On Rust the counters are checked too; on Go only the answers.
 
 | Run | Result |
 | --- | --- |
-| Rust `:8066` | 39/39: every cache hits, and every write is visible at once |
-| Go `:8065`, the same steps (answers only) | 21/22 |
+| Rust `:8066` | 42/42 |
+| Go `:8065`, the same steps (answers only) | 24/25 |
+
+The checks cover:
+
+- sessions (a revoked token is refused at once);
+- statuses;
+- profiles, and all profiles;
+- channels by id and by name;
+- member and pinned counts;
+- memberships (joins and removals change access at once);
+- member roles;
+- notify props, and profiles in a channel;
+- the last post time (`posts?since`);
+- pending post ids (a retry gives the same post);
+- reactions, file infos, custom emoji;
+- link previews (permalink);
+- roles;
+- incoming webhooks (a deleted hook is refused at once).
+
+**Caches Go reads only off EBAChat's paths (`tests/caches.rs`).** These run against the stand's database, calling
+the same functions directly. All 4 pass.
+
+| Go cache | Where Go reads it | What the test calls |
+| --- | --- | --- |
+| `LastPost` | `App.GetPosts`, used by AI recaps | `get_posts_cached`: the first page hits, a new post makes it fresh |
+| `Team` (`GetUserTeamIds`) | `GetViewUsersRestrictions`, for users without `view_members` | `view_restrictions` and `can_see_user` of such a user: hit, then dropped on a team change |
+| `Scheme` | `GetScheme`, `GetSchemeRolesForChannel`/`Team`: member role updates, the system console | `scheme`: hit |
+| `TermsOfService` | the latest terms, for licensed custom terms of service | `latest_terms_of_service_id`: hit |
+
+The Rust server reads them where Go does:
+
+- **View restrictions** are ported as `GetViewUsersRestrictions`. They use the team ids and memberships caches.
+  They are applied to user reads, lists and searches, and to `UserCanSeeOtherUser`.
+- **Member role updates** read schemes through the scheme cache:
+  - `PUT /channels/{channel_id}/members/{user_id}/roles`;
+  - `PUT /teams/{team_id}/members/{user_id}/roles`;
+  - `GET /schemes/{scheme_id}`.
 
 **Go's one failure is a bug in Go, not in the check.**
 
 - Go caches a DM by name under the key `"" + name`, but `InvalidateCacheForChannel` drops `"dm" + name`.
 - So after a DM's header changes, `POST /channels/direct` answers with the old channel for up to 15 minutes.
-- The Rust server drops both keys. This is the one place where it deliberately differs from Go's caching.
-
-**Caches that show no hits.** Go does not read them on EBAChat's paths either:
-
-| Cache | Where Go reads it |
-| --- | --- |
-| `LastPost` | `GetPosts` (`GetPostsPage` reads the store with `allowFromCache` false) |
-| `Team` (`GetUserTeamIds`) | view restrictions, only for users without `view_members` |
-| `Scheme` | role updates in the system console |
-| `TermsOfService` | custom terms of service, a licensed feature |
+- The Rust server caches DMs by name the same way, and the repeated read hits, but it drops both keys. This is the
+  one place where its caching deliberately differs from Go's, and only in being fresh.
 
 **Rules to know:**
 

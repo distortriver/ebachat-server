@@ -479,26 +479,7 @@ impl App {
 
     /// `UserCanSeeOtherUser`: without `view_members`, only people in a shared team or channel.
     pub async fn user_can_see(&self, s: &Session, other: &str) -> ApiResult<bool> {
-        if s.user_id == other || self.has_perm(s, perm::VIEW_MEMBERS).await {
-            return Ok(true);
-        }
-        let mut teams = vec![];
-        for tm in &s.team_members {
-            if self.roles_grant(&tm.roles, perm::VIEW_MEMBERS).await {
-                teams.push(tm.team_id.clone());
-            }
-        }
-        let shared: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM TeamMembers WHERE UserId = $1 AND TeamId = ANY($2) AND DeleteAt = 0)
-                 OR EXISTS (SELECT 1 FROM ChannelMembers a JOIN ChannelMembers b ON a.ChannelId = b.ChannelId
-                            WHERE a.UserId = $3 AND b.UserId = $1)",
-        )
-        .bind(other)
-        .bind(&teams)
-        .bind(&s.user_id)
-        .fetch_one(&self.db)
-        .await?;
-        Ok(shared)
+        self.can_see_user(s, other).await
     }
 
     // ---------- store writes ----------
@@ -625,7 +606,7 @@ impl App {
     }
 
     /// `updateChannelMember`: saved, the user's channel caches dropped, `channel_member_updated` to them.
-    async fn update_channel_member(&self, m: &ChannelMember) -> ApiResult<ChannelMember> {
+    pub async fn update_channel_member(&self, m: &ChannelMember) -> ApiResult<ChannelMember> {
         let m = self.update_member(m).await?;
         self.invalidate_channel_cache_for_user(&m.user_id);
         self.publish_member_updated(&m);

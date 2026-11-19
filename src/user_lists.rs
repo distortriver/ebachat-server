@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id};
 use crate::model::{Session, Show, User};
 use crate::perm;
-use crate::users::{Arg, query_users, restriction, sanitized};
+use crate::users::{Arg, query_users, sanitized};
 
 pub fn routes() -> Router<State> {
     Router::new()
@@ -59,11 +59,12 @@ fn truthy(s: &str) -> bool {
 }
 
 /// Viewers without `view_members` see their teams' and channels' people only.
-async fn restrict(app: &App, s: &Session, cond: &mut String) {
-    if !app.sees_everyone(s).await {
+async fn restrict(app: &App, s: &Session, cond: &mut String) -> ApiResult<()> {
+    if let Some(r) = app.restriction_cond(s).await? {
         cond.push_str(" AND ");
-        cond.push_str(&restriction(&s.user_id));
+        cond.push_str(&r);
     }
+    Ok(())
 }
 
 fn activity(cond: &mut String, active: bool, inactive: bool) {
@@ -220,7 +221,7 @@ async fn get_users(St(app): St<State>, Auth(s): Auth, Query(q): Query<UsersQuery
         role_filter(&mut cond, &mut args, &q.role);
         activity(&mut cond, active, inactive);
     }
-    restrict(&app, &s, &mut cond).await;
+    restrict(&app, &s, &mut cond).await?;
     let tail = format!("{order} LIMIT {per} OFFSET {}", page * per);
     let users = query_users(&app, &joins, &cond, &tail, args).await?;
     Ok(Json(dedup(users).iter().map(|u| sanitized(u, show)).collect()))
@@ -238,7 +239,7 @@ async fn recent_or_new(
     show: Show,
 ) -> ApiResult<Json<Vec<User>>> {
     let mut cond = "tm.TeamId = $1".to_string();
-    restrict(app, s, &mut cond).await;
+    restrict(app, s, &mut cond).await?;
     let (joins, order) = if recent {
         (
             "JOIN TeamMembers tm ON (tm.UserId = u.Id AND tm.DeleteAt = 0) JOIN Status s ON (s.UserId = u.Id)",
@@ -315,7 +316,7 @@ async fn perform_search(
             .collect();
         cond.push_str(&format!(" AND ({} OR u.Id = ${id})", parts.join(" OR ")));
     }
-    restrict(app, s, &mut cond).await;
+    restrict(app, s, &mut cond).await?;
     let tail = format!("ORDER BY u.Username ASC LIMIT {}", o.limit);
     Ok(dedup(query_users(app, joins, &cond, &tail, args).await?))
 }
@@ -475,7 +476,7 @@ struct UsersStats {
 /// `getTotalUsersStats`: active accounts, bots included, remote ones not.
 async fn stats(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<UsersStats>> {
     let mut cond = "u.DeleteAt = 0 AND COALESCE(u.RemoteId, '') = ''".to_string();
-    restrict(&app, &s, &mut cond).await;
+    restrict(&app, &s, &mut cond).await?;
     let sql = format!("SELECT COUNT(*) FROM Users u WHERE {cond}");
     let (n,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql)).fetch_one(&app.db).await?;
     Ok(Json(UsersStats { total_users_count: n }))

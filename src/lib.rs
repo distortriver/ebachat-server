@@ -24,6 +24,7 @@ pub mod posts;
 pub mod reminders;
 pub mod preferences;
 pub mod reactions;
+pub mod schemes;
 pub mod search;
 pub mod search_params;
 pub mod sidebar;

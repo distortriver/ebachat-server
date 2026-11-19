@@ -300,22 +300,86 @@ impl App {
         self.has_perm(s, perm::VIEW_MEMBERS).await
     }
 
-    /// `UserCanSeeOtherUser`: everyone with `view_members`, else people sharing a team or channel.
+    /// `GetViewUsersRestrictions`: None for users with `view_members`; else the teams where they have it (from
+    /// the team cache) and every channel they are in (from the memberships cache).
+    pub async fn view_restrictions(&self, user_id: &str) -> ApiResult<Option<ViewRestrictions>> {
+        if self.user_has_perm(user_id, perm::VIEW_MEMBERS).await {
+            return Ok(None);
+        }
+        let mut teams = vec![];
+        for t in self.user_team_ids(user_id).await?.iter() {
+            if self.user_team_perm(user_id, t, perm::VIEW_MEMBERS).await {
+                teams.push(t.clone());
+            }
+        }
+        let channels = self.member_roles(user_id, true).await?.keys().cloned().collect();
+        Ok(Some(ViewRestrictions { teams, channels }))
+    }
+
+    /// `applyViewRestrictionsFilter` for a query on `Users u`: None when the viewer sees everyone.
+    pub async fn restriction_cond(&self, s: &Session) -> ApiResult<Option<String>> {
+        Ok(self.view_restrictions(&s.user_id).await?.map(|r| r.sql()))
+    }
+
+    /// `UserCanSeeOtherUser`.
     pub async fn can_see_user(&self, s: &Session, other: &str) -> ApiResult<bool> {
-        if s.user_id == other || self.sees_everyone(s).await {
+        if s.user_id == other {
             return Ok(true);
         }
-        let shared: Option<(i32,)> = sqlx::query_as(
-            "SELECT 1 FROM TeamMembers a JOIN TeamMembers b ON a.TeamId = b.TeamId
-             WHERE a.UserId = $1 AND b.UserId = $2 AND a.DeleteAt = 0 AND b.DeleteAt = 0
-             UNION SELECT 1 FROM ChannelMembers a JOIN ChannelMembers b ON a.ChannelId = b.ChannelId
-             WHERE a.UserId = $1 AND b.UserId = $2 LIMIT 1",
-        )
-        .bind(&s.user_id)
-        .bind(other)
-        .fetch_optional(&self.db)
-        .await?;
-        Ok(shared.is_some())
+        let Some(r) = self.view_restrictions(&s.user_id).await? else { return Ok(true) };
+        if !r.teams.is_empty() {
+            let found: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM TeamMembers WHERE UserId = $1 AND TeamId = ANY($2) AND DeleteAt = 0)",
+            )
+            .bind(other)
+            .bind(&r.teams)
+            .fetch_one(&self.db)
+            .await?;
+            if found {
+                return Ok(true);
+            }
+        }
+        if !r.channels.is_empty() {
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM ChannelMembers WHERE UserId = $1 AND ChannelId = ANY($2))")
+                    .bind(other)
+                    .bind(&r.channels)
+                    .fetch_one(&self.db)
+                    .await?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// `model.ViewUsersRestrictions`.
+pub struct ViewRestrictions {
+    pub teams: Vec<String>,
+    pub channels: Vec<String>,
+}
+
+impl ViewRestrictions {
+    /// The SQL condition on `u.id` (ids are checked, then inlined), `1 = 0` when there is nothing to see.
+    pub fn sql(&self) -> String {
+        let list = |ids: &[String]| {
+            ids.iter().filter(|i| is_valid_id(i)).map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", ")
+        };
+        let mut parts = vec![];
+        if !self.teams.is_empty() {
+            parts.push(format!(
+                "u.id IN (SELECT r.UserId FROM TeamMembers r WHERE r.DeleteAt = 0 AND r.TeamId IN ({}))",
+                list(&self.teams)
+            ));
+        }
+        if !self.channels.is_empty() {
+            parts.push(format!(
+                "u.id IN (SELECT r.UserId FROM ChannelMembers r WHERE r.ChannelId IN ({}))",
+                list(&self.channels)
+            ));
+        }
+        if parts.is_empty() { "1 = 0".into() } else { format!("({})", parts.join(" OR ")) }
     }
 }
 
