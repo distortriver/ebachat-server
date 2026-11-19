@@ -293,8 +293,9 @@ def main():
                                                    "include_deleted_channels": True, "page": 0, "per_page": 60})
     if a.writes:
         # An observer in the channel: the second user of the first page of its members.
-        mem, _ = r.check("GET", f"/users?in_channel={ch}&page=0&per_page=5&sort=admin&active=true")
-        other = next(dict(u[1])["username"] for u in mem[1] if dict(u[1])["id"] != uid)
+        mem, _ = r.check("GET", f"/users?in_channel={ch}&page=0&per_page=100&active=true")
+        other = next(dict(u[1])["username"] for u in mem[1]
+                     if dict(u[1])["id"] != uid and dict(u[1])["username"].startswith("bench"))
         og, orr = login(a.go, other, a.password), login(a.rust, other, a.password)
         watch = (Ws(a.go, og), Ws(a.rust, orr))
         time.sleep(1)
