@@ -18,7 +18,20 @@ async fn not_found(uri: Uri) -> impl IntoResponse {
     e
 }
 
+/// `LOG_REQUESTS=1`: one line per request on stderr (method, path, status, ms), to watch a real client.
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let (method, uri, t) = (req.method().clone(), req.uri().clone(), std::time::Instant::now());
+    let r = next.run(req).await;
+    eprintln!("{} {} {} {}ms", method, uri, r.status().as_u16(), t.elapsed().as_millis());
+    r
+}
+
 pub fn router(app: State) -> Router {
+    let r = routes(app);
+    if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
+}
+
+fn routes(app: State) -> Router {
     Router::new()
         .route("/api/v4/system/ping", get(|| async { Json(json!({"status": "OK"})) }))
         .route("/api/v4/websocket", get(crate::hub::connect))
