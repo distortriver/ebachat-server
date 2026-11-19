@@ -50,8 +50,19 @@ pub fn router(app: State) -> Router {
     if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
 }
 
+/// Every cache's size and hit, miss and invalidation counters (Go exports them as Prometheus metrics); system
+/// admins only.
+async fn cache_stats(
+    axum::extract::State(app): axum::extract::State<State>,
+    crate::app::Auth(s): crate::app::Auth,
+) -> crate::app::ApiResult<axum::Json<std::collections::BTreeMap<&'static str, crate::cache::Stats>>> {
+    app.require(&s, crate::perm::MANAGE_SYSTEM).await?;
+    Ok(axum::Json(app.caches.stats()))
+}
+
 fn routes(app: State) -> Router {
     Router::new()
+        .route("/api/v4/ebachat/caches", get(cache_stats))
         .route("/api/v4/websocket", get(crate::hub::connect))
         .merge(crate::users::routes())
         .merge(crate::user_lists::routes())

@@ -9,6 +9,7 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,11 +21,38 @@ use crate::model::{
 pub struct Lru<K: Hash + Eq, V> {
     m: Mutex<lru::LruCache<K, (V, Instant)>>,
     ttl: Option<Duration>,
+    /// Go's `MemCacheHit`, `MemCacheMiss` and `MemCacheInvalidation` counters.
+    hits: AtomicU64,
+    misses: AtomicU64,
+    invalidations: AtomicU64,
+}
+
+/// A cache's size and counters.
+#[derive(serde::Serialize)]
+pub struct Stats {
+    pub len: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub invalidations: u64,
 }
 
 impl<K: Hash + Eq, V: Clone> Lru<K, V> {
     pub fn new(size: usize, ttl: Option<Duration>) -> Self {
-        Lru { m: Mutex::new(lru::LruCache::new(NonZeroUsize::new(size).unwrap())), ttl }
+        Lru {
+            m: Mutex::new(lru::LruCache::new(NonZeroUsize::new(size).unwrap())),
+            ttl,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
+        }
+    }
+    pub fn stats(&self) -> Stats {
+        Stats {
+            len: self.m.lock().unwrap().len(),
+            hits: self.hits.load(Relaxed),
+            misses: self.misses.load(Relaxed),
+            invalidations: self.invalidations.load(Relaxed),
+        }
     }
     pub fn get<Q>(&self, k: &Q) -> Option<V>
     where
@@ -32,11 +60,16 @@ impl<K: Hash + Eq, V: Clone> Lru<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let mut m = self.m.lock().unwrap();
-        let (v, at) = m.get(k)?;
+        let Some((v, at)) = m.get(k) else {
+            self.misses.fetch_add(1, Relaxed);
+            return None;
+        };
         if self.ttl.is_some_and(|t| at.elapsed() > t) {
             m.pop(k);
+            self.misses.fetch_add(1, Relaxed);
             return None;
         }
+        self.hits.fetch_add(1, Relaxed);
         Some(v.clone())
     }
     pub fn put(&self, k: K, v: V) {
@@ -55,9 +88,11 @@ impl<K: Hash + Eq, V: Clone> Lru<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
+        self.invalidations.fetch_add(1, Relaxed);
         self.m.lock().unwrap().pop(k);
     }
     pub fn clear(&self) {
+        self.invalidations.fetch_add(1, Relaxed);
         self.m.lock().unwrap().clear();
     }
     /// Drops every entry `f` says to.
@@ -67,6 +102,7 @@ impl<K: Hash + Eq, V: Clone> Lru<K, V> {
     {
         let mut m = self.m.lock().unwrap();
         let gone: Vec<K> = m.iter().filter(|(k, (v, _))| f(k, v)).map(|(k, _)| k.clone()).collect();
+        self.invalidations.fetch_add(gone.len() as u64, Relaxed);
         for k in gone {
             m.pop(&k);
         }
@@ -149,6 +185,37 @@ impl Caches {
             terms_of_service: Lru::new(20000, m(30)),
             webhook: Lru::new(25000, m(15)),
         }
+    }
+
+    /// Every cache's size and counters, by name.
+    pub fn stats(&self) -> BTreeMap<&'static str, Stats> {
+        BTreeMap::from([
+            ("session", self.session.stats()),
+            ("status", self.status.stats()),
+            ("seen_pending_post_ids", self.seen_pending_post_ids.stats()),
+            ("open_graph", self.open_graph.stats()),
+            ("user", self.user.stats()),
+            ("all_profiles", self.all_profiles.stats()),
+            ("profiles_in_channel", self.profiles_in_channel.stats()),
+            ("channel", self.channel.stats()),
+            ("channel_by_name", self.channel_by_name.stats()),
+            ("member_count", self.member_count.stats()),
+            ("guest_count", self.guest_count.stats()),
+            ("pinned_count", self.pinned_count.stats()),
+            ("members_for_user", self.members_for_user.stats()),
+            ("members_notify_props", self.members_notify_props.stats()),
+            ("last_post_time", self.last_post_time.stats()),
+            ("last_posts", self.last_posts.stats()),
+            ("team_ids_for_user", self.team_ids_for_user.stats()),
+            ("role", self.role.stats()),
+            ("scheme", self.scheme.stats()),
+            ("reactions", self.reactions.stats()),
+            ("file_infos", self.file_infos.stats()),
+            ("emoji_by_id", self.emoji_by_id.stats()),
+            ("emoji_by_name", self.emoji_by_name.stats()),
+            ("terms_of_service", self.terms_of_service.stats()),
+            ("webhook", self.webhook.stats()),
+        ])
     }
 
     // ---- Go's invalidation entry points ----
