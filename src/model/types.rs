@@ -44,3 +44,30 @@ impl<'r, T: DeserializeOwned + Default> Decode<'r, Postgres> for JsonText<T> {
         Ok(JsonText(if s.is_empty() { T::default() } else { serde_json::from_str(s)? }))
     }
 }
+
+/// A list stored space-separated in a text column (`Roles.Permissions`), a JSON array in the API.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Spaced(pub Vec<String>);
+
+impl Type<Postgres> for Spaced {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <String as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl Encode<'_, Postgres> for Spaced {
+    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+        <String as Encode<Postgres>>::encode(self.0.join(" "), buf)
+    }
+}
+
+impl<'r> Decode<'r, Postgres> for Spaced {
+    fn decode(value: PgValueRef<'r>) -> Result<Self, BoxDynError> {
+        let s = <&str as Decode<Postgres>>::decode(value)?;
+        Ok(Spaced(s.split_whitespace().map(str::to_string).collect()))
+    }
+}

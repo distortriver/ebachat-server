@@ -5,6 +5,11 @@ use ebachat_macros::model;
 
 pub const ONLINE: &str = "online";
 pub const OFFLINE: &str = "offline";
+pub const AWAY: &str = "away";
+pub const DND: &str = "dnd";
+pub const OUT_OF_OFFICE: &str = "ooo";
+/// `StatusMinUpdateTime`: an unchanged online status is written at most this often.
+pub const MIN_UPDATE_TIME: i64 = 120_000;
 
 #[model(table = "status")]
 #[derive(Debug, Clone, PartialEq)]

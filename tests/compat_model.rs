@@ -88,7 +88,7 @@ async fn user_row_reads_as_go_sends_it() {
     let id = me["id"].as_str().unwrap();
     let mut u: User = db::get(&s.db, id).await.unwrap().unwrap();
     // getUser on oneself: Sanitize with every option, see app.SanitizeProfile.
-    u.sanitize(true, true, true, true, true);
+    u.sanitize_own();
     let mut rust = serde_json::to_value(&u).unwrap();
     // Login writes UpdateAt (SqlUserStore.UpdateLastLogin) but Go answers /users/me from its user cache, one login
     // behind the database.

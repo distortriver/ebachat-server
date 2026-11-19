@@ -34,6 +34,7 @@ struct FieldOpts {
     skip_json: bool,
     column: Option<String>,
     json: Option<String>,
+    pgtype: Option<String>,
 }
 
 fn field_opts(f: &mut Field) -> syn::Result<FieldOpts> {
@@ -54,8 +55,10 @@ fn field_opts(f: &mut Field) -> syn::Result<FieldOpts> {
                 o.column = Some(m.value()?.parse::<LitStr>()?.value());
             } else if m.path.is_ident("json") {
                 o.json = Some(m.value()?.parse::<LitStr>()?.value());
+            } else if m.path.is_ident("pgtype") {
+                o.pgtype = Some(m.value()?.parse::<LitStr>()?.value());
             } else {
-                return Err(m.error("expected omitempty, transient, skip_json, column = \"..\" or json = \"..\""));
+                return Err(m.error("expected omitempty, transient, skip_json, column, json or pgtype"));
             }
             Ok(())
         });
@@ -96,7 +99,7 @@ fn expand(item: &mut ItemStruct, table: Option<String>) -> syn::Result<proc_macr
     let Fields::Named(fields) = &mut item.fields else {
         return Err(syn::Error::new(item.span(), "#[model] needs named fields"));
     };
-    let mut columns = vec![]; // (column, ident, is_option)
+    let mut columns = vec![]; // (column, ident, pgtype)
     let mut row_fields = vec![];
     for f in fields.named.iter_mut() {
         let o = field_opts(f)?;
@@ -124,7 +127,7 @@ fn expand(item: &mut ItemStruct, table: Option<String>) -> syn::Result<proc_macr
                 quote!(crate::db::col(row, #col)?)
             };
             row_fields.push(quote!(#ident: #get));
-            columns.push((col, ident));
+            columns.push((col, ident, o.pgtype.unwrap_or_default()));
         }
     }
 
@@ -138,23 +141,33 @@ fn expand(item: &mut ItemStruct, table: Option<String>) -> syn::Result<proc_macr
         }
     };
     let table_impl = table.map(|t| {
-        let cols: Vec<&str> = columns.iter().map(|(c, _)| c.as_str()).collect();
-        let list = cols.join(", ");
-        let select = format!("SELECT {list} FROM {t}");
-        let params: Vec<String> = (1..=cols.len()).map(|i| format!("${i}")).collect();
-        let insert = format!("INSERT INTO {t} ({list}) VALUES ({})", params.join(", "));
+        let cols: Vec<&str> = columns.iter().map(|(c, _, _)| c.as_str()).collect();
+        let types: Vec<&str> = columns.iter().map(|(_, _, p)| p.as_str()).collect();
+        // A Postgres enum column (`Channels.Type`) is read as text and written with a cast.
+        let sel: Vec<String> = columns
+            .iter()
+            .map(|(c, _, p)| if p.is_empty() { c.clone() } else { format!("{c}::text AS {c}") })
+            .collect();
+        let param = |i: usize| {
+            let p = &columns[i].2;
+            if p.is_empty() { format!("${}", i + 1) } else { format!("${}::{p}", i + 1) }
+        };
+        let select = format!("SELECT {} FROM {t}", sel.join(", "));
+        let params: Vec<String> = (0..cols.len()).map(param).collect();
+        let insert = format!("INSERT INTO {t} ({}) VALUES ({})", cols.join(", "), params.join(", "));
         // UPDATE binds the columns in the same order as INSERT, so `id` must come first.
         let update = if cols.first() == Some(&"id") {
-            let sets: Vec<String> = cols.iter().enumerate().skip(1).map(|(i, c)| format!("{c} = ${}", i + 1)).collect();
+            let sets: Vec<String> = cols.iter().enumerate().skip(1).map(|(i, c)| format!("{c} = {}", param(i))).collect();
             format!("UPDATE {t} SET {} WHERE id = $1", sets.join(", "))
         } else {
             String::new()
         };
-        let idents = columns.iter().map(|(_, i)| i);
+        let idents = columns.iter().map(|(_, i, _)| i);
         quote! {
             impl #impl_g crate::db::Table for #name #ty_g #where_g {
                 const TABLE: &'static str = #t;
                 const COLUMNS: &'static [&'static str] = &[#(#cols),*];
+                const PGTYPES: &'static [&'static str] = &[#(#types),*];
                 const SELECT: &'static str = #select;
                 const INSERT: &'static str = #insert;
                 const UPDATE: &'static str = #update;

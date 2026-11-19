@@ -1,17 +1,26 @@
 //! API structs and table rows. Go's JSON rules: zero values for missing or `null` fields, `omitempty`, map keys
 //! sorted (`BTreeMap`, and `serde_json`'s default sorted `Map`).
 
+pub mod channel;
+mod misc;
 mod post;
-mod session;
+pub mod session;
 pub mod status;
+mod team;
 mod types;
 mod user;
 
+pub use channel::{Channel, ChannelMember};
+pub use misc::{
+    Base64, Bot, Draft, Emoji, FileInfo, Preference, Reaction, Role, Scheme, SidebarCategory, Thread,
+    ThreadMembership, category,
+};
 pub use post::Post;
 pub use session::Session;
 pub use status::Status;
-pub use types::{JsonText, StringArray, StringInterface, StringMap};
-pub use user::User;
+pub use team::{Team, TeamMember};
+pub use types::{JsonText, Spaced, StringArray, StringInterface, StringMap};
+pub use user::{Show, User};
 
 use serde::{Deserialize, Deserializer};
 

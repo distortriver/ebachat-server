@@ -71,47 +71,77 @@ pub struct User {
 }
 
 impl User {
-    /// `User.Sanitize`: what never leaves the server, and with `options`, what the viewer may not see.
-    pub fn sanitize(&mut self, email: bool, fullname: bool, passwordupdate: bool, authservice: bool, authdata: bool) {
+    /// `User.Sanitize(map[string]bool{})`: what never leaves the server, for the user's own record.
+    pub fn sanitize_own(&mut self) {
         self.password.clear();
         self.mfa_secret.clear();
         self.mfa_used_timestamps = Default::default();
         self.last_login = 0;
-        if !email {
+    }
+
+    /// `User.Sanitize(options)` with non-empty options.
+    pub fn sanitize(&mut self, o: Show) {
+        self.sanitize_own();
+        if !o.email {
             self.email.clear();
             self.props.0.remove("RemoteEmail");
         }
-        if !fullname {
+        if !o.fullname {
             self.first_name.clear();
             self.last_name.clear();
         }
-        if !passwordupdate {
-            self.last_password_update = 0;
-        }
-        if !authservice {
+        self.last_password_update = 0;
+        if !o.admin {
             self.auth_service.clear();
-        }
-        if !authdata {
             self.auth_data = Some(String::new());
         }
     }
-}
 
-impl User {
-    /// `App.SanitizeProfile` with the default privacy settings (`ShowEmailAddress`, `ShowFullName` on).
-    pub fn sanitize_profile(&mut self, as_admin: bool) {
-        // ClearNonProfileFields
-        self.password.clear();
-        self.mfa_secret.clear();
-        self.mfa_used_timestamps = Default::default();
+    /// `App.SanitizeProfile`: `ClearNonProfileFields` and `Sanitize` with the privacy settings.
+    pub fn sanitize_profile(&mut self, o: Show) {
         self.email_verified = false;
         self.allow_marketing = false;
-        self.last_password_update = 0;
-        if !as_admin {
+        if !o.admin {
             self.auth_data = Some(String::new());
             self.notify_props = Default::default();
             self.failed_attempts = 0;
         }
-        self.sanitize(true, true, false, as_admin, as_admin);
+        self.sanitize(o);
     }
+
+    pub fn is_guest(&self) -> bool {
+        self.roles.split_whitespace().any(|r| r == "system_guest")
+    }
+    pub fn is_system_admin(&self) -> bool {
+        self.roles.split_whitespace().any(|r| r == "system_admin")
+    }
+    /// `GetFullName`.
+    pub fn full_name(&self) -> String {
+        match (self.first_name.is_empty(), self.last_name.is_empty()) {
+            (false, false) => format!("{} {}", self.first_name, self.last_name),
+            (false, true) => self.first_name.clone(),
+            (true, false) => self.last_name.clone(),
+            (true, true) => String::new(),
+        }
+    }
+    /// `GetDisplayName(TeammateNameDisplay)`.
+    pub fn display_name(&self, setting: &str) -> String {
+        let name = self.username.clone();
+        match setting {
+            "nickname_full_name" if !self.nickname.is_empty() => self.nickname.clone(),
+            "nickname_full_name" | "full_name" if !self.full_name().is_empty() => self.full_name(),
+            _ => name,
+        }
+    }
+    pub fn notify_prop(&self, k: &str) -> &str {
+        self.notify_props.0.get(k).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// What a viewer may see of other users' profiles (`GetSanitizeOptions`).
+#[derive(Clone, Copy, Debug)]
+pub struct Show {
+    pub email: bool,
+    pub fullname: bool,
+    pub admin: bool,
 }

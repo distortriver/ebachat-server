@@ -1,10 +1,10 @@
 //! Websocket connections and event broadcast, as Mattermost's platform hub does it on one node: an event is
-//! serialised once, each connection adds its own `seq`.
+//! serialised once, each connection adds its own `seq`; who gets it follows `WebConn.shouldSendEvent`.
 
-// Based on Mattermost server/channels/app/platform/web_hub.go and web_conn.go, Copyright (c) 2015-present
-// Mattermost, Inc. Licensed under AGPL-3.0.
+// Based on Mattermost server/channels/app/platform/web_hub.go, web_conn.go and channels/wsapi, Copyright (c)
+// 2015-present Mattermost, Inc. Licensed under AGPL-3.0.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -18,29 +18,50 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::app::{App, State, new_id, now_ms, token_from};
-use crate::model::{Status, status};
+use crate::app::{State, new_id, now_ms, token_from};
+use crate::model::Session;
 
 #[derive(Default)]
 pub struct Hub {
-    conns: RwLock<HashMap<u64, Conn>>,
+    conns: RwLock<Vec<Arc<Conn>>>,
     next: AtomicU64,
+    /// Events whose recipients depend on channel membership go through the app; see [`Hub::publish`].
+    app: std::sync::OnceLock<std::sync::Weak<crate::app::App>>,
 }
 
-struct Conn {
-    user_id: String,
-    tx: mpsc::UnboundedSender<Arc<str>>,
+pub struct Conn {
+    id: u64,
+    pub user_id: String,
+    pub connection_id: String,
+    token: String,
+    admin: bool,
+    teams: RwLock<HashSet<String>>,
+    tx: mpsc::UnboundedSender<Out>,
 }
 
-/// `model.WebsocketBroadcast`, the part clients see.
-#[derive(Serialize, Default)]
+enum Out {
+    /// An event without its `seq`, which the writer appends.
+    Event(Arc<str>),
+    /// A reply to the client's action: not numbered.
+    Reply(String),
+    Close,
+}
+
+/// `model.WebsocketBroadcast`: the part clients see, and how recipients are chosen.
+#[derive(Serialize, Default, Clone)]
 pub struct Broadcast {
-    pub omit_users: Option<HashMap<String, bool>>,
+    pub omit_users: Option<BTreeMap<String, bool>>,
     pub user_id: String,
     pub channel_id: String,
     pub team_id: String,
     pub connection_id: String,
     pub omit_connection_id: String,
+    /// `ContainsSanitizedData`: non-admins get this data instead.
+    #[serde(skip)]
+    pub sanitized: Option<Value>,
+    /// `ContainsSensitiveData`: admins only.
+    #[serde(skip)]
+    pub admin_only: bool,
 }
 
 /// The event as JSON without its closing `"seq":N}`: `{"event":..,"data":..,"broadcast":..,"seq":`.
@@ -55,34 +76,101 @@ fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
 }
 
 impl Hub {
-    fn add(&self, user_id: &str, tx: mpsc::UnboundedSender<Arc<str>>) -> u64 {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.conns.write().unwrap().insert(id, Conn { user_id: user_id.into(), tx });
-        id
+    pub fn set_app(&self, app: &State) {
+        let _ = self.app.set(Arc::downgrade(app));
+    }
+
+    fn add(&self, c: Arc<Conn>) {
+        self.conns.write().unwrap().push(c);
     }
     /// Removes a connection; true when it was the user's last one.
     fn remove(&self, id: u64) -> bool {
         let mut c = self.conns.write().unwrap();
-        let Some(gone) = c.remove(&id) else { return false };
-        !c.values().any(|x| x.user_id == gone.user_id)
+        let Some(i) = c.iter().position(|x| x.id == id) else { return false };
+        let gone = c.swap_remove(i);
+        !c.iter().any(|x| x.user_id == gone.user_id)
     }
 
-    pub fn to_user(&self, user_id: &str, event: &str, data: Value) {
-        let b = Broadcast { user_id: user_id.into(), ..Default::default() };
-        let p = prefix(event, &data, &b);
-        for c in self.conns.read().unwrap().values().filter(|c| c.user_id == user_id) {
-            let _ = c.tx.send(p.clone());
+    pub fn is_connected(&self, user_id: &str) -> bool {
+        self.conns.read().unwrap().iter().any(|c| c.user_id == user_id)
+    }
+
+    pub fn connections(&self) -> usize {
+        self.conns.read().unwrap().len()
+    }
+
+    /// Closes the connections of a revoked session.
+    pub fn close_session(&self, token: &str) {
+        for c in self.conns.read().unwrap().iter().filter(|c| c.token == token) {
+            let _ = c.tx.send(Out::Close);
         }
     }
 
-    /// To every connection of `members`, the users of a channel.
-    pub fn to_channel(&self, channel_id: &str, members: &[String], event: &str, data: Value) {
-        let b = Broadcast { channel_id: channel_id.into(), ..Default::default() };
-        let p = prefix(event, &data, &b);
-        let set: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
-        for c in self.conns.read().unwrap().values().filter(|c| set.contains(c.user_id.as_str())) {
-            let _ = c.tx.send(p.clone());
+    /// The user joined or left a team (`InvalidateCacheForWebConn`).
+    pub fn set_user_teams(&self, user_id: &str, teams: &[String]) {
+        for c in self.conns.read().unwrap().iter().filter(|c| c.user_id == user_id) {
+            *c.teams.write().unwrap() = teams.iter().cloned().collect();
         }
+    }
+
+    /// `Publish`: to every connection the broadcast selects. Channel events go to members of the channel, as
+    /// `GetAllChannelMembersForUser` (cached) says.
+    pub fn publish(&self, event: &str, data: Value, b: Broadcast) {
+        let targets: Vec<Arc<Conn>> = {
+            let conns = self.conns.read().unwrap();
+            conns
+                .iter()
+                .filter(|c| {
+                    if !b.connection_id.is_empty() {
+                        return c.connection_id == b.connection_id;
+                    }
+                    if !b.omit_connection_id.is_empty() && c.connection_id == b.omit_connection_id {
+                        return false;
+                    }
+                    if !b.user_id.is_empty() {
+                        return c.user_id == b.user_id;
+                    }
+                    if b.omit_users.as_ref().is_some_and(|o| o.contains_key(&c.user_id)) {
+                        return false;
+                    }
+                    if b.admin_only && !c.admin {
+                        return false;
+                    }
+                    if !b.team_id.is_empty() && b.channel_id.is_empty() {
+                        return c.teams.read().unwrap().contains(&b.team_id);
+                    }
+                    true
+                })
+                .cloned()
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let full = prefix(event, &data, &b);
+        let sanitized = b.sanitized.as_ref().map(|d| prefix(event, d, &b));
+        if b.channel_id.is_empty() {
+            for c in targets {
+                let p = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
+                let _ = c.tx.send(Out::Event(p.clone()));
+            }
+            return;
+        }
+        // Membership needs the (cached) channel members of each user: done off the caller's path.
+        let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
+        let channel_id = b.channel_id.clone();
+        tokio::spawn(async move {
+            for c in targets {
+                let member = match app.member_roles(&c.user_id, false).await {
+                    Ok(m) => m.contains_key(&channel_id),
+                    Err(_) => false,
+                };
+                if member {
+                    let p = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
+                    let _ = c.tx.send(Out::Event(p.clone()));
+                }
+            }
+        });
     }
 }
 
@@ -92,12 +180,12 @@ pub struct MaybeToken(Option<String>);
 impl FromRequestParts<State> for MaybeToken {
     type Rejection = std::convert::Infallible;
     async fn from_request_parts(parts: &mut Parts, _: &State) -> Result<MaybeToken, Self::Rejection> {
-        Ok(MaybeToken(token_from(parts)))
+        Ok(MaybeToken(token_from(parts).map(|t| t.0)))
     }
 }
 
 pub async fn connect(ws: WebSocketUpgrade, MaybeToken(token): MaybeToken, St(app): St<State>) -> Response {
-    ws.on_upgrade(move |socket| serve(app, socket, token))
+    ws.max_message_size(8 * 1024).on_upgrade(move |socket| serve(app, socket, token))
 }
 
 async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
@@ -113,17 +201,25 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
             }
         }
     }
-    let Some(session) = (match token {
-        Some(t) => app.session(&t).await.ok().filter(|s| !s.is_expired(now_ms())),
+    let Some(session) = (match &token {
+        Some(t) => app.session(t).await.ok(),
         None => None,
     }) else {
         let _ = sink.close().await;
         return;
     };
     let user_id = session.user_id.clone();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Arc<str>>();
-    let conn = app.hub.add(&user_id, tx);
-    let connection_id = new_id();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+    let conn = Arc::new(Conn {
+        id: app.hub.next.fetch_add(1, Ordering::Relaxed),
+        user_id: user_id.clone(),
+        connection_id: new_id(),
+        token: session.token.clone(),
+        admin: session.is_system_admin(),
+        teams: RwLock::new(session.team_members.iter().map(|t| t.team_id.clone()).collect()),
+        tx,
+    });
+    app.hub.add(conn.clone());
 
     let writer = tokio::spawn(async move {
         let mut seq: i64 = 0;
@@ -132,7 +228,16 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
         loop {
             tokio::select! {
                 m = rx.recv() => {
-                    let Some(p) = m else { break };
+                    let p = match m {
+                        Some(Out::Event(p)) => p,
+                        Some(Out::Reply(r)) => {
+                            if sink.send(Message::Text(r.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        _ => break,
+                    };
                     let mut s = String::with_capacity(p.len() + 24);
                     s.push_str(&p);
                     s.push_str(&seq.to_string());
@@ -149,56 +254,96 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
                 }
             }
         }
+        let _ = sink.close().await;
     });
 
-    let hello = json!({"connection_id": connection_id, "server_version": crate::SERVER_VERSION});
-    app.hub.to_user(&user_id, "hello", hello);
-    set_online(&app, &user_id).await;
+    let hello = json!({
+        "connection_id": conn.connection_id,
+        "server_version": format!("{}.{}.{}.false", crate::SERVER_VERSION_FULL, crate::SERVER_VERSION, "0"),
+    });
+    app.hub.publish("hello", hello, Broadcast { connection_id: conn.connection_id.clone(), ..Default::default() });
+    app.set_status_online(&user_id, false).await;
 
     while let Some(Ok(m)) = stream.next().await {
-        if let Message::Close(_) = m {
+        match m {
+            Message::Text(t) => action(&app, &session, &conn, &t).await,
+            Message::Close(_) => break,
+            _ => {}
+        }
+        if writer.is_finished() {
             break;
         }
     }
     writer.abort();
-    if app.hub.remove(conn) {
-        set_status(&app, &user_id, status::OFFLINE).await;
+    if app.hub.remove(conn.id) {
+        app.queue_status_offline(&user_id, false).await;
     }
 }
 
-async fn set_online(app: &App, user_id: &str) {
-    set_status(app, user_id, status::ONLINE).await;
+/// A client's request on the socket (`wsapi`), answered with `{"status","seq_reply"}`.
+async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
+    let Ok(req) = serde_json::from_str::<Value>(text) else { return };
+    let seq = req["seq"].clone();
+    let data = &req["data"];
+    let reply = match req["action"].as_str().unwrap_or("") {
+        "user_typing" => {
+            app.extend_session_if_needed(s).await;
+            let channel_id = data["channel_id"].as_str().unwrap_or("");
+            if crate::app::is_valid_id(channel_id)
+                && app.channel_perm(s, channel_id, crate::perm::CREATE_POST).await.is_ok_and(|p| p.0)
+            {
+                publish_typing(app, &s.user_id, channel_id, data["parent_id"].as_str().unwrap_or(""));
+                Ok(None)
+            } else {
+                Err("channel_id")
+            }
+        }
+        "user_update_active_status" => match data["user_is_active"].as_bool() {
+            Some(active) => {
+                let manual = data["manual"].as_bool().unwrap_or(false);
+                if active {
+                    app.set_status_online(&s.user_id, manual).await;
+                } else {
+                    app.set_status_away_if_needed(&s.user_id, manual).await;
+                }
+                app.touch_session(s).await;
+                Ok(None)
+            }
+            None => Err("user_is_active"),
+        },
+        "get_statuses" => Ok(Some(json!({}))),
+        "get_statuses_by_ids" => {
+            let ids: Vec<String> = data["user_ids"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if ids.is_empty() {
+                Err("user_ids")
+            } else {
+                let st = app.statuses(&ids).await.unwrap_or_default();
+                Ok(Some(Value::Object(st.into_iter().map(|s| (s.user_id, Value::String(s.status))).collect())))
+            }
+        }
+        "ping" => Ok(Some(json!({"text": "pong", "version": crate::SERVER_VERSION_FULL, "server_time": now_ms()}))),
+        _ => Err("action"),
+    };
+    let msg = match reply {
+        Ok(None) => json!({"status": "OK", "seq_reply": seq}),
+        Ok(Some(d)) => json!({"status": "OK", "seq_reply": seq, "data": d}),
+        Err(param) => json!({"status": "FAIL", "seq_reply": seq, "error": {
+            "id": "api.websocket_handler.invalid_param.app_error",
+            "message": format!("Invalid {param} parameter"), "status_code": 400}}),
+    };
+    let _ = conn.tx.send(Out::Reply(msg.to_string()));
 }
 
-/// `SetStatusOnline` / `SetStatusOffline` for an automatic (not manual) status: saved and sent to the user only
-/// when it changes; a manual status (dnd, away) stays.
-async fn set_status(app: &App, user_id: &str, to: &str) {
-    let now = now_ms();
-    let current = crate::api::statuses(app, &[user_id.to_string()]).await.ok().and_then(|mut v| v.pop());
-    let mut s = current.unwrap_or_else(|| Status::offline(user_id));
-    if s.manual && to == status::ONLINE {
-        return;
-    }
-    let changed = s.status != to;
-    s.last_activity_at = now;
-    if changed {
-        s.prev_status = std::mem::replace(&mut s.status, to.to_string());
-    }
-    app.statuses.write().unwrap().insert(user_id.to_string(), s.clone());
-    if changed {
-        let _ = sqlx::query(
-            "INSERT INTO Status (UserId, Status, Manual, LastActivityAt, DNDEndTime, PrevStatus) VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (UserId) DO UPDATE SET Status = EXCLUDED.Status, Manual = EXCLUDED.Manual,
-             LastActivityAt = EXCLUDED.LastActivityAt, DNDEndTime = EXCLUDED.DNDEndTime, PrevStatus = EXCLUDED.PrevStatus",
-        )
-        .bind(&s.user_id)
-        .bind(&s.status)
-        .bind(s.manual)
-        .bind(s.last_activity_at)
-        .bind(s.dnd_end_time)
-        .bind(&s.prev_status)
-        .execute(&app.db)
-        .await;
-        app.hub.to_user(user_id, "status_change", json!({"status": s.status, "user_id": user_id}));
-    }
+/// `PublishUserTyping`.
+pub fn publish_typing(app: &State, user_id: &str, channel_id: &str, parent_id: &str) {
+    let mut omit = BTreeMap::new();
+    omit.insert(user_id.to_string(), true);
+    app.hub.publish(
+        "typing",
+        json!({"parent_id": parent_id, "user_id": user_id}),
+        Broadcast { channel_id: channel_id.into(), omit_users: Some(omit), ..Default::default() },
+    );
 }
