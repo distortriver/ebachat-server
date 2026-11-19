@@ -77,14 +77,12 @@ pub struct ChannelMember {
     pub channel_id: String,
     pub user_id: String,
     pub roles: String,
-    pub last_viewed_at: i64,
     pub msg_count: i64,
     pub mention_count: i64,
     pub mention_count_root: i64,
     pub urgent_mention_count: i64,
     pub msg_count_root: i64,
     pub notify_props: StringMap,
-    pub last_update_at: i64,
     pub scheme_guest: bool,
     pub scheme_user: bool,
     pub scheme_admin: bool,
@@ -92,6 +90,16 @@ pub struct ChannelMember {
     pub explicit_roles: String,
     #[mm(json = "autotranslation_disabled", column = "autotranslationdisabled")]
     pub auto_translation_disabled: bool,
+    // Go's `ChannelMember.MarshalJSON` puts these two last, and leaves them out when
+    // `SanitizeForCurrentUser` set them to -1 (another user's membership).
+    #[serde(skip_serializing_if = "is_sanitized")]
+    pub last_viewed_at: i64,
+    #[serde(skip_serializing_if = "is_sanitized")]
+    pub last_update_at: i64,
+}
+
+fn is_sanitized(v: &i64) -> bool {
+    *v == -1
 }
 
 /// `GetDefaultChannelNotifyProps`.
@@ -104,9 +112,6 @@ pub fn default_member_notify_props() -> StringMap {
         ("email", "default"),
         ("ignore_channel_mentions", "default"),
         ("channel_auto_follow_threads", "off"),
-        ("desktop_threads", "default"),
-        ("push_threads", "default"),
-        ("email_threads", "default"),
     ] {
         m.insert(k.to_string(), v.to_string());
     }

@@ -410,7 +410,8 @@ impl FromRequestParts<State> for Auth {
     type Rejection = AppError;
     async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<Auth, AppError> {
         let (token, loc) = token_from(parts).ok_or_else(invalid_token)?;
-        let s = app.session(&token).await?;
+        // web/handlers.go: any session error but a 500 is "session expired" for the client.
+        let s = app.session(&token).await.map_err(|e| if e.status_code == 500 { e } else { invalid_token() })?;
         if loc == TokenLocation::Query && !s.is_oauth {
             return Err(AppError::new(
                 StatusCode::UNAUTHORIZED,
