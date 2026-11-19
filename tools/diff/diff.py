@@ -9,9 +9,14 @@ as they are: status, keys and key order, types and values. Writes go to both ser
 """
 
 import argparse
+import base64
 import json
+import os
 import re
+import socket
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -99,17 +104,85 @@ def short(v):
     return s if len(s) < 80 else s[:77] + "..."
 
 
+class Ws:
+    """A minimal websocket client (no TLS, text frames) that keeps the events it receives."""
+
+    def __init__(self, base, token):
+        host, port = base.split("//")[1].split(":")
+        self.sock = socket.create_connection((host, int(port)), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((f"GET /api/v4/websocket HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
+                           f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += self.sock.recv(4096)
+        self.rest = buf.split(b"\r\n\r\n", 1)[1]
+        self.events = []
+        self.send({"seq": 1, "action": "authentication_challenge", "data": {"token": token}})
+        threading.Thread(target=self.read, daemon=True).start()
+
+    def send(self, obj):
+        data = json.dumps(obj).encode()
+        mask = os.urandom(4)
+        head = bytes([0x81]) + (bytes([0x80 | len(data)]) if len(data) < 126 else bytes([0x80 | 126]) + len(data).to_bytes(2, "big"))
+        self.sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def recv_exact(self, n):
+        while len(self.rest) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise EOFError
+            self.rest += chunk
+        out, self.rest = self.rest[:n], self.rest[n:]
+        return out
+
+    def read(self):
+        self.sock.settimeout(None)
+        try:
+            while True:
+                b0, b1 = self.recv_exact(2)
+                n = b1 & 0x7F
+                if n == 126:
+                    n = int.from_bytes(self.recv_exact(2), "big")
+                elif n == 127:
+                    n = int.from_bytes(self.recv_exact(8), "big")
+                payload = self.recv_exact(n)
+                if b0 & 0x0F == 1:
+                    ev = json.loads(payload, object_pairs_hook=lambda kv: kv)
+                    if dict(ev).get("event"):
+                        self.events.append(ev)
+        except (EOFError, OSError):
+            pass
+
+    def take(self, wait=1.0):
+        time.sleep(wait)
+        out, self.events = self.events, []
+        return out
+
+
 class Run:
     def __init__(self, go, rust, tg, tr):
         self.go, self.rust, self.tg, self.tr = go, rust, tg, tr
         self.failed = 0
         self.n = 0
 
-    def check(self, method, path, body=None, shape_only=False, ignore=()):
+    def check(self, method, path, body=None, shape_only=False, ignore=(), watch=None):
+        """`watch`: (Go socket, Rust socket) of an observer whose events the request should cause."""
         self.n += 1
+        if watch:
+            watch[0].take(0), watch[1].take(0)
         sa, va, ha = call(self.go, self.tg, method, path, body)
         sb, vb, hb = call(self.rust, self.tr, method, path, body)
         out = []
+        if watch:
+            ea, eb = watch[0].take(), watch[1].take()
+            na, nb = [dict(e)["event"] for e in ea], [dict(e)["event"] for e in eb]
+            if sorted(na) != sorted(nb):
+                out.append(f"events {na} from Go, {nb} from Rust")
+            for x in ea:
+                y = next((e for e in eb if dict(e)["event"] == dict(x)["event"]), None)
+                if y is not None:
+                    diff(norm_pairs(x), norm_pairs(y), f"<{dict(x)['event']}>", True, out)
         if sa != sb:
             out.append(f"status {sa} in Go, {sb} in Rust" + (f": {short(norm_pairs(vb))}" if sb >= 400 else ""))
         if isinstance(va, (bytes, bytearray)) or isinstance(vb, (bytes, bytearray)):
@@ -219,9 +292,23 @@ def main():
     r.check("POST", f"/teams/{team}/files/search", {"terms": "a", "is_or_search": False, "time_zone_offset": 0,
                                                    "include_deleted_channels": True, "page": 0, "per_page": 60})
     if a.writes:
-        pg, pr = r.check("POST", "/posts", {"channel_id": ch, "root_id": "", "message": "diff check", "file_ids": []},
-                         shape_only=True)
-        r.check("POST", "/users/me/typing", {"channel_id": ch, "parent_id": ""})
+        # An observer in the channel: the second user of the first page of its members.
+        mem, _ = r.check("GET", f"/users?in_channel={ch}&page=0&per_page=5&sort=admin&active=true")
+        other = next(dict(u[1])["username"] for u in mem[1] if dict(u[1])["id"] != uid)
+        og, orr = login(a.go, other, a.password), login(a.rust, other, a.password)
+        watch = (Ws(a.go, og), Ws(a.rust, orr))
+        time.sleep(1)
+        pg, pr = r.check("POST", "/posts", {"channel_id": ch, "root_id": "", "message": "diff check @" + other,
+                                            "file_ids": []}, shape_only=True, watch=watch)
+        rg, rr = get(pg, "id"), get(pr, "id")
+        reply = {"channel_id": ch, "message": "reply", "file_ids": []}
+        r.check("POST", "/posts", None, shape_only=True)  # malformed: both 400
+        r.check("POST", "/users/me/typing", {"channel_id": ch, "parent_id": ""}, watch=watch)
+        # Same action, each server its own root.
+        for base, tok, root, ws in ((a.go, tg, rg, watch[0]), (a.rust, tr, rr, watch[1])):
+            call(base, tok, "POST", "/posts", dict(reply, root_id=root))
+        ea, eb = watch[0].take(), watch[1].take()
+        print("reply events: Go", [dict(e)["event"] for e in ea], "Rust", [dict(e)["event"] for e in eb])
         r.check("POST", "/drafts", {"user_id": uid, "channel_id": ch, "root_id": "", "message": "draft", "file_ids": []},
                 shape_only=True)
         r.check("DELETE", f"/users/{uid}/channels/{ch}/drafts", shape_only=True)
