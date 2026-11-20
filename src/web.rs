@@ -89,8 +89,8 @@ type Gz = (SystemTime, Arc<Vec<u8>>);
 pub struct GzCache(Mutex<HashMap<(PathBuf, Enc), Gz>>);
 
 impl GzCache {
-    fn get(&self, path: &PathBuf, enc: Enc, mtime: SystemTime, data: &[u8]) -> Arc<Vec<u8>> {
-        let key = (path.clone(), enc);
+    fn get(&self, path: &std::path::Path, enc: Enc, mtime: SystemTime, data: &[u8]) -> Arc<Vec<u8>> {
+        let key = (path.to_path_buf(), enc);
         if let Some((t, gz)) = self.0.lock().unwrap().get(&key)
             && *t == mtime
         {

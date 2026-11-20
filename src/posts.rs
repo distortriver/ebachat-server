@@ -1191,6 +1191,9 @@ impl App {
     }
 }
 
+/// The post's JSON for one recipient, when it is not the shared one.
+pub type PostFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// A post for its websocket events: `post` for every recipient, and for members of privately mentioned channels
 /// their own copy (`post_json_for`).
 pub struct BroadcastPost {
@@ -1202,7 +1205,7 @@ pub struct BroadcastPost {
 
 impl BroadcastPost {
     /// The post's JSON for one recipient, when it differs from `post`'s.
-    pub fn per_user(&self) -> Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>> {
+    pub fn per_user(&self) -> Option<PostFor> {
         if self.private.is_empty() {
             return None;
         }

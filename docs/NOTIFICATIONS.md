@@ -55,6 +55,9 @@ cd tools/emailtpl && go run . -templates ../../../ebac-messenger/mattermost/serv
   `api.system.id_loaded.not_available.app_error` after the read check, as Go without the licensed service.
 - **Test push:** `GET /system/ping?device_id=` answers `CanReceiveNotifications` `true`, `false` or `unknown`.
 - **Session wipe** (`sendMobileWipeSignal`) is in `push::wipe`, for `MobileEphemeralModeSettings.Enable`.
+- **Session expired** (`NotifySessionsExpired`, the `expiry_notify` job): a `session` push per mobile session
+  that expired in the last hour, through `push::send_to_proxy` (the same `REMOVE`/`FAIL` handling), its text in
+  the user's locale; no signature, as Go.
 
 ## Email
 
@@ -88,6 +91,8 @@ cd tools/emailtpl && go run . -templates ../../../ebac-messenger/mattermost/serv
   | Account deactivated | `PUT /users/{id}/active` by the user |
   | Personal access token added / rotated | `POST /users/{id}/tokens`, `POST /users/tokens/rotate` |
   | Team invitations (with channels and message) | `POST /teams/{id}/invite/email` (and `?graceful`), `/invite_people` |
+  | Invitation reminder ("Reminder: ..." title, `reminder_interval` 48 in the token) | the `resend_invitation_email` job, 48 h after a graceful invite |
+  | Sign-in method changed (to email; to GitLab SSO) | `POST /users/login/switch` GitLab to email; the GitLab callback that completes an email-to-GitLab switch |
   | Test email | `POST /email/test` |
 
 - **Invitations:** a `team_invitation` token per address, the signup link as Go builds it, 20 per hour per sender
@@ -97,7 +102,7 @@ cd tools/emailtpl && go run . -templates ../../../ebac-messenger/mattermost/serv
   channels the inviter may still add to, the token is deleted.
 - **Not reachable without a license:** guest invitations and magic links (`SendGuestInviteEmails`,
   `SendMagicLinkEmailSelfService` are ported in `email.rs` for when they are), license, cloud and IP filter
-  emails. `email::send_sign_in_change` (`SendSignInChangeEmail`) is there for the SSO sign-in switch routes.
+  emails.
 
 ## Verification against Go
 
@@ -115,6 +120,9 @@ scenarios ran against both, and the records were compared after normalizing ids,
 - **Batching:** two mentions and a DM with `email_interval` 60 s and a 30 s batching interval: one identical
   batched email from each server, about a minute later.
 - **Errors** of `POST /email/test` and the routes above: the same status and id.
+- **Later additions** (the same sinks, a fake GitLab for the sign-in flows): the session expiry pushes (delivered
+  and `REMOVE`), the invitation reminders of the resend job, and the sign-in change emails of both switch
+  directions and the password reset email: identical.
 
 ## Deviations from Go
 

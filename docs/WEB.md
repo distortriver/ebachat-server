@@ -19,7 +19,8 @@ answers them.
   - `Last-Modified`, the preconditions of RFC 7232 (`If-Match`, `If-None-Match`, `If-Modified-Since`,
     `If-Unmodified-Since`, `If-Range`, no ETag), and byte ranges: one range is a 206 with `Content-Range`, several
     are `multipart/byteranges`, and a range past the end is a 416;
-  - gzip as Go's `gzhttp` does it: only a full 200 of at least 1 KiB of a compressible type, and `Vary:
+  - compressed as Go's `gzhttp` (klauspost/compress 1.19) does it: zstd or gzip by the `Accept-Encoding`
+    q-values (zstd when equal), only a full 200 of at least 1 KiB of a type its default filter takes, and `Vary:
     Accept-Encoding` on every answer;
   - no `Expires: 0`, whatever the status.
 - **The client's page:** every other GET or HEAD outside `/api/` gets `root.html`, with the site name and
@@ -71,11 +72,11 @@ answers them.
 - **Same email, different SSO account:** never re-linked. GitLab's `IsSameUser` compares two pointers in Go, so the
   outcome is the same.
 - **The desktop-token login answer** leaves out the user's password hash and MFA secret. Go writes them back.
-- **Gzip bytes:** a gzip body decompresses to the same bytes, but the compressed bytes differ from Go's (another
-  deflate implementation).
+- **Compressed bytes:** a gzip or zstd body decompresses to the same bytes, but the compressed bytes differ from
+  Go's (other implementations).
 - **Multipart boundaries** are random, in Go as well.
-- **API answers:** Go also adds `Vary: Accept-Encoding` to every API answer and gzips them. Rust does neither.
-- **Audit records:** Go writes them for these routes; the Rust server writes none.
+- **API answers** are compressed as Go's (`src/compress.rs`, see `docs/MAP.md`); the `Audits` rows of these
+  routes are written as Go's (`docs/ADMIN.md`).
 
 ## Checks
 
