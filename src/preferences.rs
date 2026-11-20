@@ -230,10 +230,12 @@ pub fn user_param(s: &Session, id: &str) -> ApiResult<String> {
     Ok(id)
 }
 
-async fn get_all(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Vec<Preference>>> {
+async fn get_all(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Option<Vec<Preference>>>> {
     let user_id = user_param(&s, &user_id)?;
     app.require_user(&s, &user_id).await?;
-    Ok(Json(app.preferences(&user_id).await?))
+    // Go's store leaves the slice nil when there are none: `null`.
+    let p = app.preferences(&user_id).await?;
+    Ok(Json(if p.is_empty() { None } else { Some(p) }))
 }
 
 async fn get_category(

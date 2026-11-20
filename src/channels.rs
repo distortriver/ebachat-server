@@ -485,7 +485,7 @@ impl App {
     // ---------- store writes ----------
 
     /// `saveChannelT` + `upsertPublicChannelT`: a new channel, or the one already of that name (`Err(existing)`).
-    async fn save_channel(&self, c: &mut Channel, check_limit: bool) -> ApiResult<Result<(), Channel>> {
+    pub(crate) async fn save_channel(&self, c: &mut Channel, check_limit: bool) -> ApiResult<Result<(), Channel>> {
         if c.id.is_empty() {
             c.id = new_id();
         }
@@ -1639,7 +1639,7 @@ pub fn fulltext_term(term: &str) -> String {
 impl App {
     /// `searchClause` + `orderByDisplayNameMatch` as SQL text, with `$n` for the like term (`n`) and the fulltext
     /// term (`n + 1`). None when the term is empty.
-    async fn search_sql(&self, n: usize, columns: &[&str]) -> ApiResult<String> {
+    pub(crate) async fn search_sql(&self, n: usize, columns: &[&str]) -> ApiResult<String> {
         let likes: Vec<String> = columns.iter().map(|c| format!("LOWER({c}) LIKE LOWER(${n}) ESCAPE '*'")).collect();
         let cfg = self.text_search_config().await?;
         Ok(format!(

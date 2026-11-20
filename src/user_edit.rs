@@ -31,6 +31,7 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/users/{user_id}/password", put(update_password))
         .route("/api/v4/users/{user_id}/status/custom", put(set_custom_status).delete(remove_custom_status))
         .route("/api/v4/users/{user_id}/status/custom/recent/delete", post(remove_recent_custom_status))
+        .route("/api/v4/users/{user_id}/status/custom/recent", axum::routing::delete(remove_recent_custom_status))
         .route("/api/v4/users/password/reset/send", post(send_password_reset))
         .route("/api/v4/users/email/verify/send", post(send_verification))
         .route("/api/v4/users/{user_id}/sessions", get(get_sessions))

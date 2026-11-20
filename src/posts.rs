@@ -1361,6 +1361,9 @@ impl App {
         if let Err(e) = crate::notify::send_notifications(self, &rpost, c, &user, parent.as_ref(), flags.set_online).await {
             eprintln!("send notifications for {}: {}", rpost.id, e.detailed_error);
         }
+        if flags.trigger_webhooks {
+            crate::outgoing::post_created(&rpost, c, &user);
+        }
         if let Some(ep) = ephemeral {
             self.send_ephemeral(&user.id, ep).await;
         }
