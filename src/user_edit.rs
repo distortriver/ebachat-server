@@ -1140,7 +1140,7 @@ struct EmailBody {
 
 /// `sendPasswordReset` (`SendPasswordReset`): a recovery token and its email; an unknown address is OK, every error
 /// is OK in hardened mode.
-async fn send_password_reset(St(app): St<State>, Body(b): Body<EmailBody>) -> ApiResult<Json<Value>> {
+async fn send_password_reset(St(app): St<State>, MaybeAuth(s): MaybeAuth, Body(b): Body<EmailBody>) -> ApiResult<Json<Value>> {
     let email = b.email.to_lowercase();
     if email.is_empty() {
         return Err(AppError::invalid_param("email"));
@@ -1165,8 +1165,12 @@ async fn send_password_reset(St(app): St<State>, Body(b): Body<EmailBody>) -> Ap
     }
     .await;
     match r {
+        Ok(()) => {
+            crate::audit::log(&app, s.as_deref(), &format!("sent={email}")).await;
+            Ok(ok())
+        }
         Err(e) if !hardened => Err(e),
-        _ => Ok(ok()),
+        Err(_) => Ok(ok()),
     }
 }
 

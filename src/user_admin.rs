@@ -1363,6 +1363,7 @@ async fn switch_account(
             ));
         }
         let (link, cookie) = crate::sso::switch_email_to_oauth(&app, &headers, &r.email, &r.new_service).await?;
+        crate::audit::log(&app, s.as_deref(), "success").await;
         let mut resp = crate::sso::go_map_json(&BTreeMap::from([("follow_link".to_string(), link)])).into_response();
         resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(c) = cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
@@ -1387,6 +1388,11 @@ async fn switch_account(
             return Err(AppError::bad_request("api.user.oauth_to_email.not_oauth_user.app_error", ""));
         }
         app.set_password(&user, &r.new_password, None).await?;
+        let (email, locale) = (user.email.clone(), user.locale.clone());
+        crate::email::go(&app, "signin change email", move |app| async move {
+            let method = crate::i18n::tl(&locale, "api.templates.signin_change_email.body.method_email", &[]);
+            crate::email::send_sign_in_change(&app, &email, &method, &locale).await
+        });
         app.revoke_all_sessions(&s.user_id).await?;
         crate::audit::log(&app, Some(&s), "success").await;
         return Ok(Json(json!({"follow_link": "/login?extra=signin_change"})).into_response());

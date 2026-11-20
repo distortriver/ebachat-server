@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     ebachat_server::reminders::spawn(app.clone());
     ebachat_server::job_workers::startup(&app).await;
     ebachat_server::jobs::spawn(app.clone());
+    ebachat_server::logs::startup(&app).await;
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("listening on {listen}");
     ebachat_server::logs::info(&format!("Server is listening on {}", listener.local_addr()?), &[]);

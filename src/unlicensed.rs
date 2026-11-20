@@ -17,7 +17,8 @@
 //! - `nonempty:key:STATUS:id`: that error when the body's array `key` is not empty;
 //! - `cfgnil:Section:STATUS:id`: the body is a config (the server's when it is not one), whose section must have
 //!   every setting;
-//! - `qbool:name`: the query parameter must be `true` or `false`.
+//! - `qbool:name`: the query parameter must be `true` or `false`;
+//! - `audit:extra`: an `Audits` row (`c.LogAudit(extra)`), `_` for a space.
 
 // Based on Mattermost server/channels/api4 (access_control.go, cloud.go, compliance.go, content_flagging.go,
 // custom_profile_attributes.go, data_retention.go, elasticsearch.go, group.go, ip_filtering.go, ldap.go,
@@ -162,6 +163,10 @@ async fn run(
                 }
                 _ => None,
             },
+            "audit" => {
+                crate::audit::log(&app, session.as_deref(), &arg(1).replace('_', " ")).await;
+                None
+            }
             "qbool" => {
                 let v = query.get(arg(1)).map(String::as_str).unwrap_or("");
                 (v != "true" && v != "false").then(|| AppError::invalid_param(arg(1)))

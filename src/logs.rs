@@ -247,6 +247,40 @@ pub fn debug(msg: &str, fields: &[(&str, Value)]) {
     log(Level::Debug, msg, fields)
 }
 
+/// What Go logs while it starts (`NewServer`, `Server.Start`) that an admin sees in `/logs`: a site URL that is not
+/// one, the working directory and the config's source, the SMTP connection test (with email notifications on),
+/// the file storage test, a push server over plain HTTP, then "Starting Server...".
+pub async fn startup(app: &crate::app::App) {
+    if reqwest::Url::parse(app.cfg.str("ServiceSettings.SiteURL")).is_err()
+        && std::env::var("IS_CI").as_deref() != Ok("true")
+        && std::env::var("IS_LOCAL_TESTING").as_deref() != Ok("true")
+    {
+        error(
+            "SiteURL must be set. Some features will operate incorrectly if the SiteURL is not set. See documentation for details: https://mattermost.com/pl/configure-site-url",
+            &[],
+        );
+    }
+    let pwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    info("Printing current working", &[("directory", pwd.into())]);
+    info("Loaded config", &[("source", app.cfg.describe().into())]);
+    if app.cfg.bool("EmailSettings.SendEmailNotifications")
+        && let Err(e) = crate::mail::test_connection(&crate::email::smtp_config(app, "")).await
+    {
+        error("Mail server connection test failed", &[("error", e.into())]);
+    }
+    let test = app.files.write("testfile", bytes::Bytes::from_static(b"testingwrite")).await;
+    match test {
+        Ok(()) => {
+            let _ = app.files.remove("testfile").await;
+        }
+        Err(e) => error("Problem with file storage settings", &[("error", e.to_string().into())]),
+    }
+    if app.cfg.str("EmailSettings.PushNotificationServer").starts_with("http://") {
+        warn("Your push notification server is configured with HTTP. For improved security, update to HTTPS in your configuration.", &[]);
+    }
+    info("Starting Server...", &[]);
+}
+
 /// The fields Go's handler logger carries for a request (`path`, `request_id`, `ip_addr`, `method`).
 pub fn request_fields(request_id: &str) -> Vec<(&'static str, Value)> {
     let r = crate::audit::req();

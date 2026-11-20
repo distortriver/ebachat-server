@@ -172,4 +172,4 @@ PUT    /api/v4/system/e2e/ai_bridge |  | 501 api.ai_bridge_test_helper.disabled.
 GET    /api/v4/system/support_packet | perm:manage_system | 403 api.no_license | E10 or E20 license required to use this endpoint.
 GET    /api/v4/trial-license/prev |  | 403 api.license.upgrade_needed.app_error | Feature requires an upgrade to Enterprise Edition.
 GET    /api/v4/upgrade_to_enterprise/allowed | perm:manage_system | 403 api.upgrade_to_enterprise.system_not_supported.app_error | Mattermost was unable to upgrade to Enterprise Edition. This feature will only work on Linux systems with x86-64 architecture.
-POST   /api/v4/trial-license | rperm:manage_license_information | 403 api.license.upgrade_needed.app_error
+POST   /api/v4/trial-license | audit:attempt rperm:manage_license_information | 403 api.license.upgrade_needed.app_error
