@@ -245,6 +245,21 @@ impl App {
         })
     }
 
+    /// `HTTPService.MakeClient(false)` that never follows a redirect (`getRedirectLocation`).
+    pub fn no_redirect_client(&self) -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .dns_resolver(Arc::new(FilteringResolver(self.allowed_untrusted())))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("http client")
+        })
+    }
+
     /// `HTTPService.MakeClient(true)`: this server's own plugin routes.
     pub fn trusted_client(&self) -> &'static reqwest::Client {
         static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

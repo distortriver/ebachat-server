@@ -1,0 +1,136 @@
+{
+    "sysconsole_read_about_edition_and_license": [
+        "read_license_information"
+    ],
+    "sysconsole_read_authentication_ldap": [
+        "test_ldap",
+        "read_ldap_sync_job"
+    ],
+    "sysconsole_read_compliance_compliance_export": [
+        "read_compliance_export_job",
+        "download_compliance_export_result"
+    ],
+    "sysconsole_read_compliance_compliance_monitoring": [
+        "read_audits"
+    ],
+    "sysconsole_read_compliance_data_retention_policy": [
+        "read_data_retention_job"
+    ],
+    "sysconsole_read_environment_elasticsearch": [
+        "read_elasticsearch_post_indexing_job",
+        "read_elasticsearch_post_aggregation_job"
+    ],
+    "sysconsole_read_reporting_server_logs": [
+        "get_logs"
+    ],
+    "sysconsole_read_reporting_site_statistics": [
+        "get_analytics"
+    ],
+    "sysconsole_read_reporting_team_statistics": [
+        "get_analytics"
+    ],
+    "sysconsole_read_user_management_channels": [
+        "read_public_channel",
+        "read_channel",
+        "read_public_channel_groups",
+        "read_private_channel_groups"
+    ],
+    "sysconsole_read_user_management_teams": [
+        "list_private_teams",
+        "list_public_teams",
+        "view_team"
+    ],
+    "sysconsole_read_user_management_users": [
+        "read_other_users_teams"
+    ],
+    "sysconsole_write_about_edition_and_license": [
+        "manage_license_information"
+    ],
+    "sysconsole_write_authentication_email": [
+        "invalidate_email_invite"
+    ],
+    "sysconsole_write_authentication_ldap": [
+        "create_ldap_sync_job",
+        "manage_ldap_sync_job",
+        "add_ldap_public_cert",
+        "remove_ldap_public_cert",
+        "add_ldap_private_cert",
+        "remove_ldap_private_cert"
+    ],
+    "sysconsole_write_authentication_saml": [
+        "get_saml_metadata_from_idp",
+        "add_saml_public_cert",
+        "add_saml_private_cert",
+        "add_saml_idp_cert",
+        "remove_saml_public_cert",
+        "remove_saml_private_cert",
+        "remove_saml_idp_cert",
+        "get_saml_cert_status"
+    ],
+    "sysconsole_write_compliance_compliance_export": [
+        "create_compliance_export_job",
+        "manage_compliance_export_job",
+        "download_compliance_export_result"
+    ],
+    "sysconsole_write_compliance_data_retention_policy": [
+        "create_data_retention_job",
+        "manage_data_retention_job"
+    ],
+    "sysconsole_write_environment_database": [
+        "recycle_database_connections"
+    ],
+    "sysconsole_write_environment_elasticsearch": [
+        "test_elasticsearch",
+        "create_elasticsearch_post_indexing_job",
+        "manage_elasticsearch_post_indexing_job",
+        "create_elasticsearch_post_aggregation_job",
+        "manage_elasticsearch_post_aggregation_job",
+        "purge_elasticsearch_indexes"
+    ],
+    "sysconsole_write_environment_file_storage": [
+        "test_s3"
+    ],
+    "sysconsole_write_environment_smtp": [
+        "test_email"
+    ],
+    "sysconsole_write_environment_web_server": [
+        "test_site_url",
+        "reload_config",
+        "invalidate_caches"
+    ],
+    "sysconsole_write_site_customization": [
+        "edit_brand"
+    ],
+    "sysconsole_write_user_management_channels": [
+        "manage_public_channel_properties",
+        "manage_private_channel_properties",
+        "manage_public_channel_auto_translation",
+        "manage_private_channel_auto_translation",
+        "manage_private_channel_members",
+        "manage_public_channel_members",
+        "delete_private_channel",
+        "delete_public_channel",
+        "manage_channel_roles",
+        "convert_public_channel_to_private",
+        "convert_private_channel_to_public"
+    ],
+    "sysconsole_write_user_management_groups": [
+        "manage_private_channel_members",
+        "manage_public_channel_members",
+        "convert_public_channel_to_private",
+        "convert_private_channel_to_public"
+    ],
+    "sysconsole_write_user_management_teams": [
+        "manage_team",
+        "manage_team_roles",
+        "remove_user_from_team",
+        "join_private_teams",
+        "join_public_teams",
+        "add_user_to_team"
+    ],
+    "sysconsole_write_user_management_users": [
+        "edit_other_users",
+        "demote_to_guest",
+        "promote_guest"
+    ]
+}

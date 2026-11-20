@@ -1,0 +1,201 @@
+POST   /api/v4/access_control/decisions/actions/search | obj:action_search | 400 model.access_control_decision.is_valid.resource_type.app_error | Resource type is required.
+PUT    /api/v4/access_control_policies | obj:policy prop:type:type | 501 app.pap.create_access_control_policy.app_error
+PUT    /api/v4/access_control_policies/activate |  | 501 app.pap.update_access_control_policies_active.app_error | Could not update active status of access control policies.
+GET    /api/v4/access_control_policies/cel/autocomplete/fields | perm:manage_system | 400 api.access_control_policy.get_fields.limit.app_error | Get fields limit is not valid.
+POST   /api/v4/access_control_policies/cel/check | perm:manage_system | 501 app.pap.check_expression.app_error | Could not check expression.
+POST   /api/v4/access_control_policies/cel/simulate_users | obj:simulation prop:policy:policy | 501 api.access_control_policy.policy_simulation.feature_disabled
+POST   /api/v4/access_control_policies/cel/test | perm:manage_system | 501 app.pap.check_expression.app_error | Could not check expression.
+POST   /api/v4/access_control_policies/cel/validate_requester | perm:manage_system | 501 app.pap.check_expression.app_error | Could not check expression.
+POST   /api/v4/access_control_policies/cel/visual_ast | perm:manage_system | 501 app.pap.expression_to_visual_ast.app_error | Could not generate visual AST from expression.
+POST   /api/v4/access_control_policies/search | perm:manage_team_access_rules | 501 app.pap.search_access_control_policies.app_error | Could not search access control policies.
+DELETE /api/v4/access_control_policies/{policy_id} | id:policy_id perm:manage_system | 501 app.pap.delete_access_control_policy.app_error | Could not delete access control policy.
+GET    /api/v4/access_control_policies/{policy_id} | id:policy_id perm:manage_system | 501 app.pap.get_policy.app_error | Unable to retrieve the access control policy.
+GET    /api/v4/access_control_policies/{policy_id}/activate | id:policy_id perm:manage_system qbool:active | 501 app.pap.update_access_control_policies_active.app_error
+POST   /api/v4/access_control_policies/{policy_id}/assign | id:policy_id obj:assignments perm:manage_system nonempty:channel_ids:501:app.pap.assign_access_control_policy_to_channels.app_error | ok
+GET    /api/v4/access_control_policies/{policy_id}/resources/channels | id:policy_id perm:manage_system | 400 api.access_control_policy.get_channels.limit.app_error | Get channels limit is not valid.
+POST   /api/v4/access_control_policies/{policy_id}/resources/channels/search | id:policy_id perm:manage_system obj:channel_search | json {"channels":[],"total_count":0}
+DELETE /api/v4/access_control_policies/{policy_id}/unassign | id:policy_id obj:assignments need:channel_ids|team_ids:assignments | 501 app.pap.unassign_access_control_policy_from_channels.app_error
+GET    /api/v4/agents |  | json []
+GET    /api/v4/agents/status |  | json {"available":false,"reason":"app.agents.bridge.not_available.plugin_env_not_initialized"}
+DELETE /api/v4/audit_logs/certificate | perm:sysconsole_write_experimental_features | ok
+POST   /api/v4/audit_logs/certificate | perm:sysconsole_write_experimental_features | 400 api.admin.add_certificate.no_file.app_error | No file under 'certificate' in request.
+DELETE /api/v4/brand/image | perm:edit_brand | 404 api.admin.delete_brand_image.storage.not_found | Unable to delete brand image, not found.
+POST   /api/v4/brand/image |  | 400 api.admin.upload_brand_image.parse.app_error | Could not parse multipart form.
+GET    /api/v4/cloud/check-cws-connection | anon | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/customer |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+PUT    /api/v4/cloud/customer |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+PUT    /api/v4/cloud/customer/address |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/installation |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/limits |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/preview/modal_data |  | 404 app.cloud.preview_modal_bucket_url_not_configured | Preview bucket URL is not configured
+GET    /api/v4/cloud/products |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/subscription |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/subscription/invoices |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+GET    /api/v4/cloud/subscription/invoices/{invoice_id}/pdf |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+POST   /api/v4/cloud/validate-business-email |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+POST   /api/v4/cloud/validate-workspace-business-email |  | 400 api.server.cws.needs_enterprise_edition | Service only available in Mattermost Enterprise edition
+POST   /api/v4/cloud/webhook | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+GET    /api/v4/cluster/status | perm:sysconsole_read_environment_high_availability | json []
+GET    /api/v4/compliance/reports | perm:read_compliance_export_job | 501 ent.compliance.licence_disable.app_error | Compliance functionality disabled by current license. Please contact your system administrator about upgrading your enterprise license.
+POST   /api/v4/compliance/reports | perm:create_compliance_export_job | 501 ent.compliance.licence_disable.app_error | Compliance functionality disabled by current license. Please contact your system administrator about upgrading your enterprise license.
+GET    /api/v4/compliance/reports/{report_id} | id:report_id perm:read_compliance_export_job | 501 ent.compliance.licence_disable.app_error | Compliance functionality disabled by current license. Please contact your system administrator about upgrading your enterprise license.
+GET    /api/v4/compliance/reports/{report_id}/download | id:report_id perm:download_compliance_export_result | 501 ent.compliance.licence_disable.app_error | Compliance functionality disabled by current license. Please contact your system administrator about upgrading your enterprise license.
+GET    /api/v4/content_flagging/config |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+PUT    /api/v4/content_flagging/config |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/fields |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/flag/config |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/post/{post_id} |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+POST   /api/v4/content_flagging/post/{post_id}/assign/{content_reviewer_id} |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+POST   /api/v4/content_flagging/post/{post_id}/exposure_report |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/post/{post_id}/field_values |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+POST   /api/v4/content_flagging/post/{post_id}/flag |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+PUT    /api/v4/content_flagging/post/{post_id}/keep |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+PUT    /api/v4/content_flagging/post/{post_id}/remove |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+POST   /api/v4/content_flagging/post/{post_id}/report |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/team/{team_id}/reviewers/search |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/content_flagging/team/{team_id}/status |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
+GET    /api/v4/custom_profile_attributes/fields |  | json []
+POST   /api/v4/custom_profile_attributes/fields | perm:manage_system | 403 app.property.license_error | Your license does not support this property group.
+DELETE /api/v4/custom_profile_attributes/fields/{field_id} | id:field_id | 404 app.property.not_found.app_error | The specified property does not exist.
+PATCH  /api/v4/custom_profile_attributes/fields/{field_id} | id:field_id | 404 app.property.not_found.app_error | The specified property does not exist.
+GET    /api/v4/custom_profile_attributes/group |  | 403 app.property.license_error | Your license does not support this property group.
+PATCH  /api/v4/custom_profile_attributes/values |  | 400 api.property_value.patch.empty_body.app_error | Request body must contain at least one property value update.
+GET    /api/v4/data_retention/policies | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+POST   /api/v4/data_retention/policies | perm:sysconsole_write_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+DELETE /api/v4/data_retention/policies/{policy_id} | perm:sysconsole_write_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+GET    /api/v4/data_retention/policies/{policy_id} | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+PATCH  /api/v4/data_retention/policies/{policy_id} | perm:sysconsole_write_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+DELETE /api/v4/data_retention/policies/{policy_id}/channels | id:policy_id arr perm:sysconsole_write_compliance_data_retention_policy | 400 api.payload.parse.error | An error occurred while parsing the payload.
+GET    /api/v4/data_retention/policies/{policy_id}/channels | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+POST   /api/v4/data_retention/policies/{policy_id}/channels | id:policy_id arr perm:sysconsole_write_compliance_data_retention_policy | 400 api.payload.parse.error | An error occurred while parsing the payload.
+POST   /api/v4/data_retention/policies/{policy_id}/channels/search | id:policy_id perm:sysconsole_read_compliance_data_retention_policy obj:channel_search | json []
+DELETE /api/v4/data_retention/policies/{policy_id}/teams | id:policy_id arr perm:sysconsole_write_compliance_data_retention_policy | 400 api.payload.parse.error | An error occurred while parsing the payload.
+GET    /api/v4/data_retention/policies/{policy_id}/teams | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+POST   /api/v4/data_retention/policies/{policy_id}/teams | id:policy_id arr perm:sysconsole_write_compliance_data_retention_policy | 400 api.payload.parse.error | An error occurred while parsing the payload.
+POST   /api/v4/data_retention/policies/{policy_id}/teams/search | id:policy_id perm:sysconsole_read_compliance_data_retention_policy obj:team_search | json []
+GET    /api/v4/data_retention/policies_count | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+GET    /api/v4/data_retention/policy |  | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
+POST   /api/v4/elasticsearch/purge_indexes | rperm:purge_elasticsearch_indexes | 501 ent.elasticsearch.test_config.license.error | Your Mattermost license doesn't support indexed search.
+POST   /api/v4/elasticsearch/test | cfgnil:ElasticsearchSettings:400:api.elasticsearch.test_elasticsearch_settings_nil.app_error rperm:test_elasticsearch | 400 api.elasticsearch.test_elasticsearch_settings_nil.app_error | Elasticsearch settings has unset values.
+POST   /api/v4/ephemeral_mode/cleanup |  | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
+POST   /api/v4/ephemeral_mode/purge |  | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
+POST   /api/v4/ephemeral_mode/wipe | anon | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
+GET    /api/v4/exports | perm:manage_system | json []
+GET    /api/v4/groups |  | 501 api.license_error | api endpoint requires a license
+POST   /api/v4/groups |  | 501 api.license_error | api endpoint requires a license
+POST   /api/v4/groups/names |  | 501 api.license_error | api endpoint requires a license
+DELETE /api/v4/groups/{group_id} |  | 501 api.license_error | api endpoint requires a license
+GET    /api/v4/groups/{group_id} |  | 501 api.license_error | api endpoint requires a license
+DELETE /api/v4/groups/{group_id}/members |  | 501 api.license_error | api endpoint requires a license
+GET    /api/v4/groups/{group_id}/members |  | 501 api.license_error | api endpoint requires a license
+POST   /api/v4/groups/{group_id}/members |  | 501 api.license_error | api endpoint requires a license
+PUT    /api/v4/groups/{group_id}/patch |  | 501 api.license_error | api endpoint requires a license
+POST   /api/v4/groups/{group_id}/restore |  | 501 api.license_error | api endpoint requires a license
+GET    /api/v4/groups/{group_id}/stats |  | 501 api.license_error | api endpoint requires a license
+GET    /api/v4/health/findings | perm:manage_system on:FeatureFlags.HealthDashboard:501:api.health_finding.license.app_error | 501 api.health_finding.feature_disabled.app_error
+GET    /api/v4/hosted_customer/signup_available |  | 501 api.server.hosted_signup_unavailable.error | Portal unavailable for self-hosted signup.
+GET    /api/v4/imports | perm:manage_system | json []
+GET    /api/v4/ip_filtering |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
+POST   /api/v4/ip_filtering |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
+GET    /api/v4/ip_filtering/my_ip |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
+DELETE /api/v4/ldap/certificate/private | perm:remove_ldap_private_cert | 500 api.admin.remove_certificate.delete.app_error | An error occurred while deleting the certificate.
+POST   /api/v4/ldap/certificate/private | perm:add_ldap_private_cert | 400 api.admin.add_certificate.parseform.app_error | Error parsing multiform request
+DELETE /api/v4/ldap/certificate/public | perm:remove_ldap_public_cert | 500 api.admin.remove_certificate.delete.app_error | An error occurred while deleting the certificate.
+POST   /api/v4/ldap/certificate/public | perm:add_ldap_public_cert | 400 api.admin.add_certificate.parseform.app_error | Error parsing multiform request
+GET    /api/v4/ldap/groups | perm:sysconsole_read_user_management_groups | 501 api.ldap_groups.license_error | your license does not support ldap groups
+DELETE /api/v4/ldap/groups/{remote_id}/link | perm:sysconsole_write_user_management_groups | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/groups/{remote_id}/link | perm:sysconsole_write_user_management_groups | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/migrateid | prop:toAttribute:toAttribute perm:manage_system | 501 api.ldap_groups.license_error
+POST   /api/v4/ldap/sync |  | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/test |  | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/test_connection |  | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/test_diagnostics |  | 501 api.ldap_groups.license_error | your license does not support ldap groups
+POST   /api/v4/ldap/users/{user_id}/group_sync_memberships | perm:sysconsole_write_user_management_groups | 404 app.user.missing_account.const | Unable to find the user.
+GET    /api/v4/llmservices |  | json []
+GET    /api/v4/logs/download | rperm:get_logs | 500 api.system.logs.download_bytes_buffer.app_error | Failed to write logs to buffer
+GET    /api/v4/oauth/outgoing_connections | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+POST   /api/v4/oauth/outgoing_connections | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+POST   /api/v4/oauth/outgoing_connections/validate | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+DELETE /api/v4/oauth/outgoing_connections/{outgoing_oauth_connection_id} | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+GET    /api/v4/oauth/outgoing_connections/{outgoing_oauth_connection_id} | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+PUT    /api/v4/oauth/outgoing_connections/{outgoing_oauth_connection_id} | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
+GET    /api/v4/plugins | off:PluginSettings.Enable:501:app.plugin.disabled.app_error perm:sysconsole_read_plugins | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+POST   /api/v4/plugins |  | 501 app.plugin.upload_disabled.app_error | Plugins and/or plugin uploads have been disabled.
+POST   /api/v4/plugins/install_from_url |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+GET    /api/v4/plugins/marketplace |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+POST   /api/v4/plugins/marketplace |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+GET    /api/v4/plugins/statuses | off:PluginSettings.Enable:501:app.plugin.disabled.app_error perm:sysconsole_read_plugins | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+GET    /api/v4/plugins/webapp | anon off:PluginSettings.Enable:501:app.plugin.disabled.app_error | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+DELETE /api/v4/plugins/{plugin_id} |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+POST   /api/v4/plugins/{plugin_id}/disable |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+POST   /api/v4/plugins/{plugin_id}/enable |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
+POST   /api/v4/properties/groups/{group_name}/fields/search |  | 404 app.property_group.get.app_error | Unable to get property group.
+GET    /api/v4/properties/groups/{group_name}/system/values |  | 404 app.property_group.get.app_error | Unable to get property group.
+PATCH  /api/v4/properties/groups/{group_name}/system/values |  | 404 app.property_group.get.app_error | Unable to get property group.
+GET    /api/v4/properties/groups/{group_name}/{object_type}/fields |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+POST   /api/v4/properties/groups/{group_name}/{object_type}/fields |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+DELETE /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+PATCH  /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+DELETE /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+GET    /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+PATCH  /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+POST   /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+GET    /api/v4/properties/groups/{group_name}/{object_type}/values/{target_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+PATCH  /api/v4/properties/groups/{group_name}/{object_type}/values/{target_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
+GET    /api/v4/recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+GET    /api/v4/recaps/limit_status |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/recaps/mark_viewed |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+DELETE /api/v4/recaps/{recap_id} |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+GET    /api/v4/recaps/{recap_id} |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/recaps/{recap_id}/read |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/recaps/{recap_id}/regenerate |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+GET    /api/v4/remotecluster | perm:manage_secure_connections|manage_shared_channels | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster | perm:manage_secure_connections | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/accept_invite | perm:manage_secure_connections | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/confirm_invite | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+POST   /api/v4/remotecluster/msg | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+POST   /api/v4/remotecluster/ping | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+POST   /api/v4/remotecluster/upload/{upload_id} | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+DELETE /api/v4/remotecluster/{remote_id} | perm:manage_secure_connections | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+GET    /api/v4/remotecluster/{remote_id} | perm:manage_secure_connections|manage_shared_channels | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+PATCH  /api/v4/remotecluster/{remote_id} | perm:manage_secure_connections | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/{remote_id}/channels/{channel_id}/invite | id:channel_id perm:manage_shared_channels | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/{remote_id}/channels/{channel_id}/uninvite | id:channel_id perm:manage_shared_channels | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/{remote_id}/generate_invite | perm:manage_secure_connections | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+GET    /api/v4/remotecluster/{remote_id}/sharedchannelremotes | perm:manage_secure_connections|manage_shared_channels | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+POST   /api/v4/remotecluster/{remote_id}/image | anon | 401 api.context.session_expired.app_error | Invalid or expired session, please login again.
+POST   /api/v4/reports/posts | perm:manage_system | 400 model.post.query_params.invalid_channel_id | Invalid channel id.
+POST   /api/v4/reports/users/export | perm:manage_system | 400 app.report.start_users_batch_export.license_error | Batch reporting export only available to Pro and Enterprise.
+DELETE /api/v4/saml/certificate/idp | perm:remove_saml_idp_cert | 500 api.admin.remove_certificate.delete.app_error | An error occurred while deleting the certificate.
+POST   /api/v4/saml/certificate/idp | perm:add_saml_idp_cert | 400 api.admin.saml.set_certificate_from_metadata.invalid_content_type.app_error | Invalid content type.
+DELETE /api/v4/saml/certificate/private | perm:remove_saml_private_cert | 500 api.admin.remove_certificate.delete.app_error | An error occurred while deleting the certificate.
+POST   /api/v4/saml/certificate/private | perm:add_saml_private_cert | 400 api.admin.add_certificate.no_file.app_error | No file under 'certificate' in request.
+DELETE /api/v4/saml/certificate/public | perm:remove_saml_public_cert | 500 api.admin.remove_certificate.delete.app_error | An error occurred while deleting the certificate.
+POST   /api/v4/saml/certificate/public | perm:add_saml_public_cert | 400 api.admin.add_certificate.no_file.app_error | No file under 'certificate' in request.
+GET    /api/v4/saml/certificate/status | perm:get_saml_cert_status | json {"idp_certificate_file":false,"private_key_file":false,"public_certificate_file":false}
+GET    /api/v4/saml/metadata | anon | 501 api.admin.saml.not_available.app_error | SAML 2.0 is not configured or supported on this server.
+POST   /api/v4/saml/metadatafromidp | anon perm:get_saml_metadata_from_idp prop:saml_metadata_url:saml_metadata_url | 501 api.admin.saml.not_available.app_error
+POST   /api/v4/saml/reset_auth_data | perm:manage_system | 501 api.admin.saml.not_available.app_error | SAML 2.0 is not configured or supported on this server.
+GET    /api/v4/scheduled_recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/scheduled_recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+DELETE /api/v4/scheduled_recaps/{scheduled_recap_id} |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+GET    /api/v4/scheduled_recaps/{scheduled_recap_id} |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+PUT    /api/v4/scheduled_recaps/{scheduled_recap_id} |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/scheduled_recaps/{scheduled_recap_id}/pause |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+POST   /api/v4/scheduled_recaps/{scheduled_recap_id}/resume |  | 501 api.recap.disabled.app_error | This feature is not enabled.
+GET    /api/v4/sharedchannels/remote_info/{remote_id} |  | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+GET    /api/v4/sharedchannels/{team_id}/remotes | id:team_id:channel_id | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+GET    /api/v4/sharedchannels/{team_id} | id:team_id | 501 api.remote_cluster.service_not_enabled.app_error | The remote cluster service is not enabled.
+DELETE /api/v4/system/e2e/ai_bridge |  | 501 api.ai_bridge_test_helper.disabled.app_error | Bridge test helper is disabled.
+GET    /api/v4/system/e2e/ai_bridge |  | 501 api.ai_bridge_test_helper.disabled.app_error | Bridge test helper is disabled.
+PUT    /api/v4/system/e2e/ai_bridge |  | 501 api.ai_bridge_test_helper.disabled.app_error | Bridge test helper is disabled.
+GET    /api/v4/system/support_packet | perm:manage_system | 403 api.no_license | E10 or E20 license required to use this endpoint.
+GET    /api/v4/trial-license/prev |  | 403 api.license.upgrade_needed.app_error | Feature requires an upgrade to Enterprise Edition.
+GET    /api/v4/upgrade_to_enterprise/allowed | perm:manage_system | 403 api.upgrade_to_enterprise.system_not_supported.app_error | Mattermost was unable to upgrade to Enterprise Edition. This feature will only work on Linux systems with x86-64 architecture.
+POST   /api/v4/jobs | obj:job | 400 api.job.unable_to_create_job.incorrect_job_type | The job type of the job you are trying to create is invalid
+POST   /api/v4/jobs/{job_id}/cancel | id:job_id | 404 app.job.get.app_error | Unable to get the job.
+GET    /api/v4/jobs/{job_id}/download | id:job_id off:MessageExportSettings.DownloadExportResults:501:app.job.download_export_results_not_enabled | 404 app.job.get.app_error | Unable to get the job.
+PATCH  /api/v4/jobs/{job_id}/status | id:job_id prop:status:status | 404 app.job.get.app_error | Unable to get the job.
+POST   /api/v4/trial-license | rperm:manage_license_information | 403 api.license.upgrade_needed.app_error
+DELETE /api/v4/license | rperm:manage_license_information | ok

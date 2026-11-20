@@ -579,7 +579,7 @@ async fn test_file_store(St(app): St<State>, Auth(s): Auth, body: axum::body::By
     if driver == "azure" {
         return Err(AppError::internal("api.file.no_driver.app_error", "the azure driver is not available"));
     }
-    let cfg = crate::config::Config { v: json!({ "FileSettings": fs }), diagnostic_id: String::new() };
+    let cfg = crate::config::Config::from_value(json!({ "FileSettings": fs }));
     let store = crate::files::FileStore::new(&cfg)
         .map_err(|e| AppError::internal("api.file.no_driver.app_error", e.to_string()))?;
     let test = |e: anyhow::Error| AppError::internal("api.file.test_connection.app_error", e.to_string());
