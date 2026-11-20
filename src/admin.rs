@@ -1076,8 +1076,12 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
 
 // ---------- leftovers ----------
 
-/// `/manualtest`: Go's manual testing page, whose template a server build does not ship.
-async fn manual_test() -> Response {
+/// `/manualtest`: registered only with `EnableTesting` (otherwise the web client's page, as for any unknown path);
+/// then Go's manual testing page, whose template a server build does not ship.
+async fn manual_test(St(app): St<State>) -> Response {
+    if !app.cfg.bool("ServiceSettings.EnableTesting") {
+        return crate::web::root(&app).await;
+    }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
