@@ -185,3 +185,12 @@ on the shared database, with its job schedulers.
   comes back. The reader stops before dispatching a frame once the writer is gone.
 - **Checked:** a promoted user with an open socket demoted, then frames sent: REST `/config` 403. All sessions
   revoked, then frames: the socket closes, REST 401.
+
+## SSO sign-up skipped the accepted domains (second review, fixed)
+
+- **Was:** `create_user` checked `TeamSettings.RestrictCreationToDomains` only for email accounts, so a GitLab
+  account with any email (gitlab.com, an open self-hosted GitLab) got a user despite the restriction; the guest
+  magic link skipped the guests' list the same way. Go's `UserService.CreateUser` checks every user but LDAP and
+  SAML ones, guests against `GuestAccountsSettings.RestrictCreationToDomains`.
+- **Now:** `create_user_or_guest` sets the role first and checks as Go does; the magic link creates the guest
+  through it (no `system_user` row in between).

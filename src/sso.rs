@@ -1276,14 +1276,8 @@ impl App {
             return Err(AppError::internal("api.user.guest_magic_link.username_generation_failed.app_error", ""));
         }
         let u = User { email, email_verified: true, username, auth_service: "magic_link".into(), ..Default::default() };
-        let mut guest = self.create_user(u).await?;
-        sqlx::query("UPDATE Users SET Roles = 'system_guest', UpdateAt = $1 WHERE Id = $2")
-            .bind(now_ms())
-            .bind(&guest.id)
-            .execute(&self.db)
-            .await?;
-        self.invalidate_user(&guest.id);
-        guest.roles = "system_guest".into();
+        // `CreateGuest`: created as a guest, checked against the guests' accepted domains.
+        let guest = self.create_user_or_guest(u, true).await?;
         // The token row is gone already: the team join reads it from here.
         self.add_user_to_team_with_token(&guest, t).await?;
         Ok(guest)

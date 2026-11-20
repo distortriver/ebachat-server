@@ -1035,15 +1035,27 @@ impl App {
 impl App {
     /// `createUserOrGuest` → `UserService.CreateUser` → `SqlUserStore.Save`, then the first preferences and
     /// `new_user`.
-    pub async fn create_user(&self, mut u: User) -> ApiResult<User> {
-        u.roles = "system_user".into();
-        let restrict = self.cfg.str("TeamSettings.RestrictCreationToDomains");
-        if u.auth_service.is_empty() && !email_domain_ok(&u.email, restrict) {
+    pub async fn create_user(&self, u: User) -> ApiResult<User> {
+        self.create_user_or_guest(u, false).await
+    }
+
+    /// `UserService.CreateUser` with `opts.Guest`: the role is set first, then the accepted domains are checked for
+    /// every user but LDAP and SAML ones (SSO users included), against the guest list for a guest.
+    pub async fn create_user_or_guest(&self, mut u: User, guest: bool) -> ApiResult<User> {
+        u.roles = if guest { "system_guest" } else { "system_user" }.into();
+        let directory = u.auth_service == "ldap" || u.auth_service == "saml";
+        let restrict = if guest {
+            self.cfg.str("GuestAccountsSettings.RestrictCreationToDomains")
+        } else {
+            self.cfg.str("TeamSettings.RestrictCreationToDomains")
+        };
+        if !directory && !email_domain_ok(&u.email, restrict) {
             return Err(AppError::bad_request("api.user.create_user.accepted_domain.app_error", ""));
         }
         let (humans,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM Users u LEFT JOIN Bots b ON b.UserId = u.Id WHERE b.UserId IS NULL")
             .fetch_one(&self.db)
             .await?;
+        // Go grants the first user system_admin whatever it asked for (`IsEmpty` before the guest role matters).
         if humans == 0 {
             u.roles = "system_admin system_user".into();
         }
