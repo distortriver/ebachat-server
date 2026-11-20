@@ -2885,16 +2885,21 @@ async fn posts_around_unread(
         .fetch_optional(&app.db)
         .await?
         .ok_or_else(|| AppError::not_found("app.channel.get_member.missing.app_error", "No channel member found for that user ID and channel ID."))?;
-    // GetPostsForChannelAroundLastUnread: the first unread post, then posts before and after it.
+    // GetPostsForChannelAroundLastUnread: the first unread post, then posts before and after it. A channel never
+    // viewed (LastViewedAt 0) has no such post in Go: the handler then answers the latest page, as when all is read.
     let root = if crt { " AND RootId = ''" } else { "" };
-    let first: Option<(String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let first: Option<(String, i64)> = if last_viewed == 0 {
+        None
+    } else {
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT Id, CreateAt FROM Posts WHERE ChannelId = $1 AND CreateAt > $2 AND DeleteAt = 0{root}{} ORDER BY CreateAt ASC LIMIT 1",
         exclude_membership("Posts", o.exclude_membership)
     )))
-    .bind(&channel_id)
-    .bind(last_viewed)
-    .fetch_optional(&app.db)
-    .await?;
+        .bind(&channel_id)
+        .bind(last_viewed)
+        .fetch_optional(&app.db)
+        .await?
+    };
     let mut list = match first {
         None => {
             let mut l = app.get_posts(&GetPostsOpts { per_page: before, ..o.clone() }).await?;
