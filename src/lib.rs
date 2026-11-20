@@ -15,6 +15,7 @@ pub mod commands;
 pub mod commands_builtin;
 pub mod compress;
 pub mod config;
+pub mod cors;
 pub mod config_api;
 pub mod config_order;
 pub mod config_valid;

@@ -755,6 +755,7 @@ dependencies = [
  "tar",
  "tokio",
  "tokio-rustls",
+ "tower",
  "tower-layer",
  "tower-service",
  "unicode-normalization",

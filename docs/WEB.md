@@ -104,3 +104,17 @@ elsewhere (`app::MaybeAuth`, `app::error_response`).
   - Range and conditional requests on a static file.
 - **Result:** answers, redirects, cookies, session props and rows are the same, apart from ids, times, signatures
   and the differences above.
+
+## CORS and method fallthrough
+
+- **CORS** (`src/cors.rs`): when `ServiceSettings.AllowCorsFrom` is set, the whole router is wrapped as Go wraps
+  its handler in `rs/cors` 1.11.1 with Mattermost's options (`corsAllowedMethods`, all headers allowed, max age
+  86400, `CorsExposedHeaders`, `CorsAllowCredentials`): preflights get 204 with the allow headers for an allowed
+  origin and method, every other answer gets `Vary: Origin` first and the allow headers for an allowed origin.
+  Built once at start, as Go's wrapper. Checked against Go with the same setting: preflight allowed and refused,
+  actual request with an allowed, a foreign and no origin, an unlisted method.
+- **A static path that does not take the method** (`GET /users/search`): gorilla goes on to the next routes, so
+  the parameter route at that place answers (`getUser` with id "search": 400 `invalid_url_param`); axum stops at
+  the static route. `api::method_mismatch` routes such a request again with one segment percent-encoded (which
+  only a parameter can match, and which decodes back), from the last segment to the first, else the 404. Checked
+  on 15 such paths against Go.

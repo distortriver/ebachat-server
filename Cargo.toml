@@ -53,6 +53,7 @@ tar = { version = "0.4", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
 unicode-normalization = "0.1.26"
 tokio-rustls = "0.26"
+tower = { version = "0.5.3", features = ["util"] }
 tower-layer = "0.3.3"
 tower-service = "0.3.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }

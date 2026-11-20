@@ -25,6 +25,59 @@ async fn not_found(
     route_not_found(uri.path()).into_response()
 }
 
+/// The router itself, for `method_mismatch` to route a request again.
+static ROUTER: std::sync::OnceLock<Router> = std::sync::OnceLock::new();
+
+#[derive(Clone)]
+struct Rerouted;
+
+/// A path whose static route does not take this method. Gorilla then goes on to the next routes, so a parameter
+/// route at the same place takes it (`GET /users/search` is `getUser` with user id "search": 400
+/// invalid_url_param); axum stops at the static one. Route again with one segment percent-encoded, so that it can
+/// only match a parameter (which decodes it back), from the last segment to the first; else the 404.
+async fn method_mismatch(
+    state: axum::extract::State<State>,
+    method: axum::http::Method,
+    headers: axum::http::HeaderMap,
+    uri: Uri,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let path = uri.path().to_string();
+    if req.extensions().get::<Rerouted>().is_none()
+        && path.starts_with("/api/v4/")
+        && let Some(router) = ROUTER.get()
+    {
+        let (parts, body) = req.into_parts();
+        let body = axum::body::to_bytes(body, 64 << 20).await.unwrap_or_default();
+        let segs: Vec<&str> = path.split('/').collect();
+        for i in (3..segs.len()).rev() {
+            let Some(first) = segs[i].bytes().next() else { continue };
+            let mut s = segs.clone();
+            let enc = format!("%{first:02X}{}", &segs[i][1..]);
+            s[i] = &enc;
+            let p = s.join("/");
+            let pq = match uri.query() {
+                Some(q) => format!("{p}?{q}"),
+                None => p,
+            };
+            let mut r = axum::http::Request::from_parts(parts.clone(), axum::body::Body::from(body.clone()));
+            *r.uri_mut() = pq.parse().unwrap_or_else(|_| uri.clone());
+            r.extensions_mut().insert(Rerouted);
+            let res = router.clone().oneshot(r).await.into_response();
+            if res.extensions().get::<Rerouted>().is_none() {
+                return res;
+            }
+        }
+        let mut res = not_found(state, method, headers, uri).await;
+        res.extensions_mut().insert(Rerouted);
+        return res;
+    }
+    let mut res = not_found(state, method, headers, uri).await;
+    res.extensions_mut().insert(Rerouted);
+    res
+}
+
 /// Go's router 404, also for a path whose parameter fails the route's pattern (`{timestamp:[0-9]+}`).
 pub fn route_not_found(path: &str) -> AppError {
     let mut e = AppError::not_found("api.context.404.app_error", "Sorry, we could not find the page.").detail(format!(
@@ -94,9 +147,15 @@ pub fn router(app: State) -> Router {
     crate::outgoing::spawn_worker(app.clone());
     crate::push::spawn(app.clone());
     crate::email::spawn_batching(app.clone());
+    let cors = crate::cors::Cors::from_config(&app.cfg);
     let r = routes(app.clone())
         .layer(axum::middleware::from_fn_with_state(app, crate::audit::layer))
         .layer(axum::middleware::from_fn(go_headers));
+    // Go wraps its whole handler in rs/cors when AllowCorsFrom is set.
+    let r = match cors {
+        Some(c) => r.layer(axum::middleware::from_fn(move |req, next| crate::cors::layer(c.clone(), req, next))),
+        None => r,
+    };
     if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
 }
 
@@ -155,7 +214,23 @@ fn routes(app: State) -> Router {
         .merge(crate::roles::routes());
     // Go wraps each handler in gzhttp (not its 404 for unknown paths): a layer over the routes, not the fallback.
     let r = if gzip { r.layer(axum::middleware::from_fn(crate::compress::layer)) } else { r };
-    r.layer(axum::middleware::from_fn(head_as_go)).fallback(not_found)
-        .method_not_allowed_fallback(not_found)
-        .with_state(app)
+    let r = r
+        .layer(axum::middleware::from_fn(head_as_go))
+        .fallback(not_found_marked)
+        .method_not_allowed_fallback(method_mismatch)
+        .with_state(app);
+    let _ = ROUTER.set(r.clone());
+    r
+}
+
+/// The 404, marked so that a request routed again by `method_mismatch` knows it found nothing.
+async fn not_found_marked(
+    state: axum::extract::State<State>,
+    method: axum::http::Method,
+    headers: axum::http::HeaderMap,
+    uri: Uri,
+) -> axum::response::Response {
+    let mut res = not_found(state, method, headers, uri).await;
+    res.extensions_mut().insert(Rerouted);
+    res
 }
