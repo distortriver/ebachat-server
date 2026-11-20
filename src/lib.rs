@@ -43,6 +43,7 @@ pub mod user_edit;
 pub mod user_image;
 pub mod user_lists;
 pub mod users;
+pub mod web;
 pub mod webhooks;
 
 /// What the API reports as its version: Mattermost's, whose API this is.

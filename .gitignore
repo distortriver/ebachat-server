@@ -3,3 +3,5 @@
 /dev/run
 /.claude/worktrees
 __pycache__/
+/dev/webapp
+/dev/client

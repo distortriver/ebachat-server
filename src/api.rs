@@ -1,6 +1,5 @@
 //! REST API v4: the routes of every area, and what is answered as a server without plugins or a license.
 
-use axum::extract::Path;
 use axum::http::Uri;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -9,8 +8,17 @@ use axum::Router;
 use crate::app::{AppError, State};
 
 /// Go's answer for a path (or a method) the API does not have.
-async fn not_found(uri: Uri) -> impl IntoResponse {
-    route_not_found(uri.path())
+/// No route: Go's 404 under `/api/`, the web client's page for any other GET or HEAD (`InitStatic`).
+async fn not_found(
+    axum::extract::State(app): axum::extract::State<State>,
+    method: axum::http::Method,
+    uri: Uri,
+) -> axum::response::Response {
+    let api = uri.path().starts_with("/api/");
+    if !api && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
+        return crate::web::root(&app).await;
+    }
+    route_not_found(uri.path()).into_response()
 }
 
 /// Go's router 404, also for a path whose parameter fails the route's pattern (`{timestamp:[0-9]+}`).
@@ -66,29 +74,9 @@ async fn cache_stats(
     Ok(axum::Json(app.caches.stats()))
 }
 
-/// `/static/emoji/{file}`: the system emoji images of the web client, which EBAChat shows from the server too.
-/// Served as Go serves `/static/` from its client directory (`client/emoji/...`); `EBACHAT_CLIENT_DIR` points
-/// elsewhere. No other web client files are served.
-async fn static_emoji(Path(file): Path<String>) -> axum::response::Response {
-    use axum::http::{HeaderValue, StatusCode, header};
-    let ok = file.len() < 64
-        && file.strip_suffix(".png").is_some_and(|stem| {
-            !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
-        });
-    let dir = std::env::var("EBACHAT_CLIENT_DIR").unwrap_or_else(|_| "client".into());
-    let Some(data) = ok.then(|| std::fs::read(format!("{dir}/emoji/{file}")).ok()).flatten() else {
-        return (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
-    };
-    let mut r = data.into_response();
-    let h = r.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=31556926, public"));
-    r
-}
-
 fn routes(app: State) -> Router {
     Router::new()
-        .route("/static/emoji/{file}", get(static_emoji))
+        .merge(crate::web::routes())
         .route("/api/v4/ebachat/caches", get(cache_stats))
         .route("/api/v4/websocket", get(crate::hub::connect))
         .merge(crate::users::routes())
