@@ -687,22 +687,25 @@ async fn update_mfa(
         if !app.cfg.bool("ServiceSettings.EnableMultifactorAuthentication") {
             return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "mfa.mfa_disabled.app_error", ""));
         }
-        let used: Option<Vec<i64>> =
-            user.mfa_used_timestamps.0.as_ref().map(|v| v.iter().filter_map(Value::as_i64).collect());
-        let Some(used) = mfa_authenticate(&user.mfa_secret, code, now_ms() / 1000, used) else {
+        let used = mfa_used_timestamps(&app, &user_id).await.map_err(|e| AppError::internal("mfa.activate.app_error", e))?;
+        let Ok(Some(used)) = mfa_authenticate(&user.mfa_secret, code, now_ms() / 1000, used) else {
             // Go answers a code that is not six digits with a 500; both are a bad token here.
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "mfa.activate.bad_token.app_error", ""));
         };
-        let used = sqlx::types::Json(used.map(|v| v.into_iter().map(Value::from).collect::<Vec<_>>()));
-        sqlx::query("UPDATE Users SET MfaActive = true, MfaUsedTimestamps = $1 WHERE Id = $2")
+        // UpdateMfaActive, then StoreMfaUsedTimestamps (strings, as Go's StringArray).
+        let used = sqlx::types::Json(used.iter().map(|t| Value::String(t.to_string())).collect::<Vec<_>>());
+        sqlx::query("UPDATE Users SET MfaActive = true, MfaUsedTimestamps = $1, UpdateAt = $2 WHERE Id = $3")
             .bind(used)
+            .bind(now_ms())
             .bind(&user_id)
             .execute(&app.db)
             .await
             .map_err(|e| AppError::internal("mfa.activate.app_error", e.to_string()))?;
     } else {
-        sqlx::query("UPDATE Users SET MfaActive = false, MfaSecret = '' WHERE Id = $1")
+        // UpdateMfaActive, then UpdateMfaSecret (which empties the used time steps).
+        sqlx::query("UPDATE Users SET MfaActive = false, MfaSecret = '', MfaUsedTimestamps = '[]', UpdateAt = $2 WHERE Id = $1")
             .bind(&user_id)
+            .bind(now_ms())
             .execute(&app.db)
             .await
             .map_err(|e| AppError::internal("mfa.deactivate.app_error", e.to_string()))?;
@@ -739,9 +742,11 @@ async fn generate_mfa(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<Str
     let issuer = query_escape(&issuer);
     let link = format!("otpauth://totp/{issuer}:{}?secret={secret}&issuer={issuer}", user.email);
     let png = qr_png(&link).map_err(fail)?;
-    sqlx::query("UPDATE Users SET MfaSecret = $1 WHERE Id = $2")
+    // UpdateMfaSecret: the used time steps emptied, UpdateAt.
+    sqlx::query("UPDATE Users SET MfaSecret = $1, MfaUsedTimestamps = '[]', UpdateAt = $3 WHERE Id = $2")
         .bind(&secret)
         .bind(&user_id)
+        .bind(now_ms())
         .execute(&app.db)
         .await
         .map_err(|e| fail(e.to_string()))?;
@@ -1354,7 +1359,8 @@ async fn switch_account(
     let by_email = |e: &str| user_by_email(&app, e.to_lowercase());
     if email_to_oauth || email_to_ldap {
         let user = by_email(&r.email).await?;
-        app.check_password_and_criteria(&user, &r.password, &r.mfa_code).await?;
+        // SwitchEmailToOAuth / SwitchEmailToLdap: the login's checks, lockout and MFA included.
+        app.check_password_and_all_criteria(&user.id, &r.password, &r.mfa_code).await?;
         if email_to_ldap {
             return Err(AppError::new(
                 StatusCode::NOT_IMPLEMENTED,
@@ -1424,30 +1430,140 @@ fn email_login_available(app: &App) -> ApiResult<()> {
     Ok(())
 }
 
+fn too_many_attempts() -> AppError {
+    AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_login_attempts.too_many.app_error", "")
+}
+
+fn attempts_error(e: impl ToString) -> AppError {
+    AppError::internal("app.user.update_failed_pwd_attempts.app_error", e.to_string())
+}
+
 impl App {
-    /// `CheckPasswordAndAllCriteria`: attempts, password (counted), active, MFA.
-    async fn check_password_and_criteria(&self, user: &User, password: &str, mfa: &str) -> ApiResult<()> {
-        if user.failed_attempts as i64 >= self.cfg.i64("ServiceSettings.MaximumLoginAttempts") {
-            return Err(AppError::new(
-                StatusCode::UNAUTHORIZED,
-                "api.user.check_user_login_attempts.too_many.app_error",
-                "",
-            ));
-        }
-        self.double_check_password(user, password).await?;
+    /// `CheckPasswordAndAllCriteria` (login, and the email to SSO/LDAP switches). The attempt takes a lockout slot
+    /// first (`TryIncrementFailedPasswordAttempts`, atomic, so parallel guesses cannot pass the limit); a wrong
+    /// password or a wrong MFA code keeps it, a missing MFA code (the client asking whether MFA is on) gives it
+    /// back; the count goes to 0 only once both password and code are good.
+    pub async fn check_password_and_all_criteria(&self, user_id: &str, password: &str, mfa: &str) -> ApiResult<()> {
+        let user = match self.user(user_id).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                let mut e = crate::users::missing_account();
+                e.status_code = 400;
+                return Err(e);
+            }
+            Err(mut e) => {
+                e.status_code = 500;
+                return Err(e);
+            }
+        };
+        // CheckUserPreflightAuthenticationCriteria
         if user.delete_at > 0 {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.login.inactive.app_error", ""));
         }
-        if user.mfa_active && self.cfg.bool("ServiceSettings.EnableMultifactorAuthentication") {
+        if user.is_bot {
+            return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.login.bot_login_forbidden.app_error", ""));
+        }
+        let max = self.cfg.i64("ServiceSettings.MaximumLoginAttempts");
+        if user.failed_attempts as i64 >= max {
+            return Err(too_many_attempts());
+        }
+        let claimed = sqlx::query("UPDATE Users SET FailedAttempts = FailedAttempts + 1 WHERE Id = $1 AND FailedAttempts < $2")
+            .bind(&user.id)
+            .bind(max as i32)
+            .execute(&self.db)
+            .await
+            .map_err(attempts_error)?
+            .rows_affected()
+            == 1;
+        self.invalidate_user(&user.id);
+        if !claimed {
+            return Err(too_many_attempts());
+        }
+        // checkUserPassword: a wrong (or empty) password keeps the slot.
+        match crate::password::check(&user.password, password) {
+            crate::password::Check::Mismatch => {
+                return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_password.invalid.app_error", ""));
+            }
+            crate::password::Check::MatchOld => {
+                if let Err(e) = self.store_password(&user.id, &crate::password::hash(password)).await {
+                    self.refund_attempt(&user.id).await;
+                    return Err(AppError::internal("app.user.check_user_password.failed_update", e.message));
+                }
+            }
+            crate::password::Check::Match => {}
+        }
+        if let Err(e) = self.check_user_mfa(&user, mfa).await {
             if mfa.is_empty() {
-                return Err(AppError::bad_request("mfa.validate_token.authenticate.app_error", ""));
+                self.refund_attempt(&user.id).await;
             }
-            if !crate::password::totp_ok(&user.mfa_secret, mfa, now_ms() / 1000) {
-                return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_mfa.bad_code.app_error", ""));
-            }
+            return Err(e);
+        }
+        sqlx::query("UPDATE Users SET FailedAttempts = 0 WHERE Id = $1").bind(&user.id).execute(&self.db).await.map_err(attempts_error)?;
+        self.invalidate_user(&user.id);
+        // CheckUserPostflightAuthenticationCriteria
+        if !user.email_verified && self.cfg.bool("EmailSettings.RequireEmailVerification") {
+            return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.login.not_verified.app_error", ""));
         }
         Ok(())
     }
+
+    /// `DecrementFailedPasswordAttempts`: a slot given back (Go only logs a failure).
+    async fn refund_attempt(&self, user_id: &str) {
+        let _ = sqlx::query("UPDATE Users SET FailedAttempts = FailedAttempts - 1 WHERE Id = $1 AND FailedAttempts > 0")
+            .bind(user_id)
+            .execute(&self.db)
+            .await;
+        self.invalidate_user(user_id);
+    }
+
+    /// `CheckUserMfa` with `mfa.ValidateToken`: a code of the user's secret, one step either side, never one of the
+    /// time steps already used (`MfaUsedTimestamps`, stored again with this one).
+    pub async fn check_user_mfa(&self, user: &User, token: &str) -> ApiResult<()> {
+        if !user.mfa_active || !self.cfg.bool("ServiceSettings.EnableMultifactorAuthentication") {
+            return Ok(());
+        }
+        let bad_token = |e: String| AppError::bad_request("mfa.validate_token.authenticate.app_error", "").detail(e);
+        let used = mfa_used_timestamps(self, &user.id).await.map_err(bad_token)?;
+        match mfa_authenticate(&user.mfa_secret, token, now_ms() / 1000, used) {
+            Err(e) => Err(bad_token(format!("unable to parse the token: {e}"))),
+            Ok(None) => Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_mfa.bad_code.app_error", "")),
+            Ok(Some(used)) => store_mfa_used_timestamps(self, &user.id, &used)
+                .await
+                .map_err(|e| bad_token(format!("unable to store the DisallowReuse slice: {e}"))),
+        }
+    }
+}
+
+/// `GetMfaUsedTimestamps`: Go stores them as a JSON array of strings; NULL is none. (Numbers, which older builds
+/// of this server wrote, are read too.)
+async fn mfa_used_timestamps(app: &App, user_id: &str) -> Result<Vec<i64>, String> {
+    let v: Option<sqlx::types::Json<Value>> = sqlx::query_scalar("SELECT MfaUsedTimestamps FROM Users WHERE Id = $1")
+        .bind(user_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| format!("unable to retrieve the DisallowReuse slice: {e}"))?
+        .flatten();
+    let Some(Value::Array(a)) = v.map(|j| j.0) else { return Ok(vec![]) };
+    a.iter()
+        .map(|t| match t {
+            Value::String(s) => s.parse::<i64>().map_err(|e| format!("unable to retrieve the DisallowReuse slice: {e}")),
+            Value::Number(n) => n.as_i64().ok_or_else(|| "unable to retrieve the DisallowReuse slice".to_string()),
+            _ => Err("unable to retrieve the DisallowReuse slice".to_string()),
+        })
+        .collect()
+}
+
+/// `StoreMfaUsedTimestamps`: the time steps as strings, and `UpdateAt`.
+async fn store_mfa_used_timestamps(app: &App, user_id: &str, used: &[i64]) -> Result<(), sqlx::Error> {
+    let ts: Vec<Value> = used.iter().map(|t| Value::String(t.to_string())).collect();
+    sqlx::query("UPDATE Users SET MfaUsedTimestamps = $1, UpdateAt = $2 WHERE Id = $3")
+        .bind(sqlx::types::Json(ts))
+        .bind(now_ms())
+        .bind(user_id)
+        .execute(&app.db)
+        .await?;
+    app.invalidate_user(user_id);
+    Ok(())
 }
 
 /// `migrateAuthToLDAP`: LDAP needs a license.
@@ -1607,30 +1723,76 @@ fn totp_code(key: &[u8], t: i64) -> u32 {
     u32::from_be_bytes([h[o] & 0x7f, h[o + 1], h[o + 2], h[o + 3]]) % 1_000_000
 }
 
-/// `OTPConfig.Authenticate` with a window of 3 and `DisallowReuse`: the used time steps to store when the code
-/// is good (`None` inside when the user has no reuse list), `None` when it is not.
-fn mfa_authenticate(secret: &str, token: &str, now_secs: i64, used: Option<Vec<i64>>) -> Option<Option<Vec<i64>>> {
+/// `mfa.authenticate`: dgoogauth's `OTPConfig.Authenticate` of the trimmed code, with a window of 3 and
+/// `DisallowReuse` (always on: Go reads the used steps into a non-nil slice). `Err` for a code that is not six
+/// digits (or eight, a scratch code, which never matches), `Ok(None)` for a wrong or reused code, `Ok(Some)` with
+/// the used time steps to store for a good one.
+fn mfa_authenticate(secret: &str, token: &str, now_secs: i64, mut used: Vec<i64>) -> Result<Option<Vec<i64>>, String> {
+    const INVALID: &str = "invalid code";
     let token = token.trim();
-    if token.len() != 6 || !token.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+    let b = token.as_bytes();
+    let scratch = match b.len() {
+        6 if b[0].is_ascii_digit() => false,
+        8 if (b'1'..=b'9').contains(&b[0]) => true,
+        _ => return Err(INVALID.into()),
+    };
+    if !b.iter().all(u8::is_ascii_digit) {
+        return Err(INVALID.into());
     }
-    let code: u32 = token.parse().ok()?;
-    let key = base32_decode(secret)?;
+    if scratch {
+        return Ok(None);
+    }
+    let code: u32 = token.parse().map_err(|_| INVALID.to_string())?;
+    // ComputeCode is -1, never a match, for a secret that is not base32.
+    let Some(key) = base32_decode(secret) else { return Ok(None) };
     let t0 = now_secs / 30;
-    let t = (t0 - 1..=t0 + 1).find(|t| totp_code(&key, *t) == code)?;
-    let Some(mut used) = used else { return Some(None) };
+    let Some(t) = (t0 - 1..=t0 + 1).find(|t| totp_code(&key, *t) == code) else { return Ok(None) };
     if used.contains(&t) {
-        return None;
+        return Ok(None);
     }
     used.push(t);
     used.sort();
     used.retain(|u| *u >= t0 - 1);
-    Some(Some(used))
+    Ok(Some(used))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rfc6238_sha1() {
+        // RFC 6238 test secret "12345678901234567890", T = 59 s → 94287082 (8 digits) → 287082.
+        assert_eq!(totp_code(b"12345678901234567890", 59 / 30), 287082);
+    }
+
+    /// dgoogauth's `Authenticate` with Mattermost's window and reuse list.
+    #[test]
+    fn mfa_codes_like_dgoogauth() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"; // "12345678901234567890"
+        let key = base32_decode(secret).unwrap();
+        let now = 1_700_000_000i64;
+        let t0 = now / 30;
+        let code = |t: i64| format!("{:06}", totp_code(&key, t));
+        // Good code: its step is stored, steps before the window dropped.
+        assert_eq!(mfa_authenticate(secret, &code(t0), now, vec![t0 - 5, t0 - 1]), Ok(Some(vec![t0 - 1, t0])));
+        // One step either side is good; two is not.
+        assert_eq!(mfa_authenticate(secret, &code(t0 + 1), now, vec![]), Ok(Some(vec![t0 + 1])));
+        assert_eq!(mfa_authenticate(secret, &code(t0 - 1), now, vec![]), Ok(Some(vec![t0 - 1])));
+        assert_eq!(mfa_authenticate(secret, &code(t0 + 2), now, vec![]), Ok(None));
+        // A code already used is refused (replay).
+        assert_eq!(mfa_authenticate(secret, &code(t0), now, vec![t0]), Ok(None));
+        // Spaces around are trimmed.
+        assert_eq!(mfa_authenticate(secret, &format!(" {} ", code(t0)), now, vec![]), Ok(Some(vec![t0])));
+        // Not a code: an error (Go's 400), not a wrong code (401); eight digits are a scratch code, never good.
+        for bad in ["", "12345", "1234567", "12345a", "abcdef", "-12345", "01234567"] {
+            assert_eq!(mfa_authenticate(secret, bad, now, vec![]), Err("invalid code".into()), "{bad:?}");
+        }
+        assert_eq!(mfa_authenticate(secret, "12345678", now, vec![]), Ok(None));
+        // A secret that is not base32 never matches.
+        assert_eq!(mfa_authenticate("not base32!", &code(t0), now, vec![]), Ok(None));
+    }
+
     #[test]
     fn roles() {
         assert!(valid_user_roles("system_user"));

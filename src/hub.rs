@@ -216,18 +216,123 @@ impl Hub {
     }
 }
 
-/// The token of the upgrade request, if any: a client may also send it in an `authentication_challenge`.
-pub struct MaybeToken(Option<String>);
-
-impl FromRequestParts<State> for MaybeToken {
-    type Rejection = std::convert::Infallible;
-    async fn from_request_parts(parts: &mut Parts, _: &State) -> Result<MaybeToken, Self::Rejection> {
-        Ok(MaybeToken(token_from(parts).map(|t| t.0)))
+/// `connectWebSocket` behind `APIHandlerTrustRequester`: the session of the request's token (a token Go cannot
+/// find is no session: the client may still authenticate on the socket), then gorilla's `Upgrader.Upgrade` with
+/// `App.OriginChecker`.
+pub async fn connect(St(app): St<State>, req: axum::extract::Request) -> Response {
+    use axum::response::IntoResponse;
+    let (mut parts, _) = req.into_parts();
+    let mut token = None;
+    if let Some((t, loc)) = token_from(&parts) {
+        match app.session(&t).await {
+            // web/handlers.go: a token in the query string is for OAuth apps only.
+            Ok(s) if loc == crate::app::TokenLocation::Query && !s.is_oauth => {
+                return crate::app::AppError::new(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "api.context.token_provided.app_error",
+                    "Session is not OAuth but token was provided in the query string",
+                )
+                .into_response();
+            }
+            Ok(_) => token = Some(t),
+            Err(e) if e.status_code == 500 => return e.into_response(),
+            Err(_) => {}
+        }
+    }
+    let origin = parts.headers.get("origin").map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    if let Err(status) = handshake_check(&app, &parts) {
+        return upgrade_error(status, origin.as_deref().unwrap_or(""));
+    }
+    match WebSocketUpgrade::from_request_parts(&mut parts, &app).await {
+        Ok(ws) => ws.max_message_size(8 * 1024).on_upgrade(move |socket| serve(app, socket, token)),
+        Err(_) => upgrade_error(axum::http::StatusCode::BAD_REQUEST, origin.as_deref().unwrap_or("")),
     }
 }
 
-pub async fn connect(ws: WebSocketUpgrade, MaybeToken(token): MaybeToken, St(app): St<State>) -> Response {
-    ws.max_message_size(8 * 1024).on_upgrade(move |socket| serve(app, socket, token))
+/// gorilla's `tokenListContainsValue`: one of the header's comma-separated tokens, any case.
+fn header_has_token(parts: &Parts, name: &str, value: &str) -> bool {
+    parts.headers.get_all(name).iter().any(|v| {
+        String::from_utf8_lossy(v.as_bytes()).split(',').any(|t| t.trim_matches([' ', '\t']).eq_ignore_ascii_case(value))
+    })
+}
+
+/// `Upgrader.Upgrade`'s checks, in its order: the status it refuses with.
+fn handshake_check(app: &crate::app::App, parts: &Parts) -> Result<(), axum::http::StatusCode> {
+    use axum::http::StatusCode;
+    if !header_has_token(parts, "connection", "upgrade") || !header_has_token(parts, "upgrade", "websocket") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if parts.method != axum::http::Method::GET {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    if !header_has_token(parts, "sec-websocket-version", "13") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !origin_allowed(app, parts) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let key = parts.headers.get("sec-websocket-key").map(|v| v.as_bytes()).unwrap_or_default();
+    use base64::Engine;
+    if key.is_empty() || base64::engine::general_purpose::STANDARD.decode(key).map(|k| k.len()) != Ok(16) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+/// `App.OriginChecker`: with `AllowCorsFrom`, those origins and the site URL (or any, for `*`); without it, the
+/// origin must be the site URL's scheme and host (the request's host when there is no site URL). No `Origin` is
+/// fine (not a browser), `null` is not.
+fn origin_allowed(app: &crate::app::App, parts: &Parts) -> bool {
+    let site = app.cfg.str("ServiceSettings.SiteURL");
+    let cors = app.cfg.str("ServiceSettings.AllowCorsFrom");
+    let first = parts.headers.get("origin").map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    if !cors.is_empty() {
+        // utils.CheckOrigin
+        let origin = first.unwrap_or_default();
+        if origin.is_empty() || cors == "*" {
+            return true;
+        }
+        let mut allowed = cors.to_string();
+        if let Ok(mut u) = crate::gourl::Url::parse(site) {
+            u.raw_path.clear();
+            allowed.push(' ');
+            allowed.push_str(&u.to_go_string());
+        }
+        return allowed.split(' ').any(|a| a == origin);
+    }
+    let Some(origin) = first else { return true };
+    if origin == "null" {
+        return false;
+    }
+    let Ok(u) = crate::gourl::Url::parse(&origin) else { return false };
+    if site.is_empty() {
+        let host = parts.headers.get("host").map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+        let host = host.or_else(|| parts.uri.authority().map(|a| a.to_string())).unwrap_or_default();
+        return u.host.eq_ignore_ascii_case(&host);
+    }
+    let Ok(s) = crate::gourl::Url::parse(site) else { return false };
+    u.host.eq_ignore_ascii_case(&s.host) && u.scheme.eq_ignore_ascii_case(&s.scheme)
+}
+
+/// A refused upgrade as Go answers it: gorilla's `http.Error` (its status, `Sec-Websocket-Version: 13`, the
+/// status text), then the handler's `api.web_socket.connect.upgrade.app_error` (400 in the JSON) written after it.
+fn upgrade_error(status: axum::http::StatusCode, origin: &str) -> Response {
+    use axum::http::{HeaderValue, header};
+    let e = crate::app::AppError::new(axum::http::StatusCode::BAD_REQUEST, "api.web_socket.connect.upgrade.app_error", "")
+        .with_param("BlockedOrigin", origin);
+    let rid = e.request_id.clone();
+    let json = serde_json::to_string(&e).unwrap_or_default();
+    let body = format!("{}\n{json}", status.canonical_reason().unwrap_or(""));
+    let mut r = Response::new(axum::body::Body::from(body));
+    *r.status_mut() = status;
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    h.insert("sec-websocket-version", HeaderValue::from_static("13"));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        h.insert("x-request-id", v);
+    }
+    r
 }
 
 async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {

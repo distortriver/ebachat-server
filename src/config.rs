@@ -114,6 +114,7 @@ impl Config {
         let old = self.value();
         let mut raw = new;
         fill_defaults(defaults(), &mut raw);
+        ensure_link_salt(&mut raw);
         desanitize(old, &mut raw);
         let (in_effect, _) = with_env(&raw);
         if let Err(e) = crate::config_valid::is_valid(&in_effect) {
@@ -144,7 +145,18 @@ impl Config {
         let _one = self.saving.lock().await;
         let old = self.value();
         let raw = read_source(&self.source).await?;
+        let mut check = raw.clone();
+        fill_defaults(defaults(), &mut check);
+        let salted = ensure_link_salt(&mut check);
         self.install(raw);
+        if salted {
+            // Store.Load writes back what it changed: the salt it made is kept.
+            let mut persisted = self.raw.lock().unwrap().clone();
+            if let Some(m) = persisted.as_object_mut() {
+                m.remove("FeatureFlags");
+            }
+            write_source(&self.source, &persisted).await.map_err(|e| anyhow::anyhow!("failed to persist: {e}"))?;
+        }
         Ok((old, self.value()))
     }
 
@@ -635,8 +647,23 @@ pub fn fill_defaults(schema: &Value, v: &mut Value) {
 fn with_defaults(raw: &Value) -> Value {
     let mut v = conform(defaults(), raw, true).unwrap_or(Value::Null);
     fill_defaults(defaults(), &mut v);
+    ensure_link_salt(&mut v);
     fix(&mut v);
     v
+}
+
+/// `FileSettings.SetDefaults` of an existing config (`Store.Load` and `Store.Set`): a missing or empty
+/// `PublicLinkSalt` becomes `model.NewRandomString(32)`, so public file links are never signed with an empty salt.
+/// It is the only secret Go 12.1's `SetDefaults` generates. Returns whether it made one.
+///
+/// Go only does this when the config has a `SiteURL` key (`isUpdate`); a config set without one gets an empty
+/// salt until the next load. This server always makes one.
+fn ensure_link_salt(v: &mut Value) -> bool {
+    if v.pointer("/FileSettings/PublicLinkSalt").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        return false;
+    }
+    set_at(v, &["FileSettings", "PublicLinkSalt"], Value::String(crate::sso::new_random_string(32)));
+    true
 }
 
 /// The settings in effect: the stored ones with the `MM_*` environment, and the paths it sets.
@@ -957,6 +984,40 @@ const FULL_FIXED: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn salt(v: &Value) -> String {
+        v["FileSettings"]["PublicLinkSalt"].as_str().unwrap_or("").to_string()
+    }
+
+    /// A missing or empty `PublicLinkSalt` is generated on load, reload and save, and kept in the source.
+    #[tokio::test]
+    async fn link_salt_is_generated_and_kept() {
+        let ok = |s: &str| s.len() == 32 && s.bytes().all(|b| b"ybndrfg8ejkmcpqxot1uwisza345h769".contains(&b));
+        let c = Config::from_raw(serde_json::json!({}), String::new());
+        assert!(ok(&salt(c.value())), "{}", salt(c.value()));
+        let given = "awkqg1cwkspu5u77afep86f859ja6c6h";
+        let c = Config::from_raw(serde_json::json!({"FileSettings": {"PublicLinkSalt": given}}), String::new());
+        assert_eq!(salt(c.value()), given);
+
+        let dir = std::env::temp_dir().join(format!("ebachat-salt-{}", crate::app::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json").to_string_lossy().into_owned();
+        let stored = || serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::write(&path, r#"{"ServiceSettings": {"SiteURL": ""}, "FileSettings": {"PublicLinkSalt": ""}}"#).unwrap();
+        let c = Config::from_raw(read_source(&path).await.unwrap(), path.clone());
+        c.reload().await.unwrap();
+        assert!(ok(&salt(&stored())));
+        assert_eq!(salt(&stored()), salt(c.value()));
+        // A config set with an empty salt gets a new one.
+        let mut new = c.value().clone();
+        new["FileSettings"]["PublicLinkSalt"] = Value::String(String::new());
+        let before = salt(c.value());
+        c.save(new).await.unwrap();
+        assert!(ok(&salt(c.value())) && salt(c.value()) != before);
+        assert_eq!(salt(&stored()), salt(c.value()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn env_overrides_by_section_and_type() {
         let mut v = serde_json::json!({"ServiceSettings": {"SiteURL": "", "EnableDeveloper": true, "WebsocketPort": 80}});

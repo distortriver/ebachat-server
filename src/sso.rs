@@ -1291,14 +1291,15 @@ impl App {
     /// `CheckUserAllAuthenticationCriteria` without a password: active, not locked out, verified, not a bot.
     async fn check_user_all_authentication_criteria(&self, user: &User) -> ApiResult<()> {
         let unauthorized = |id: &str| AppError::new(StatusCode::UNAUTHORIZED, id, "");
-        if user.failed_attempts as i64 >= self.cfg.i64("ServiceSettings.MaximumLoginAttempts") {
-            return Err(unauthorized("api.user.check_user_login_attempts.too_many.app_error"));
-        }
+        // Go's order: disabled, bot, attempts.
         if user.delete_at > 0 {
             return Err(unauthorized("api.user.login.inactive.app_error"));
         }
         if user.is_bot {
             return Err(unauthorized("api.user.login.bot_login_forbidden.app_error"));
+        }
+        if user.failed_attempts as i64 >= self.cfg.i64("ServiceSettings.MaximumLoginAttempts") {
+            return Err(unauthorized("api.user.check_user_login_attempts.too_many.app_error"));
         }
         if !user.email_verified && self.cfg.bool("EmailSettings.RequireEmailVerification") {
             return Err(unauthorized("api.user.login.not_verified.app_error"));

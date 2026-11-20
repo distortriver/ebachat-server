@@ -18,7 +18,6 @@ use sqlx::postgres::PgRow;
 use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id, new_id, now_ms};
 use crate::db;
 use crate::model::{Session, Show, User, session};
-use crate::password;
 
 pub fn routes() -> Router<State> {
     Router::new()
@@ -383,68 +382,20 @@ async fn authenticate(app: &State, b: &LoginBody) -> ApiResult<User> {
         load_user_by(app, cond, &b.login_id).await?
     };
     let user = user.ok_or_else(not_found)?;
-    let unauthorized = |id: &str, m: &str| AppError::new(StatusCode::UNAUTHORIZED, id, m);
-    if user.delete_at > 0 {
-        return Err(unauthorized("api.user.login.inactive.app_error", "Login failed because your account has been deactivated."));
-    }
-    if user.is_bot {
-        return Err(unauthorized("api.user.login.bot_login_forbidden.app_error", "Bot login is forbidden."));
+    // authenticateUser: LDAP needs a license, other sign-in methods are refused, then every check of the password
+    // and MFA, as a 401 whatever it is.
+    if user.auth_service == "ldap" {
+        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.user.login_ldap.not_available.app_error", ""));
     }
     if !user.auth_service.is_empty() {
-        return Err(AppError::bad_request("api.user.login.use_auth_service.app_error", "Please log in using the account's sign-in method."));
+        let service = if user.auth_service == "saml" { "SAML".to_string() } else { user.auth_service.clone() };
+        return Err(AppError::bad_request("api.user.login.use_auth_service.app_error", "").with_param("AuthService", &service));
     }
-    let max = app.cfg.i64("ServiceSettings.MaximumLoginAttempts");
-    let too_many = || unauthorized("api.user.check_user_login_attempts.too_many.app_error", "Your account is locked because of too many failed password attempts. Please reset your password.");
-    if user.failed_attempts as i64 >= max {
-        return Err(too_many());
+    if let Err(mut e) = app.check_password_and_all_criteria(&user.id, &b.password, &b.token).await {
+        e.status_code = StatusCode::UNAUTHORIZED.as_u16();
+        return Err(e);
     }
-    // TryIncrementFailedPasswordAttempts: the slot is refunded or cleared below.
-    let claimed = sqlx::query("UPDATE Users SET FailedAttempts = FailedAttempts + 1 WHERE Id = $1 AND FailedAttempts < $2")
-        .bind(&user.id)
-        .bind(max as i32)
-        .execute(&app.db)
-        .await?
-        .rows_affected()
-        == 1;
-    app.invalidate_user(&user.id);
-    if !claimed {
-        return Err(too_many());
-    }
-    let refund = || async {
-        let _ = sqlx::query("UPDATE Users SET FailedAttempts = FailedAttempts - 1 WHERE Id = $1 AND FailedAttempts > 0")
-            .bind(&user.id)
-            .execute(&app.db)
-            .await;
-        app.invalidate_user(&user.id);
-    };
-    match password::check(&user.password, &b.password) {
-        password::Check::Mismatch => {
-            return Err(unauthorized("api.user.check_user_password.invalid.app_error", "Login failed because of invalid password"));
-        }
-        password::Check::MatchOld => {
-            sqlx::query("UPDATE Users SET Password = $1, UpdateAt = $2, AuthData = NULL, AuthService = '', FailedAttempts = 0 WHERE Id = $3")
-                .bind(password::hash(&b.password))
-                .bind(now_ms())
-                .bind(&user.id)
-                .execute(&app.db)
-                .await?;
-        }
-        password::Check::Match => {}
-    }
-    if user.mfa_active && app.cfg.bool("ServiceSettings.EnableMultifactorAuthentication") {
-        if b.token.is_empty() {
-            refund().await;
-            return Err(AppError::bad_request("mfa.validate_token.authenticate.app_error", "Invalid MFA token."));
-        }
-        if !password::totp_ok(&user.mfa_secret, &b.token, now_ms() / 1000) {
-            return Err(unauthorized("api.user.check_user_mfa.bad_code.app_error", "Invalid MFA token."));
-        }
-    }
-    sqlx::query("UPDATE Users SET FailedAttempts = 0 WHERE Id = $1").bind(&user.id).execute(&app.db).await?;
-    app.invalidate_user(&user.id);
-    if !user.email_verified && app.cfg.bool("EmailSettings.RequireEmailVerification") {
-        return Err(unauthorized("api.user.login.not_verified.app_error", "Login failed because email address has not been verified."));
-    }
+    // Go answers with the user as it was read before the checks.
     Ok(user)
 }
 
