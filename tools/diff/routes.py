@@ -48,6 +48,8 @@ def main():
             continue
         if r["method"] == "DELETE" and "/users/{user_id}" == r["path"][len("/api/v4"):]:
             continue  # never deactivate users from a sweep
+        if "logout" in r["path"] or "sessions/revoke" in r["path"]:
+            continue  # the sweep's own session must live
         path = re.sub(r"\{[^}]+\}", ID, r["path"])[len("/api/v4"):]
         body = {} if r["method"] in ("POST", "PUT", "PATCH") else None
         g = summary(*diff.call(a.go, tg, r["method"], path, body)[:2])
