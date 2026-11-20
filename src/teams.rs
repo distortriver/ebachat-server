@@ -968,6 +968,51 @@ fn rate_limited(user_id: &str, team_id: &str) -> AppError {
         .detail(format!("user_id={user_id}, team_id={team_id}, error=rate limit exceeded"))
 }
 
+/// `InviteNewUsersToTeam`: every address allowed and not deactivated, then one email each (failures logged).
+pub async fn invite_new_users_to_team(app: &App, emails: Vec<String>, team_id: &str, sender_id: &str) -> ApiResult<()> {
+    if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
+        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.team.invite_members.disabled.app_error", "Email invitations are disabled."));
+    }
+    if emails.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.no_one.app_error", ""));
+    }
+    let team = app.team(team_id).await?;
+    let sender = app.user(sender_id).await?.ok_or_else(crate::users::missing_account)?;
+    let restrict = app.cfg.str("TeamSettings.RestrictCreationToDomains").to_string();
+    let allowed: Vec<&str> = if sender.is_guest() {
+        vec![app.cfg.str("GuestAccountsSettings.RestrictCreationToDomains")]
+    } else {
+        vec![&team.allowed_domains, &restrict]
+    };
+    let bad: Vec<String> = emails.iter().filter(|e| !email_allowed(e, &allowed)).cloned().collect();
+    if !bad.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &bad.join(", ")));
+    }
+    let gone: Vec<String> = sqlx::query_scalar("SELECT Email FROM Users WHERE Email = ANY($1) AND DeleteAt <> 0").bind(&emails).fetch_all(&app.db).await?;
+    let gone: Vec<String> = emails.iter().filter(|e| gone.contains(e)).cloned().collect();
+    if !gone.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "").with_param("Addresses", &gone.join(", ")));
+    }
+    let d = crate::email::InviteData {
+        team: &team,
+        channels: vec![],
+        sender_name: sender.display_name(app.cfg.str("TeamSettings.TeammateNameDisplay")),
+        sender_id: sender.id.clone(),
+        sender_image: None,
+        invites: emails,
+        profiles: Default::default(),
+        message: String::new(),
+        reminder_interval: None,
+        error_when_not_sent: false,
+        is_system_admin: sender.is_system_admin(),
+        is_first_admin: is_first_admin(app, &sender).await,
+    };
+    if crate::email::send_invites(app, d).await == Err(crate::email::InviteError::RateLimited) {
+        return Err(rate_limited(&sender.id, &team.id));
+    }
+    Ok(())
+}
+
 /// `inviteUsersToTeam`: `InviteNewUsersToTeam`, or with `graceful` `InviteNewUsersToTeamGracefully` and the
 /// `resend_invitation_email` job.
 async fn invite_by_email(
@@ -1034,36 +1079,7 @@ async fn invite_by_email(
     let sender_name = sender.display_name(app.cfg.str("TeamSettings.TeammateNameDisplay"));
     let first_admin = is_first_admin(&app, &sender).await;
     if !graceful {
-        let bad: Vec<String> = emails.iter().filter(|e| !email_allowed(e, &allowed)).cloned().collect();
-        if !bad.is_empty() {
-            return Err(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &bad.join(", ")));
-        }
-        let mut gone = vec![];
-        for e in &emails {
-            if deactivated(e.clone()).await? {
-                gone.push(e.clone());
-            }
-        }
-        if !gone.is_empty() {
-            return Err(AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "").with_param("Addresses", &gone.join(", ")));
-        }
-        let d = crate::email::InviteData {
-            team: &team,
-            channels: vec![],
-            sender_name,
-            sender_id: sender.id.clone(),
-            sender_image: None,
-            invites: emails,
-            profiles: Default::default(),
-            message: String::new(),
-            reminder_interval: None,
-            error_when_not_sent: false,
-            is_system_admin: sender.is_system_admin(),
-            is_first_admin: first_admin,
-        };
-        if crate::email::send_invites(&app, d).await == Err(crate::email::InviteError::RateLimited) {
-            return Err(rate_limited(&sender.id, &team.id));
-        }
+        invite_new_users_to_team(&app, emails, &team_id, &s.user_id).await?;
         return Ok(crate::users::ok().into_response());
     }
     // InviteNewUsersToTeamGracefully: profiles need an Enterprise license.

@@ -667,7 +667,7 @@ async fn remove(app: &State, args: &CommandArgs, message: &str) -> CommandRespon
     }
 }
 
-/// `/invite_people email...`: no email is sent from this server, as Go's when it cannot send.
+/// `/invite_people email...`: `InviteNewUsersToTeam`.
 async fn invite_people(app: &State, args: &CommandArgs, message: &str) -> CommandResponse {
     if !app.user_team_perm(&args.user_id, &args.team_id, perm::INVITE_USER).await
         || !app.user_team_perm(&args.user_id, &args.team_id, perm::ADD_USER_TO_TEAM).await
@@ -683,11 +683,14 @@ async fn invite_people(app: &State, args: &CommandArgs, message: &str) -> Comman
     if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
         return ephemeral(tr("api.command.invite_people.email_invitations_off"));
     }
-    let emails: Vec<&str> = message.split_whitespace().map(|t| t.trim_matches(',')).filter(|t| t.contains('@')).collect();
+    let emails: Vec<String> = message.split_whitespace().map(|t| t.trim_matches(',')).filter(|t| t.contains('@')).map(str::to_string).collect();
     if emails.is_empty() {
         return ephemeral(tr("api.command.invite_people.no_email"));
     }
-    ephemeral(tr("api.command.invite_people.fail"))
+    match crate::teams::invite_new_users_to_team(app, emails, &args.team_id, &args.user_id).await {
+        Ok(()) => ephemeral(tr("api.command.invite_people.sent")),
+        Err(_) => ephemeral(tr("api.command.invite_people.fail")),
+    }
 }
 
 // ---------- settings ----------

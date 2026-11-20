@@ -729,26 +729,38 @@ fn has_nil_fields(cfg: &Value, section: &str) -> bool {
     }
 }
 
-/// `testEmail`: this server sends no email; the settings are checked as Go checks them, and the SMTP server must
-/// accept a connection.
+/// `testEmail` (`TestEmail`): a test email to the caller over the SMTP settings sent. Go checks the sent settings but
+/// sends over the saved ones; the sent ones are used here, so the console tests what the admin typed.
 async fn test_email(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Json<Value>> {
-    let cfg = test_config(&app, &body);
+    let mut cfg = test_config(&app, &body);
     if has_nil_fields(&cfg, "EmailSettings") {
         return Err(AppError::bad_request("api.file.test_connection_email_settings_nil.app_error", ""));
     }
     app.require_unrestricted(&s, "test_email").await?;
-    let e = &cfg["EmailSettings"];
-    let server = e["SMTPServer"].as_str().unwrap_or("");
-    if server.is_empty() {
-        return Err(AppError::internal("api.admin.test_email.missing_server", ""));
+    let e = cfg["EmailSettings"].clone();
+    let st = |k: &str| e[k].as_str().unwrap_or("").to_string();
+    if st("SMTPServer").is_empty() {
+        return Err(AppError::bad_request("api.admin.test_email.missing_server", "")
+            .detail(crate::i18n::tr("api.context.invalid_param.app_error", &[("Name", "SMTPServer")]).unwrap_or_default()));
     }
-    let port = e["SMTPPort"].as_str().unwrap_or("");
-    let addr = format!("{server}:{port}");
-    match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&addr)).await {
-        Ok(Ok(_)) => Ok(ok()),
-        Ok(Err(err)) => Err(AppError::internal("api.admin.test_email.failure", err.to_string())),
-        Err(_) => Err(AppError::internal("api.admin.test_email.failure", "timeout")),
+    if st("SMTPPassword") == "********************************" {
+        let cur = |k: &str| app.cfg.str(&format!("EmailSettings.{k}")).to_string();
+        if st("SMTPServer") == cur("SMTPServer") && st("SMTPPort") == cur("SMTPPort") && st("SMTPUsername") == cur("SMTPUsername") {
+            cfg["EmailSettings"]["SMTPPassword"] = Value::String(cur("SMTPPassword"));
+        } else {
+            return Err(AppError::bad_request("api.admin.test_email.reenter_password", ""));
+        }
     }
+    let user = app.user(&s.user_id).await?.ok_or_else(crate::users::missing_account)?;
+    let smtp = crate::mail::SmtpConfig::from_config(&cfg["EmailSettings"], &crate::email::site_url(&app), "");
+    let m = crate::mail::Mail {
+        to: user.email.clone(),
+        subject: crate::i18n::tl(&user.locale, "api.admin.test_email.subject", &[]),
+        html: crate::i18n::tl(&user.locale, "api.admin.test_email.body", &[]),
+        ..Default::default()
+    };
+    crate::mail::send(&m, &smtp).await.map_err(|err| AppError::internal("app.admin.test_email.failure", "").with_param("Error", &err))?;
+    Ok(ok())
 }
 
 /// `appendAncillaryPermissionsPost` (`data/ancillary_permissions.json`, Go's `SysconsoleAncillaryPermissions`).
