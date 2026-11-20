@@ -1191,9 +1191,9 @@ impl App {
     // ---------- viewing ----------
 
     /// `MarkChannelsAsViewed` with `collapsed_threads_supported` (contract: posts call it for the poster).
-    pub async fn mark_viewed(&self, ids: &[String], user_id: &str) -> ApiResult<BTreeMap<String, i64>> {
+    pub async fn mark_viewed(&self, ids: &[String], user_id: &str, session_id: &str) -> ApiResult<BTreeMap<String, i64>> {
         let crt = self.is_crt_enabled(user_id).await;
-        self.mark_channels_viewed(ids, user_id, true, crt).await
+        self.mark_channels_viewed(ids, user_id, session_id, true, crt).await
     }
 
     /// `MarkChannelsAsViewed`: counters reset where there is something unread, `multiple_channels_viewed`, and
@@ -1202,14 +1202,17 @@ impl App {
         &self,
         ids: &[String],
         user_id: &str,
+        session_id: &str,
         crt_supported: bool,
         crt_enabled: bool,
     ) -> ApiResult<BTreeMap<String, i64>> {
-        // GetChannelsWithUnreadsAndWithMentions (push notification clearing is not done: no push here)
-        let rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        // GetChannelsWithUnreadsAndWithMentions: the channels to view, and those whose push notifications the
+        // user's other devices drop.
+        let user_push = self.user(user_id).await?.map(|u| u.notify_prop("push").to_string()).unwrap_or_default();
+        let rows: Vec<(String, i64, i64, i64, i64, i64, String, Option<String>)> = sqlx::query_as(
             "SELECT Channels.Id, COALESCE(Channels.TotalMsgCount, 0), COALESCE(Channels.LastPostAt, 0),
                     COALESCE(ChannelMembers.MsgCount, 0), COALESCE(ChannelMembers.MentionCount, 0),
-                    COALESCE(ChannelMembers.LastViewedAt, 0)
+                    COALESCE(ChannelMembers.LastViewedAt, 0), COALESCE(Channels.Type::text, ''), ChannelMembers.NotifyProps->>'push'
              FROM ChannelMembers INNER JOIN Channels ON ChannelMembers.ChannelId = Channels.Id
              WHERE ChannelMembers.ChannelId = ANY($1) AND ChannelMembers.UserId = $2 AND Channels.Type <> 'S'",
         )
@@ -1219,9 +1222,18 @@ impl App {
         .await?;
         let mut times = BTreeMap::new();
         let mut to_view = vec![];
-        for (id, total, last_post, msg, mentions, last_viewed) in rows {
-            if total - msg > 0 || mentions > 0 {
+        let mut to_clear = vec![];
+        for (id, total, last_post, msg, mentions, last_viewed, kind, push) in rows {
+            let unread = total - msg > 0 || mentions > 0;
+            if unread {
                 to_view.push(id.clone());
+            }
+            let mut notify = push.unwrap_or_default();
+            if notify == "default" {
+                notify = user_push.clone();
+            }
+            if (notify == "all" || kind == "D") && unread || notify == "mention" && mentions > 0 {
+                to_clear.push(id.clone());
             }
             times.insert(id, last_post.max(last_viewed));
         }
@@ -1261,6 +1273,9 @@ impl App {
                 json!({"channel_times": times}),
                 Broadcast { user_id: user_id.into(), ..Default::default() },
             );
+        }
+        for id in &to_clear {
+            crate::push::clear(self, session_id, user_id, id, "").await;
         }
         if update_threads && crt_enabled {
             let ts = now_ms();

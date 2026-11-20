@@ -301,7 +301,7 @@ impl App {
                 ..Default::default()
             };
             self.create_post(post, true).await?;
-            self.mark_viewed(std::slice::from_ref(&c.id), &saved.user_id).await?;
+            self.mark_viewed(std::slice::from_ref(&c.id), &saved.user_id, "").await?;
         }
         Ok(saved)
     }

@@ -375,7 +375,7 @@ async fn view_channel(
         BTreeMap::new()
     } else {
         let crt = app.is_crt_enabled(&user_id).await;
-        app.mark_channels_viewed(&ids, &user_id, view.collapsed_threads_supported, crt).await?
+        app.mark_channels_viewed(&ids, &user_id, &s.id, view.collapsed_threads_supported, crt).await?
     };
     app.touch_session(&s).await;
     app.extend_session_if_needed(&s).await;
@@ -396,7 +396,7 @@ async fn read_multiple(
     }
     app.require_user(&s, &user_id).await?;
     let crt = app.is_crt_enabled(&user_id).await;
-    let times = app.mark_channels_viewed(&ids, &user_id, true, crt).await?;
+    let times = app.mark_channels_viewed(&ids, &user_id, &s.id, true, crt).await?;
     Ok(Json(ViewResponse { status: "OK", last_viewed_at_times: times }))
 }
 

@@ -1962,7 +1962,7 @@ async fn create_post_h(
     let from_bot_or_hook = rp.prop("from_webhook").is_some() || rp.prop("from_bot").is_some();
     let crt = app.crt_for_user(&s.user_id).await;
     if !from_bot_or_hook && !(crt && !rp.root_id.is_empty()) {
-        let _ = app.mark_viewed(std::slice::from_ref(&rp.channel_id), &s.user_id).await;
+        let _ = app.mark_viewed(std::slice::from_ref(&rp.channel_id), &s.user_id, &s.id).await;
     }
     if set_online {
         app.set_status_online(&s.user_id, false).await;
@@ -2630,6 +2630,7 @@ impl App {
                     );
                 }
             }
+            crate::push::update_badge(self, user_id).await;
             return Ok(json!({"team_id": c.team_id, "channel_id": c.id, "msg_count": 0, "mention_count": 0,
                 "mention_count_root": 0, "urgent_mention_count": 0, "msg_count_root": 0, "last_viewed_at": 0}));
         }
@@ -2685,6 +2686,7 @@ impl App {
                    "urgent_mention_count": r.6, "last_viewed_at": r.8, "post_id": post_id}),
             Broadcast { team_id: r.0.clone(), channel_id: r.2.clone(), user_id: user_id.into(), ..Default::default() },
         );
+        crate::push::update_badge(self, user_id).await;
         Ok(state)
     }
 }

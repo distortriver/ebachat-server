@@ -8,14 +8,14 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Query, State as St};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, Body, MaybeAuth, State};
+use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State};
 use crate::model::Role;
 use crate::perm;
 
@@ -37,6 +37,7 @@ pub fn routes() -> Router<State> {
 struct PingQuery {
     get_server_status: String,
     use_rest_semantics: String,
+    device_id: String,
 }
 
 /// `getSystemPing`.
@@ -64,6 +65,9 @@ async fn ping(St(app): St<State>, MaybeAuth(s): MaybeAuth, Query(q): Query<PingQ
         {
             m.insert("root_status".into(), false.into());
         }
+    }
+    if !q.device_id.is_empty() {
+        m.insert("CanReceiveNotifications".into(), crate::push::send_test(&app, &q.device_id).await.into());
     }
     let code = if healthy || q.use_rest_semantics == "true" { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR };
     (code, Json(m)).into_response()
@@ -230,35 +234,38 @@ async fn roles_by_names(St(app): St<State>, _: crate::app::AuthTrusted, body: ax
 
 
 
-/// `model.PushNotificationAck`.
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct PushAck {
-    id: String,
-    platform: String,
-    #[serde(rename = "type")]
-    kind: String,
-    post_id: String,
-    is_id_loaded: bool,
-}
-
-/// `pushNotificationAck`: there is no push proxy to tell; an id-loaded notification gets its post.
-async fn push_ack(St(app): St<State>, Auth(s): Auth, Body(ack): Body<Option<PushAck>>) -> ApiResult<Response> {
-    let Some(ack) = ack else {
-        return Err(AppError::bad_request("api.push_notifications_ack.message.parse.app_error", ""));
-    };
+/// `pushNotificationAck`: the ack is passed on to the push proxy. An id-loaded notification would get its
+/// message from the licensed notification service, which this server (as Go without a license) does not have.
+async fn push_ack(St(app): St<State>, Auth(s): Auth, body: axum::body::Bytes) -> ApiResult<Response> {
+    let parse = |e: String| AppError::bad_request("api.push_notifications_ack.message.parse.app_error", "").detail(e);
+    let v = serde_json::Deserializer::from_slice(&body).into_iter::<Value>().next().ok_or_else(|| parse("EOF".into()))?.map_err(|e| parse(e.to_string()))?;
+    let ack: crate::push::Ack = if v.is_null() { Default::default() } else { serde_json::from_value(v).map_err(|e| parse(e.to_string()))? };
     if !app.cfg.bool("EmailSettings.SendPushNotifications") {
         return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.push_notification.disabled.app_error", ""));
     }
-    let _ = (&ack.id, &ack.platform);
-    if ack.is_id_loaded && !ack.post_id.is_empty() && ack.kind == "message" {
-        let post: Option<crate::model::Post> = crate::db::get(&app.db, &ack.post_id).await?;
-        let post = post.ok_or_else(|| AppError::not_found("app.post.get.app_error", ""))?;
-        let c = app.channel_or_404(&post.channel_id).await?;
-        if !app.can_read_channel(&s, &c).await?.0 {
-            return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
+    if ack.notification_type == crate::push::MESSAGE
+        && s.prop(crate::push::PROP_DEVICE_NOTIFICATION_DISABLED) == "true"
+        && ack.client_platform == "ios"
+    {
+        // iOS sends no ack while notifications are off, so one means they are on again.
+        let _ = crate::push::set_session_props(&app, &s, &[(crate::push::PROP_DEVICE_NOTIFICATION_DISABLED, "false")]).await;
+        app.clear_sessions_for_user(&s.user_id);
+    }
+    let sent = crate::push::send_ack(&app, &ack).await;
+    if ack.is_id_loaded {
+        if !ack.post_id.is_empty() && ack.notification_type == crate::push::MESSAGE {
+            let post: Option<crate::model::Post> = crate::db::get(&app.db, &ack.post_id).await?;
+            let post = post.filter(|p| p.delete_at == 0).ok_or_else(|| AppError::not_found("app.post.get.app_error", ""))?;
+            let c = app.channel_or_404(&post.channel_id).await?;
+            if !app.can_read_channel(&s, &c).await?.0 {
+                return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
+            }
+            return Err(AppError::new(StatusCode::FOUND, "api.system.id_loaded.not_available.app_error", ""));
         }
-        return Ok(([(header::CONTENT_TYPE, "application/json")], serde_json::to_string(&post).unwrap()).into_response());
+        return Ok(StatusCode::OK.into_response());
+    }
+    if let Err(e) = sent {
+        return Err(AppError::internal("api.push_notifications_ack.forward.app_error", e));
     }
     Ok(crate::users::ok().into_response())
 }

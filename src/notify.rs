@@ -1,6 +1,6 @@
 //! What a new post does to others: mentions (`@user`, keywords, `@channel`/`@all`/`@here`), mention counts,
-//! thread memberships of collapsed threads, and the `posted` and `thread_updated` events. Push and email are
-//! not sent.
+//! thread memberships of collapsed threads, email and push notifications (`email.rs`, `push.rs`), and the
+//! `posted` and `thread_updated` events.
 
 // Based on Mattermost server/channels/app/notification.go, mention_keywords.go, mention_parser_standard.go,
 // mention_results.go and post.go (isPostMention), Copyright (c) 2015-present Mattermost, Inc. Licensed under
@@ -360,7 +360,150 @@ fn follower_desktop(u: &User, mentioned: bool, cm: Option<&StringMap>) -> bool {
     (cdesktop == "default" && user) || channel
 }
 
-/// `SendNotifications` without push and email: mention counts, thread memberships, `posted`, `thread_updated`.
+/// `addFollowerToNotify` for email and push: `shouldUserNotifyCRT` and `shouldChannelMemberNotifyCRT`.
+fn follower_email_push(u: &User, mentioned: bool, cm: Option<&StringMap>) -> (bool, bool) {
+    let up = |k: &str| u.notify_prop(k).to_string();
+    let cp = |k: &str| cm.and_then(|p| p.0.get(k)).cloned().unwrap_or_default();
+    let email = up("email") == "true" && (mentioned || up("email_threads") == "all");
+    let push = up("push");
+    let user_push = push != "none" && (mentioned || up("push_threads") == "all" || push == "all");
+    let cpush = cp("push");
+    let channel_push = cpush != "default" && cpush != "none" && (mentioned || cp("push_threads") == "all" || cpush == "all");
+    (email, (cpush == "default" && user_push) || channel_push)
+}
+
+/// `userAllowsEmail`.
+async fn user_allows_email(app: &App, u: &User, cm: Option<&StringMap>, post: &Post) -> bool {
+    if u.is_bot || u.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
+        return false;
+    }
+    if post.r#type == "system_access_control_team_membership" {
+        return false;
+    }
+    let mut allows = u.notify_prop("email") != "false";
+    if let Some(ce) = cm.and_then(|p| p.0.get("email"))
+        && !(!post.root_id.is_empty() && app.is_crt_enabled(&u.id).await)
+        && ce != "default"
+    {
+        allows = ce != "false";
+    }
+    if cm.and_then(|p| p.0.get("mark_unread")).map(String::as_str) == Some("mention") {
+        allows = false;
+    }
+    let st = crate::push::status_or_offline(app, &u.id).await;
+    let auto_responder = st.status == status::OUT_OF_OFFICE || post.r#type == "system_auto_responder";
+    let status_ok = st.status != status::ONLINE && st.status != status::DND;
+    allows && status_ok && u.delete_at == 0 && !auto_responder
+}
+
+/// The email and push part of `SendNotifications`: emails to the mentioned and to followers who want them, the
+/// "too many members" ephemeral posts, and pushes to the mentioned, to those who want every message and to
+/// followers.
+#[allow(clippy::too_many_arguments)]
+async fn send_email_and_push(
+    app: &App,
+    post: &Post,
+    c: &Channel,
+    sender: &User,
+    profiles: &Arc<HashMap<String, Arc<User>>>,
+    props: &HashMap<String, StringMap>,
+    mentions: &Mentions,
+    mentioned: &[String],
+    crt_email: &[String],
+    crt_push: &[String],
+    all_activity_push: &[String],
+) {
+    let n = Arc::new(crate::push::PostNotification {
+        post: post.clone(),
+        channel: c.clone(),
+        profiles: profiles.clone(),
+        sender: Arc::new(sender.clone()),
+    });
+    if app.cfg.bool("EmailSettings.SendEmailNotifications") {
+        let mut recipients: Vec<String> = vec![];
+        for id in mentioned.iter().chain(crt_email) {
+            if !recipients.contains(id) {
+                recipients.push(id.clone());
+            }
+        }
+        let team = if c.team_id.is_empty() {
+            crate::model::Team::default()
+        } else {
+            app.team(&c.team_id).await.map(|t| (*t).clone()).unwrap_or_default()
+        };
+        let verify = app.cfg.bool("EmailSettings.RequireEmailVerification");
+        for id in recipients {
+            let Some(u) = profiles.get(&id) else { continue };
+            if verify && !u.email_verified {
+                continue;
+            }
+            if !user_allows_email(app, u, props.get(&id), post).await {
+                continue;
+            }
+            let image = Some(app.profile_image(sender).await.0);
+            let (n, u, team) = (n.clone(), u.clone(), team.clone());
+            let Some(state) = app.hub.app() else { continue };
+            tokio::spawn(async move {
+                if let Err(e) = crate::email::send_notification_email(&state, &n, &u, team, image).await {
+                    eprintln!("Unable to send notification email: {e}");
+                }
+            });
+        }
+    }
+    let max = app.cfg.i64("TeamSettings.MaxNotificationsPerChannel");
+    if profiles.len() as i64 > max {
+        let max_s = max.to_string();
+        for (on, id) in [(mentions.here, "api.post.disabled_here"), (mentions.channel, "api.post.disabled_channel"), (mentions.all, "api.post.disabled_all")] {
+            if on {
+                let msg = crate::i18n::tl(&sender.locale, id, &[("Users", &max_s)]);
+                let p = Post { channel_id: post.channel_id.clone(), message: msg, create_at: post.create_at + 1, ..Default::default() };
+                app.send_ephemeral(&post.user_id, p).await;
+            }
+        }
+    }
+    if !crate::push::can_send(app) {
+        return;
+    }
+    let is_gm = c.r#type == channel::GROUP;
+    for id in mentioned {
+        let Some(u) = profiles.get(id) else { continue };
+        if crt_push.contains(id) {
+            continue;
+        }
+        let st = crate::push::status_or_offline(app, id).await;
+        let mt = mentions.users.get(id).copied();
+        let explicit = mt.is_some_and(|m| m > Mention::Gm);
+        let suppressed_add = kind::is_add_membership(&post.r#type) && crate::posts::excludes_membership(c);
+        if suppressed_add || crate::push::should_send(u, props.get(id), explicit, &st, post, is_gm) {
+            let reply = match mt {
+                Some(Mention::Thread) => "any",
+                Some(Mention::Comment) => "root",
+                _ => "",
+            };
+            let explicit = matches!(mt, Some(Mention::Keyword | Mention::Channel | Mention::Dm));
+            crate::push::send_message(app, &n, u, explicit, mt == Some(Mention::Channel), reply).await;
+        }
+    }
+    for id in all_activity_push {
+        let Some(u) = profiles.get(id) else { continue };
+        if crt_push.contains(id) || mentions.users.contains_key(id) {
+            continue;
+        }
+        let st = crate::push::status_or_offline(app, id).await;
+        if crate::push::should_send(u, props.get(id), false, &st, post, is_gm) {
+            crate::push::send_message(app, &n, u, false, false, "").await;
+        }
+    }
+    for id in crt_push {
+        let Some(u) = profiles.get(id) else { continue };
+        let st = crate::push::status_or_offline(app, id).await;
+        if crate::push::status_allows(u, &st, &post.channel_id, true) {
+            crate::push::send_message(app, &n, u, false, false, "crt").await;
+        }
+    }
+}
+
+/// `SendNotifications`: mention counts, thread memberships, email and push, `posted`, `thread_updated`.
 pub async fn send_notifications(
     app: &App,
     post: &Post,
@@ -393,6 +536,7 @@ pub async fn send_notifications(
     let mut new_participants: HashSet<String> = HashSet::new();
     let mut memberships: HashMap<String, crate::model::ThreadMembership> = HashMap::new();
     let mut desktop_followers: Vec<String> = vec![];
+    let (mut crt_email, mut crt_push, mut all_activity_push): (Vec<String>, Vec<String>, Vec<String>) = (vec![], vec![], vec![]);
     if !suppressed {
         let (m, k) = app.mentions_and_keywords(post, c, &profiles, &props, parent).await;
         mentions = m;
@@ -486,11 +630,36 @@ pub async fn send_notifications(
                 if !crt.get(uid).copied().unwrap_or(false) || (!post.from_webhook() && *uid == post.user_id) {
                     continue;
                 }
-                if follower_desktop(profile, mentions.users.contains_key(uid), props.get(uid)) {
+                let was = mentions.users.contains_key(uid);
+                if follower_desktop(profile, was, props.get(uid)) {
                     desktop_followers.push(uid.clone());
+                }
+                let (email, push) = follower_email_push(profile, was, props.get(uid));
+                if email {
+                    crt_email.push(uid.clone());
+                }
+                if push {
+                    crt_push.push(uid.clone());
                 }
             }
         }
+        if c.r#type != channel::DIRECT {
+            let ids: Vec<String> = profiles.keys().cloned().collect();
+            let crt = if post.root_id.is_empty() { HashMap::new() } else { app.crt_for_users(&ids).await };
+            for (id, p) in profiles.iter() {
+                let cpush = props.get(id).and_then(|m| m.0.get("push")).map(String::as_str);
+                if (p.notify_prop("push") == "all" || cpush == Some("all"))
+                    && (post.user_id != *id || post.from_webhook())
+                    && !(crt.get(id).copied().unwrap_or(false) && !post.root_id.is_empty())
+                {
+                    all_activity_push.push(id.clone());
+                }
+            }
+        }
+    }
+
+    if !suppressed {
+        send_email_and_push(app, post, c, sender, &profiles, &props, &mentions, &mentioned, &crt_email, &crt_push, &all_activity_push).await;
     }
 
     // The posted event.

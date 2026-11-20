@@ -395,7 +395,7 @@ impl App {
     }
 
     /// `UpdateThreadReadForUser`: read up to `timestamp`; `thread_read_changed` sent.
-    pub async fn update_thread_read(&self, user_id: &str, team_id: &str, thread_id: &str, timestamp: i64) -> ApiResult<ThreadResponse> {
+    pub async fn update_thread_read(&self, session_id: &str, user_id: &str, team_id: &str, thread_id: &str, timestamp: i64) -> ApiResult<ThreadResponse> {
         let user = self.user(user_id).await?.ok_or_else(crate::users::missing_account)?;
         let mut m = self.thread_membership(user_id, thread_id).await?.ok_or_else(|| {
             AppError::not_found("app.user.get_thread_membership_for_user.not_found", "Unable to get the user thread membership.")
@@ -421,6 +421,9 @@ impl App {
         let t = self.thread_for_user(&m, false).await?.ok_or_else(|| {
             AppError::not_found("app.user.get_threads_for_user.not_found", "User thread does not exist or is not followed")
         })?;
+        if t.unread_replies == 0 && self.is_crt_enabled(user_id).await {
+            crate::push::clear(self, session_id, user_id, &root.channel_id, thread_id).await;
+        }
         self.hub.publish(
             "thread_read_changed",
             json!({"thread_id": thread_id, "timestamp": timestamp, "unread_mentions": m.unread_mentions,
@@ -638,7 +641,7 @@ async fn read_thread(
     if !app.read_post_perm(&s, &thread_id).await?.0 {
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
-    Ok(Json(app.update_thread_read(&user_id, &team_id, &thread_id, timestamp).await?))
+    Ok(Json(app.update_thread_read(&s.id, &user_id, &team_id, &thread_id, timestamp).await?))
 }
 
 async fn set_unread(
@@ -663,5 +666,5 @@ async fn set_unread(
     if post.root_id != thread_id && post_id != thread_id {
         return Err(AppError::bad_request("app.user.update_thread_read_for_user_by_post.app_error", "Unable to update thread read state."));
     }
-    Ok(Json(app.update_thread_read(&user_id, &team_id, &thread_id, post.create_at - 1).await?))
+    Ok(Json(app.update_thread_read(&s.id, &user_id, &team_id, &thread_id, post.create_at - 1).await?))
 }
