@@ -14,6 +14,8 @@ use crate::config::Config;
 pub struct FileStore {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    /// The directory of the local driver (none for S3).
+    local: Option<std::path::PathBuf>,
 }
 
 impl FileStore {
@@ -33,13 +35,19 @@ impl FileStore {
             if f("AmazonS3Endpoint") != "s3.amazonaws.com" {
                 b = b.with_virtual_hosted_style_request(false);
             }
-            return Ok(FileStore { store: Arc::new(b.build()?), prefix: f("AmazonS3PathPrefix") });
+            return Ok(FileStore { store: Arc::new(b.build()?), prefix: f("AmazonS3PathPrefix"), local: None });
         }
         let dir = f("Directory");
         let dir = if dir.is_empty() { "./data/".to_string() } else { dir };
         std::fs::create_dir_all(&dir)?;
         let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)?.with_automatic_cleanup(true);
-        Ok(FileStore { store: Arc::new(store), prefix: String::new() })
+        let local = Some(std::fs::canonicalize(&dir)?);
+        Ok(FileStore { store: Arc::new(store), prefix: String::new(), local })
+    }
+
+    /// The file on disk with the local driver, to be read in place (a bulk import's zip).
+    pub fn local_path(&self, p: &str) -> Option<std::path::PathBuf> {
+        self.local.as_ref().map(|d| d.join(clean(p)))
     }
 
     fn path(&self, p: &str) -> Path {

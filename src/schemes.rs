@@ -31,7 +31,7 @@ fn bad(id: &str, m: &str) -> AppError {
 }
 
 /// `IsBuiltInRole`: the roles the server defines itself.
-fn is_builtin(r: &str) -> bool {
+pub(crate) fn is_builtin(r: &str) -> bool {
     ["system_", "team_", "channel_", "playbook_", "run_", "custom_group_"].iter().any(|p| r.starts_with(p))
 }
 

@@ -39,7 +39,7 @@ pub fn routes() -> Router<State> {
 }
 
 /// `AllPermissions` and `DeprecatedPermissions`, dumped from the Go model.
-const ALL_PERMISSIONS: &str = include_str!("../data/all_permissions.txt");
+pub(crate) const ALL_PERMISSIONS: &str = include_str!("../data/all_permissions.txt");
 
 /// `NewSystemRoleIDs`.
 const NEW_SYSTEM_ROLES: [&str; 4] = ["system_user_manager", "system_read_only_admin", "system_manager", "shared_channel_manager"];
@@ -61,13 +61,19 @@ const NOT_ALLOWED: [&str; 4] = [
     "manage_system",
 ];
 
+/// `NewRoleFromModel`'s permissions column: each permission once, each after a space.
+pub(crate) fn go_permissions(perms: &[String]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    perms.iter().filter(|p| seen.insert(p.as_str())).map(|p| format!(" {p}")).collect()
+}
+
 /// `IsValidRoleName`.
-fn valid_role_name(s: &str) -> bool {
+pub(crate) fn valid_role_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// `Role.IsValidWithoutId`.
-fn role_is_valid(r: &Role) -> Result<(), String> {
+pub(crate) fn role_is_valid(r: &Role) -> Result<(), String> {
     if !valid_role_name(&r.name) {
         return Err(format!("invalid role name {:?}", r.name));
     }
@@ -124,7 +130,7 @@ impl App {
         .bind(&r.name)
         .bind(&r.display_name)
         .bind(&r.description)
-        .bind(r.permissions.0.join(" "))
+        .bind(go_permissions(&r.permissions.0))
         .bind(r.scheme_managed)
         .bind(r.built_in)
         .bind(&r.scheme_id)
@@ -144,7 +150,7 @@ impl App {
 
     /// `UpdateRole`: saved; a change to a role channel scheme roles are merged with sends their new merged
     /// permissions too.
-    async fn update_role(&self, r: &mut Role) -> ApiResult<()> {
+    pub(crate) async fn update_role(&self, r: &mut Role) -> ApiResult<()> {
         self.save_role(r).await?;
         if NOT_CHANNEL_HIGHER_SCOPE.contains(&r.name.as_str()) {
             return Ok(());

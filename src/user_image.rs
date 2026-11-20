@@ -197,35 +197,44 @@ async fn set_image(
         return Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "api.user.upload_profile_user.too_large.app_error", ""));
     }
     let u = app.user(&user_id).await?.ok_or_else(|| AppError::invalid_url_param("user_id"))?;
-    let decode = |e: String| AppError::bad_request("api.user.upload_profile_user.decode.app_error", "").detail(e);
-    let reader = image::ImageReader::new(std::io::Cursor::new(&data)).with_guessed_format().map_err(|e| decode(e.to_string()))?;
-    let (w, h) = reader.into_dimensions().map_err(|e| decode(e.to_string()))?;
-    let max_res = app.cfg.i64("FileSettings.MaxImageResolution");
-    if max_res > 0 && (w as i64) * (h as i64) > max_res {
-        return Err(AppError::bad_request("api.user.upload_profile_user.check_image_limits.app_error", ""));
-    }
-    let img = image::load_from_memory(&data).map_err(|e| decode(e.to_string()))?;
-    let img = upright(img, &data).resize_to_fill(SIZE, SIZE, image::imageops::FilterType::Lanczos3);
-    let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, ImageFormat::Png)
-        .map_err(|e| AppError::internal("api.user.upload_profile_user.encode.app_error", e.to_string()))?;
-    let out = out.into_inner();
-    let path = profile_path(&u.id);
-    if let Ok(old) = app.files.read(&path).await
-        && old.as_ref() == out.as_slice()
-    {
-        crate::audit::log(&app, Some(&s), "").await;
-        return Ok(ok());
-    }
-    app.files
-        .write(&path, out.into())
-        .await
-        .map_err(|e| AppError::internal("api.user.upload_profile_user.upload_profile.app_error", e.to_string()))?;
-    let now = now_ms();
-    sqlx::query("UPDATE Users SET LastPictureUpdate = $1, UpdateAt = $1 WHERE Id = $2").bind(now).bind(&u.id).execute(&app.db).await?;
-    app.publish_user_updated(&u.id).await;
+    app.set_profile_image_from_bytes(&u.id, &data).await?;
     crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
+}
+
+impl App {
+    /// `checkImageLimits` + `SetProfileImageFromFile`: made upright, filled into 128×128 PNG and stored unless the
+    /// same image is there already; `LastPictureUpdate` and `user_updated`.
+    pub async fn set_profile_image_from_bytes(&self, user_id: &str, data: &[u8]) -> ApiResult<()> {
+        let app = self;
+        let decode = |e: String| AppError::bad_request("api.user.upload_profile_user.decode.app_error", "").detail(e);
+        let reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().map_err(|e| decode(e.to_string()))?;
+        let (w, h) = reader.into_dimensions().map_err(|e| decode(e.to_string()))?;
+        let max_res = app.cfg.i64("FileSettings.MaxImageResolution");
+        if max_res > 0 && (w as i64) * (h as i64) > max_res {
+            return Err(AppError::bad_request("api.user.upload_profile_user.check_image_limits.app_error", ""));
+        }
+        let img = image::load_from_memory(data).map_err(|e| decode(e.to_string()))?;
+        let img = upright(img, data).resize_to_fill(SIZE, SIZE, image::imageops::FilterType::Lanczos3);
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Png)
+            .map_err(|e| AppError::internal("api.user.upload_profile_user.encode.app_error", e.to_string()))?;
+        let out = out.into_inner();
+        let path = profile_path(user_id);
+        if let Ok(old) = app.files.read(&path).await
+            && old.as_ref() == out.as_slice()
+        {
+            return Ok(());
+        }
+        app.files
+            .write(&path, out.into())
+            .await
+            .map_err(|e| AppError::internal("api.user.upload_profile_user.upload_profile.app_error", e.to_string()))?;
+        let now = now_ms();
+        sqlx::query("UPDATE Users SET LastPictureUpdate = $1, UpdateAt = $1 WHERE Id = $2").bind(now).bind(user_id).execute(&app.db).await?;
+        app.publish_user_updated(user_id).await;
+        Ok(())
+    }
 }
 
 /// `MakeImageUpright` from the EXIF orientation of a JPEG.

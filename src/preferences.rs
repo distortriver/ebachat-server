@@ -125,7 +125,7 @@ impl App {
 }
 
 /// `Preference.PreUpdate`: invalid theme colours become white.
-fn pre_update(p: &mut Preference) {
+pub(crate) fn pre_update(p: &mut Preference) {
     if p.category != THEME {
         return;
     }
@@ -145,7 +145,7 @@ fn pre_update(p: &mut Preference) {
 }
 
 /// `Preference.IsValid`.
-fn is_valid(p: &Preference) -> ApiResult<()> {
+pub(crate) fn is_valid(p: &Preference) -> ApiResult<()> {
     let bad = |id: &str, field: &str| Err(AppError::bad_request(id, &format!("Invalid {field}.")));
     if !is_valid_id(&p.user_id) {
         return bad("model.preference.is_valid.id.app_error", "user id");

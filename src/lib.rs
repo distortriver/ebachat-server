@@ -3,6 +3,7 @@ pub mod api;
 pub mod bots;
 pub mod bulk_export;
 pub mod bulk_import;
+pub mod import_functions;
 pub mod app;
 pub mod audit;
 pub mod cache;

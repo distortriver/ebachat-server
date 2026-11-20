@@ -562,7 +562,7 @@ impl App {
     }
 
     /// `saveMultipleMembers` for one member: written with its explicit roles, returned with the derived ones.
-    async fn save_member(&self, m: ChannelMember) -> ApiResult<ChannelMember> {
+    pub(crate) async fn save_member(&self, m: ChannelMember) -> ApiResult<ChannelMember> {
         let mut row = m;
         row.last_update_at = now_ms();
         row.roles = std::mem::take(&mut row.explicit_roles);
@@ -582,7 +582,7 @@ impl App {
     }
 
     /// `SqlChannelStore.UpdateMember`: every column, the explicit roles in `Roles`.
-    async fn update_member(&self, m: &ChannelMember) -> ApiResult<ChannelMember> {
+    pub(crate) async fn update_member(&self, m: &ChannelMember) -> ApiResult<ChannelMember> {
         sqlx::query(
             "UPDATE ChannelMembers SET Roles = $3, LastViewedAt = $4, MsgCount = $5, MentionCount = $6,
                  MentionCountRoot = $7, UrgentMentionCount = $8, MsgCountRoot = $9, NotifyProps = $10,
@@ -627,7 +627,7 @@ impl App {
         );
     }
 
-    async fn log_join(&self, user_id: &str, channel_id: &str) -> ApiResult<()> {
+    pub(crate) async fn log_join(&self, user_id: &str, channel_id: &str) -> ApiResult<()> {
         sqlx::query("INSERT INTO ChannelMemberHistory (UserId, ChannelId, JoinTime) VALUES ($1, $2, $3)")
             .bind(user_id)
             .bind(channel_id)
