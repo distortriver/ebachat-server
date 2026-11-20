@@ -191,6 +191,11 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   - Startup, the websocket, and posts, threads, reactions, edits, deletes and DMs from another user all worked.
   - Every answer was 2xx, and the client logged no errors.
 - **Caches:** Go's caches are reproduced, see `docs/CACHES.md`.
+- **Server busy** (`POST /server_busy`): as Go, the ten `DisableWhenBusy` routes (user, post, team, channel and
+  file searches, REST typing) answer 503 `api.context.server_busy.app_error` after the session check,
+  `status_change` is not broadcast and the websocket `user_typing` action fails until the expiry. One atomic load
+  per check.
+- **Properties:** see `docs/PROPERTIES.md`.
 - **Left:**
   - mobile push (no push proxy);
   - email (no SMTP);
