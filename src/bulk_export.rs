@@ -237,11 +237,11 @@ impl serde_json::ser::Formatter for GoFormatter {
                 '\u{2029}' => "\\u2029",
                 _ => continue,
             };
-            w.write_all(fragment[start..i].as_bytes())?;
+            w.write_all(&fragment.as_bytes()[start..i])?;
             w.write_all(esc.as_bytes())?;
             start = i + c.len_utf8();
         }
-        w.write_all(fragment[start..].as_bytes())
+        w.write_all(&fragment.as_bytes()[start..])
     }
     fn write_char_escape<W: ?Sized + std::io::Write>(&mut self, w: &mut W, e: serde_json::ser::CharEscape) -> std::io::Result<()> {
         use serde_json::ser::CharEscape::*;
@@ -892,7 +892,8 @@ async fn user_data(app: &App, u: &UserRow) -> Res<UserData> {
 
 /// `buildUserTeamAndChannelMemberships`: (team name, membership) of teams not left, with the channels.
 async fn memberships(app: &App, user_id: &str, archived: bool, teams: &[String], channels: &[String]) -> Res<Vec<(String, Obj)>> {
-    let tms: Vec<(String, String, String, i64, bool, Option<bool>, Option<bool>)> = sqlx::query_as(
+    type TM = (String, String, String, i64, bool, Option<bool>, Option<bool>);
+    let tms: Vec<TM> = sqlx::query_as(
         "SELECT tm.TeamId, t.Name, COALESCE(tm.Roles, ''), tm.DeleteAt, (tm.SchemeGuest IS NOT NULL AND tm.SchemeGuest), tm.SchemeUser, tm.SchemeAdmin
          FROM TeamMembers tm JOIN Teams t ON tm.TeamId = t.Id WHERE tm.UserId = $1 AND t.DeleteAt = 0",
     )

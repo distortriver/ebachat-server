@@ -213,6 +213,8 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   `status_change` is not broadcast and the websocket `user_typing` action fails until the expiry. One atomic load
   per check.
 - **Properties:** see `docs/PROPERTIES.md`.
+- **Background jobs:** Go's job server, the Team Edition workers and schedulers, the recurring cleanups, content
+  extraction and bulk export; see `docs/JOBS.md` (bulk import is not ported).
 - **Left:**
   - mobile push (no push proxy);
   - email (no SMTP);
@@ -228,6 +230,7 @@ Code by area:
 | Posts | `posts.rs`, `notify.rs`, `threads.rs`, `reactions.rs`, `drafts.rs`, `search.rs` |
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
+| Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs` |
 
 ## Running
 

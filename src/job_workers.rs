@@ -243,7 +243,8 @@ async fn execute(app: &State, job: &mut Job) -> Result<(), String> {
                 .fetch_optional(&app.db)
                 .await
                 .map_err(db)?;
-            let v = v.ok_or_else(|| "failed to get system property with name=HostedPurchaseNeedsScreening: sql: no rows in result set".to_string())?;
+            // System.GetByName's not-found error, which names an empty id.
+            let v = v.ok_or_else(|| "resource \"System\" not found, id: name=".to_string())?;
             let at: i64 = v.parse().map_err(|e: std::num::ParseIntError| format!("strconv.ParseInt: parsing \"{v}\": {e}"))?;
             if now_ms() > at + 3 * DAY_MS {
                 sqlx::query("DELETE FROM Systems WHERE Name = 'HostedPurchaseNeedsScreening'").execute(&app.db).await.map_err(db)?;
@@ -728,7 +729,8 @@ async fn notify_admin_posts(app: &App, trial: bool) -> Result<(), String> {
     };
     let mut by_user: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_feature: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
-    let mut by_plugin: BTreeMap<String, Vec<&(String, i64, String, String, bool, Option<i64>)>> = BTreeMap::new();
+    type Row = (String, i64, String, String, bool, Option<i64>);
+    let mut by_plugin: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
     for r in &rows {
         *by_user.entry(&r.0).or_default() += 1;
         if r.3.starts_with(PLUGIN) {
@@ -904,7 +906,8 @@ async fn phase_2_batch(app: &App, last_done: &str) -> Result<(bool, String), Str
     let err_id = if table == "TeamMembers" { "app.team.migrate_team_members.update.app_error" } else { "app.channel.migrate_channel_members.select.app_error" };
     let fail = |e: sqlx::Error| jobs::go_error("MigrationsWorker.runAdvancedPermissionsPhase2Migration", err_id, &e.to_string());
     let mut tx = app.db.begin().await.map_err(fail)?;
-    let members: Vec<(String, String, String, Option<bool>, Option<bool>, Option<bool>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    type Member = (String, String, String, Option<bool>, Option<bool>, Option<bool>);
+    let members: Vec<Member> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {key}, UserId, COALESCE(Roles, ''), SchemeAdmin, SchemeUser, SchemeGuest FROM {table}
          WHERE ({key}, UserId) > ($1, $2) ORDER BY {key}, UserId LIMIT 100"
     )))

@@ -906,7 +906,7 @@ async fn jobs_by_type(St(app): St<State>, Auth(s): Auth, Path(job_type): Path<St
     let mut jobs = crate::jobs::get_by_type_and_data(&app, &job_type, &[filter])
         .await
         .map_err(|e| AppError::internal("app.job.get_all.app_error", e.detailed_error))?;
-    jobs.sort_by(|a, b| b.create_at.cmp(&a.create_at));
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.create_at));
     let page: Vec<_> = jobs.into_iter().skip((page * per_page) as usize).take(per_page as usize).collect();
     Ok(json_raw(&serde_json::to_value(page).unwrap_or_default()))
 }
