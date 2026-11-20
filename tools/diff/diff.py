@@ -243,7 +243,9 @@ def main():
     r.check("GET", f"/users/me/teams/{team}/channels/members")
     r.check("GET", f"/users/me/teams/{team}/channels/categories")
     r.check("GET", "/users/me/preferences")
-    ch = get(chans, 0, "id")
+    # The first open channel: DMs and group messages come and go with the stand's use.
+    first = next((i for i, c in enumerate(chans[1]) if get(c, "type") == "O"), 0) if isinstance(chans, tuple) else 0
+    ch = get(chans, first, "id")
     r.check("GET", f"/channels/{ch}")
     r.check("GET", f"/channels/{ch}/stats")
     r.check("GET", f"/channels/{ch}/stats?exclude_files_count=false")
@@ -286,7 +288,7 @@ def main():
     r.check("GET", f"/users/me/teams/{team}/channels?include_deleted=true")
     r.check("POST", "/channels/stats/member_count", [ch])
     r.check("POST", "/channels/search?system_console=false", {"term": "bench", "team_ids": [team], "include_deleted": True})
-    r.check("GET", f"/teams/{team}/channels/name/{get(chans, 0, 'name')}?include_deleted=true")
+    r.check("GET", f"/teams/{team}/channels/name/{get(chans, first, 'name')}?include_deleted=true")
     r.check("GET", f"/channels/{ch}/common_teams")
     r.check("GET", f"/users/{uid}/image", ignore=("content-type",))
     r.check("GET", "/users/me/posts/flagged?page=0&per_page=60".replace("/users/me", f"/users/{uid}"))

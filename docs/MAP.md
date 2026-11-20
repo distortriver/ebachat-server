@@ -132,13 +132,20 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
 - **Plugins: not now.** Production runs Calls (32k polls in 4 h), Jira (webhook in, settings), gcal and
   mattermost-ai. Go plugins cannot run in a Rust server, and none of them is ported for now. `/plugins/*` and
   `GET /api/v4/plugins/webapp` answer as a server with no plugins.
-- **Web client: not served.** The server does not serve the webapp bundle, `/static/*` or the web routes. The web
-  client is a separate deployment that talks to the API.
-  - **One exception:** `/static/emoji/{code}.png`, the system emoji images. EBAChat loads them from the server, and
-    production serves them.
-  - **Where they come from:** the web client's images (Apache-2.0), from `client/emoji/`, as Go's static handler
-    does, or from the directory in `EBACHAT_CLIENT_DIR`.
-  - **Deploying:** copy `webapp/channels/src/images/emoji` there.
+- **Web client: served as Go serves it** (`src/web.rs`, from `channels/web/static.go`), so the stock web and
+  desktop clients load from the server.
+  - **What is served:** `/static/*` from the client directory, gzip-compressed as Go's `gzhttp` does;
+    `/static/plugins/*` from `PluginSettings.ClientDirectory`; `/robots.txt`. Every other GET or HEAD outside
+    `/api/` gets `root.html`, with the site name and description. It is byte-identical to Go's.
+  - **The client directory:** `EBACHAT_CLIENT_DIR`, default `client/`. Use the released web client of the same
+    version (Apache-2.0); `dev/get-webapp.sh` fetches 12.1.0 into `dev/webapp`, linked as `dev/client`. Go finds
+    the same `dev/client` next to its binary's directory.
+  - **EBAChat needs only `/static/emoji/{code}.png`,** the system emoji images. Without a full client, point
+    `EBACHAT_CLIENT_DIR` at `webapp/channels/src/images`, which holds `emoji/`.
+  - **Not ported:** Go's unsupported-browser and old-desktop-app pages (templates) and Range requests on static
+    files.
+  - **Checked with Mattermost Desktop 6.2.2** on the Rust server: as a user, login, channels, posting, threads,
+    reactions, search, DMs, file paste with thumbnail and preview, and the theme. As admin, System Console pages.
 - **No user limit.** An unlicensed 12.1 server refuses to create users past 250 (`maxUsersHardLimit`,
   `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
