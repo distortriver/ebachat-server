@@ -116,10 +116,15 @@ written to the job's data as Go does.
 
 ## Verified against Go
 
-- Job routes: `/jobs` create (bad bodies, unknown and licensed types, permissions), cancel, status changes with
-  and without `force`, download, listing filters: 32/32 answers as Go (admin and user).
-- Workers: pending jobs inserted as Go's schedulers would, run by the shared Go server or by Rust (whichever
-  claimed them, `LOG_JOBS`); the resulting `Jobs` rows (status, progress, data, start and activity times) and
-  the effects (rows deleted, DMs posted, `LastNotifiedAt`, `Systems` keys) compared per type.
-- Bulk export: the same export job run by Go and by Rust on the stand's database; the JSONL compared line by
-  line (only `created` differs).
+- **Job routes:** `/jobs` create (bad bodies, unknown and licensed types, permissions), cancel, status changes
+  with and without `force`, download, `GET /jobs?job_type=`: 32/32 answers as Go, as admin and as a user.
+- **Workers:** pending jobs were inserted as Go's schedulers insert them and run by the shared Go server or by
+  Rust, whichever claimed them (`LOG_JOBS`). For `cleanup_desktop_tokens`, `plugins`,
+  `cleanup_expired_access_tokens`, `notify_expiring_access_tokens`, `refresh_materialized_views`,
+  `product_notices`, `import_delete`, `export_delete`, `install_plugin_notify_admin`, `hosted_purchase_screening`,
+  `extract_content`, `mobile_session_metadata` and `delete_expired_posts`, the `Jobs` rows (status, progress,
+  data, error text) and the effects (rows deleted, the system bot's DM) were the same: 13/13.
+- **Bulk export:** a team-scoped export (`compat`, with roles and schemes, attachments, profile pictures and
+  custom emoji) by Go and by Rust: the same zip entries and methods, the same 126 JSONL lines byte for byte (but
+  `created`), the same job data. A full export (direct channels and posts) was not compared: Go takes about
+  25 minutes over the stand's 42k posts.

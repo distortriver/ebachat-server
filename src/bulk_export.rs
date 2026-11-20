@@ -35,36 +35,49 @@ struct Line {
     #[serde(skip_serializing_if = "Option::is_none")]
     scheme: Option<SchemeData>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    team: Option<Value>,
+    team: Option<Obj>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<Value>,
+    channel: Option<Obj>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<UserData>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bot: Option<Value>,
+    bot: Option<Obj>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post: Option<PostData>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    direct_channel: Option<Value>,
+    direct_channel: Option<Obj>,
     #[serde(skip_serializing_if = "Option::is_none")]
     direct_post: Option<PostData>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    emoji: Option<Value>,
+    emoji: Option<Obj>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    info: Option<Value>,
+    info: Option<Obj>,
 }
 
-/// An ordered JSON object (Go structs keep their field order; `serde_json::Map` would sort).
-struct Obj(Vec<(&'static str, Value)>);
+/// An ordered JSON object (Go structs keep their field order; `serde_json::Map` would sort): each value kept as
+/// the JSON Go would write for it.
+#[derive(Default)]
+struct Obj(Vec<(&'static str, Raw)>);
+
+type Raw = Box<serde_json::value::RawValue>;
+
+/// A value as Go's JSON, kept verbatim.
+fn raw<T: Serialize>(v: &T) -> Raw {
+    serde_json::value::RawValue::from_string(String::from_utf8(go_json(v)).unwrap_or_default()).unwrap_or_else(|_| raw_null())
+}
+
+fn raw_null() -> Raw {
+    serde_json::value::RawValue::from_string("null".into()).expect("null is JSON")
+}
 
 impl Obj {
     fn new() -> Obj {
         Obj(vec![])
     }
     fn f(mut self, k: &'static str, v: impl Serialize) -> Obj {
-        self.0.push((k, serde_json::to_value(v).unwrap_or(Value::Null)));
+        self.0.push((k, raw(&v)));
         self
     }
     /// `omitempty` on a pointer: left out when none.
@@ -189,8 +202,8 @@ struct PostData {
     create_at: i64,
     edit_at: i64,
     flagged_by: Vec<String>,
-    reactions: Option<Value>,
-    replies: Option<Value>,
+    reactions: Option<Raw>,
+    replies: Option<Raw>,
     attachments: Option<Vec<Obj>>,
     is_pinned: bool,
     thread_followers: Option<Vec<Obj>>,
@@ -434,7 +447,7 @@ fn export_version(out: &mut Out, teams: &[String], channels: &[String]) -> Res<(
         }
         info = info.f("additional", add);
     }
-    out.line(&Line { t: "version", version: Some(1), info: Some(serde_json::to_value(info).unwrap_or_default()), ..Default::default() })
+    out.line(&Line { t: "version", version: Some(1), info: Some(info), ..Default::default() })
 }
 
 /// Go's `time.RFC3339Nano`: the fraction without trailing zeros, `Z` only for UTC.
@@ -538,13 +551,13 @@ fn team_line(name: &str, display: &str, t: &str, desc: &str, open: bool, scheme:
         .f("description", desc)
         .f("allow_open_invite", open)
         .o("scheme", scheme);
-    Line { t: "team", team: Some(serde_json::to_value(team).unwrap_or_default()), ..Default::default() }
+    Line { t: "team", team: Some(team), ..Default::default() }
 }
 
 /// `exportAllTeams`: the teams asked for, or every team not deleted.
 async fn export_teams(c: &mut Ctx<'_>, out: &mut Out, filters: &[String]) -> Res<HashSet<String>> {
     type T = (String, String, String, String, String, bool, i64, Option<String>);
-    const Q: &str = "SELECT t.Id, t.Name, COALESCE(t.DisplayName, ''), COALESCE(t.Type, ''), COALESCE(t.Description, ''),
+    const Q: &str = "SELECT t.Id, t.Name, COALESCE(t.DisplayName, ''), COALESCE(t.Type::text, ''), COALESCE(t.Description, ''),
         COALESCE(t.AllowOpenInvite, false), t.DeleteAt, s.Name FROM Teams t LEFT JOIN Schemes s ON t.SchemeId = s.Id";
     let mut names = HashSet::new();
     if !filters.is_empty() {
@@ -597,7 +610,7 @@ async fn export_channels(c: &mut Ctx<'_>, out: &mut Out, teams: &HashSet<String>
     let mut found: HashSet<String> = HashSet::new();
     loop {
         let page: Vec<Ch> = sqlx::query_as(
-            "SELECT c.Id, c.Name, COALESCE(c.DisplayName, ''), c.Type, COALESCE(c.Header, ''), COALESCE(c.Purpose, ''), c.DeleteAt,
+            "SELECT c.Id, c.Name, COALESCE(c.DisplayName, ''), c.Type::text, COALESCE(c.Header, ''), COALESCE(c.Purpose, ''), c.DeleteAt,
              t.Name, s.Name FROM Channels c JOIN Teams t ON c.TeamId = t.Id LEFT JOIN Schemes s ON c.SchemeId = s.Id
              WHERE c.Id > $1 AND c.Type IN ('O', 'P') ORDER BY c.Id LIMIT 1000",
         )
@@ -625,7 +638,7 @@ async fn export_channels(c: &mut Ctx<'_>, out: &mut Out, teams: &HashSet<String>
                 .f("purpose", &ch.5)
                 .o("scheme", ch.8.clone())
                 .f("deleted_at", ch.6);
-            out.line(&Line { t: "channel", channel: Some(serde_json::to_value(o).unwrap_or_default()), ..Default::default() })?;
+            out.line(&Line { t: "channel", channel: Some(o), ..Default::default() })?;
         }
     }
     for n in filters {
@@ -930,7 +943,7 @@ async fn memberships(app: &App, user_id: &str, archived: bool, teams: &[String],
              COALESCE(cm.MentionCount, 0), COALESCE(cm.MentionCountRoot, 0), COALESCE(cm.UrgentMentionCount, 0), COALESCE(cm.MsgCountRoot, 0),
              COALESCE(cm.NotifyProps::text, '{{}}'), cm.SchemeUser, cm.SchemeAdmin, (cm.SchemeGuest IS NOT NULL AND cm.SchemeGuest)
              FROM ChannelMembers cm INNER JOIN Channels c ON cm.ChannelId = c.Id WHERE cm.UserId = $1 AND c.TeamId = $2{}
-             AND c.Type NOT IN ('B')",
+             AND c.Type::text NOT IN ('S')",
             if archived { "" } else { " AND c.DeleteAt = 0" }
         )))
         .bind(user_id)
@@ -1041,7 +1054,7 @@ async fn export_bots(c: &mut Ctx<'_>, out: &mut Out, o: &Opts) -> Res<Vec<String
                 .f("display_name", &b.2)
                 .f("description", &b.3)
                 .f("delete_at", b.5);
-            out.line(&Line { t: "bot", bot: Some(serde_json::to_value(bot).unwrap_or_default()), ..Default::default() })?;
+            out.line(&Line { t: "bot", bot: Some(bot), ..Default::default() })?;
         }
         if n < 1000 {
             break;
@@ -1091,7 +1104,7 @@ async fn export_posts(c: &mut Ctx<'_>, out: &mut Out, o: &Opts) -> Res<Vec<Strin
                 }
                 let followers = followers(c.app, &p.0).await?;
                 // An empty list without reactions; Go's nil slice (null) when the reactors are all gone.
-                let reactions = if p.9 { nil_if_empty(reactions(c.app, &p.0).await?) } else { json!([]) };
+                let reactions = if p.9 { nil_if_empty(reactions(c.app, &p.0).await?) } else { raw(&Vec::<Obj>::new()) };
                 let files = if has_files(&p.10) { Some(post_files(c.app, &p.0).await?) } else { None };
                 if o.attachments && let Some(f) = &files {
                     attachments.extend(f.iter().cloned());
@@ -1219,8 +1232,8 @@ async fn post_replies(app: &App, root: &str) -> Res<(Vec<Obj>, Vec<String>)> {
 }
 
 /// A Go slice built by appending: `null` when nothing was appended.
-fn nil_if_empty(v: Vec<Obj>) -> Value {
-    if v.is_empty() { Value::Null } else { serde_json::to_value(v).unwrap_or_default() }
+fn nil_if_empty(v: Vec<Obj>) -> Raw {
+    if v.is_empty() { raw_null() } else { raw(&v) }
 }
 
 /// `buildThreadFollowers`.
@@ -1277,7 +1290,7 @@ async fn export_emoji(c: &mut Ctx<'_>, out: &mut Out) -> Res<Vec<String>> {
             let path = format!("emoji/{id}/image");
             paths.push(path.clone());
             let e = Obj::new().f("name", name).f("image", path);
-            out.line(&Line { t: "emoji", emoji: Some(serde_json::to_value(e).unwrap_or_default()), ..Default::default() })?;
+            out.line(&Line { t: "emoji", emoji: Some(e), ..Default::default() })?;
         }
     }
     Ok(paths)
@@ -1292,7 +1305,7 @@ async fn export_direct_channels(c: &mut Ctx<'_>, out: &mut Out, archived: bool) 
     let (mut after, mut cnt) = (ZERO.to_string(), 0);
     loop {
         let sql = format!(
-            "SELECT Id, Name, Type, COALESCE(Header, ''), DeleteAt FROM Channels WHERE Id > $1 AND Type IN ('D', 'G'){} ORDER BY Id LIMIT 1000",
+            "SELECT Id, Name, Type::text, COALESCE(Header, ''), DeleteAt FROM Channels WHERE Id > $1 AND Type IN ('D', 'G'){} ORDER BY Id LIMIT 1000",
             if archived { "" } else { " AND DeleteAt = 0" }
         );
         let chans: Vec<(String, String, String, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
@@ -1394,7 +1407,7 @@ async fn export_direct_channels(c: &mut Ctx<'_>, out: &mut Out, archived: bool) 
                 o = o.f("shown_by", shown);
             }
             o = o.f("header", &ch.3);
-            out.line(&Line { t: "direct_channel", direct_channel: Some(serde_json::to_value(o).unwrap_or_default()), ..Default::default() })?;
+            out.line(&Line { t: "direct_channel", direct_channel: Some(o), ..Default::default() })?;
         }
     }
     Ok(())
@@ -1599,7 +1612,9 @@ mod tests {
     #[test]
     fn go_escaping() {
         let v = json!({"m": "a<b>&c\u{8}\u{2028}"});
-        assert_eq!(String::from_utf8(go_json(&v)).unwrap(), r#"{"m":"a<b>&c\u0008 "}"#);
+        let bs = char::from(92u8).to_string();
+        let want = format!("{{\"m\":\"a{bs}u003cb{bs}u003e{bs}u0026c{bs}u0008{bs}u2028\"}}");
+        assert_eq!(String::from_utf8(go_json(&v)).unwrap(), want);
     }
 
     #[test]
