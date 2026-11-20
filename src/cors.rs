@@ -67,7 +67,7 @@ impl Cors {
             return true;
         }
         let o = origin.to_lowercase();
-        self.origins.iter().any(|a| *a == o)
+        self.origins.contains(&o)
             || self.wildcards.iter().any(|(p, s)| o.len() >= p.len() + s.len() && o.starts_with(p) && o.ends_with(s))
     }
 
