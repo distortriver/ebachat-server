@@ -83,6 +83,37 @@ through `pdftotext` as `docconv` runs it), archives (zip, tar, tar.gz: the entry
 must be printable UTF-8; 1 MB kept). Text is saved in `FileInfo.Content` (1 MB at most) by the hourly job and,
 as Go, in the background after each upload when `ExtractContent` is on.
 
+`.html`, `.doc` and `.rtf` go through the external tools `docconv` runs, and come out as Go's when they are missing:
+
+- **`.html`** (`ConvertHTML` with readability): `tidy -numeric -asxml -quiet -utf8`, then justext with the all-zero
+  options Mattermost leaves it, whose class list `[""]` keeps no paragraph. So the text is empty when justext finds
+  a paragraph (a non-blank text closed by a paragraph tag), and an error ("MAIN: P is nil") when it finds none,
+  after which the file is read as plain text. Without `tidy` (missing, or exit status 2) Go cleans the buffer
+  `Tidy` has already read to the end: no paragraph, so always plain text.
+- **`.doc`:** `wvText`; with no text (and without `wvText`) the file is read as a docx, which fails for a Word 97
+  file, which then goes on as plain text.
+- **`.rtf`:** `unrtf --nopict --text` without its `### ` lines; without `unrtf`, an error, then plain text.
+- **Checked** against docconv itself (v2.0.0-pre.4 with Go 1.26, with and without `tidy`) and against uploads to Go
+  and Rust: 11 HTML files (paragraphs, bare text, fragments, tables, a trailing comment, empty), an RTF and a DOC
+  without their tools: the same `FileInfo.Content`.
+
+## Import lines as Go decodes them
+
+Each JSONL line is decoded as Go's `json.Unmarshal` into `LineImportData` (`src/gojson.rs`, the import types
+described in `bulk_import.rs`):
+
+- **Syntax:** checked first, with the scanner's messages (`invalid character 'x' looking for beginning of value`,
+  `... after object key:value pair`, `... in literal true (expecting 'r')`, `unexpected end of JSON input`, ...).
+- **Keys:** a field's JSON name exactly, else case-insensitively (`foldName`, `ſ` and the Kelvin sign included);
+  unknown keys are ignored.
+- **Types:** the first mismatch in the line, as `UnmarshalTypeError` (`json: cannot unmarshal number 1.5 into Go
+  struct field UserImportData.user.delete_at of type int64`, the embedded `Avatar` in the path).
+- **Values:** `null` clears a pointer, slice or map and leaves a plain field; a key given twice merges into a struct
+  or map it already holds and replaces anything else; a lone surrogate or a bad UTF-8 byte is U+FFFD.
+- **Checked:** 45 lines (good, mixed-case, duplicate, every syntax error kind, type errors at each depth) through
+  Go 1.26's decoder and the import types: the same error text or the same decoded line
+  (`bulk_import::tests::lines_decode_as_go`).
+
 ## Bulk export
 
 `export_process` writes `ExportSettings.Directory/<job id>_export.zip`: `import.jsonl` (deflated) and, as asked,
@@ -132,16 +163,11 @@ written to the job's data as Go does.
 - **Product notices are fetched but not shown:** they target Mattermost versions; `GET /system/notices` keeps
   answering none (Go answers none on the stand too).
 - **Bulk import:**
-  - a line that is not JSON fails with Go's error id and line number, but the decoder's own words are serde's
-    (Go's for a cut or empty line: `unexpected end of JSON input`); JSON keys are matched exactly (Go's decoder
-    ignores their case).
   - the uploads of import files were stored under `%2E/import/` (the `./import` of the config, uncleaned) and so
     never found by the job or `/imports`; their path is cleaned as Go's `filepath.Join` cleans it.
   - a bot's welcome post (`CreateBot`) no longer marks the bot's direct channel viewed: Go's `CreatePostAsUser`
     skips that for posts `from_bot`.
-- **Extraction:** `.doc`, `.rtf` and `.html` documents fall through to plain text (Go needs `wvText`/`unrtf`,
-  which it does not ship; `html` goes through `docconv`'s readability, not ported); a pdf without `pdftotext`
-  gives no text (Go falls back to a Go PDF reader). Text cut at 1 MB stays valid UTF-8 (Go may cut inside a
+- **Extraction:** a pdf without `pdftotext` gives no text (Go falls back to a Go PDF reader). Text cut at 1 MB stays valid UTF-8 (Go may cut inside a
   character and then fail to save it).
 - **`job_updated` to non-admins** with the required permission works through each connection's session.
 - `LOG_JOBS=1` logs each job the Rust server ran.
@@ -180,7 +206,8 @@ written to the job's data as Go does.
   126/126, ids and times aside; so were they after importing the same file again (the update paths). 22 broken
   files (no or wrong version, bad JSON, unknown and null lines, invalid teams, users, guests, schemes, roles,
   emoji, missing teams, channels and users, dangling reactions, too few direct members): the same job status,
-  error text and `line_number`, 21/22 identical (for the bad JSON line only the decoder's words differ, above).
+  error text and `line_number`, 21/22 identical (for the bad JSON line only the decoder's words differed then; now
+  decoded as Go, below).
   An import file uploaded through `/uploads` and imported: the same answers and `FileInfo` row. Random values
   (password hashes, invite ids) and a guest deactivated by the other server's startup (`DeactivateGuests`, guest
   accounts are off on the stand) were left out of the comparison.

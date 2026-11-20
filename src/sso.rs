@@ -996,15 +996,16 @@ impl App {
         if auth.is_empty() {
             return Err(parse());
         }
+        // `GetByEmail`: `Email = lower(?)`, so the address in the state may have any case.
         let user = self
-            .user_by("u.Email = $1", email)
+            .user_by("u.Email = lower($1)", email)
             .await
             .ok_or_else(|| AppError::internal("app.user.missing_account.const", ""))?;
         self.revoke_all_sessions(&user.id).await?;
         // `UpdateAuthData(id, service, authData, email, resetMfa=true)`.
         let r = sqlx::query(
             "UPDATE Users SET Password = '', LastPasswordUpdate = $1, UpdateAt = $1, FailedAttempts = 0, AuthService = $2,
-             AuthData = $3, Email = $4, MfaActive = false, MfaSecret = '' WHERE Id = $5",
+             AuthData = $3, Email = lower($4), MfaActive = false, MfaSecret = '', MfaUsedTimestamps = '[]' WHERE Id = $5",
         )
         .bind(now_ms())
         .bind(service)

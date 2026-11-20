@@ -7,7 +7,8 @@
 
 use std::collections::HashSet;
 
-use axum::extract::{Query, State as St};
+use axum::extract::State as St;
+use crate::app::Query;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};

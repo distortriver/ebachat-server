@@ -434,6 +434,273 @@ pub struct ThreadFollowerData {
     pub unread_mentions: Option<i64>,
 }
 
+/// `json.Unmarshal` of a line into `LineImportData`: Go's syntax and type errors, keys matched case-insensitively.
+pub fn decode_line(raw: &[u8]) -> Result<LineData, String> {
+    crate::gojson::unmarshal(raw, &go_types::LINE).and_then(|v| serde_json::from_value::<LineData>(v).map_err(|e| e.to_string()))
+}
+
+// ---------- the line types as Go declares them, for its decoding (`json.Unmarshal` into `LineImportData`) ----------
+
+mod go_types {
+    use crate::gojson::{Struct, Ty};
+
+    const S: Ty = Ty::Str { go: "string", ptr: true };
+    const PLAIN: Ty = Ty::Str { go: "string", ptr: false };
+    const I64: Ty = Ty::Int { go: "int64" };
+    const B: Ty = Ty::Bool;
+    const LIST: Ty = Ty::StrList;
+    const PROPS: Ty = Ty::Map { go: "model.StringInterface" };
+    const fn st(st: &'static Struct) -> Ty {
+        Ty::Struct { st, ptr: true }
+    }
+    const fn list(st: &'static Struct, go: &'static str) -> Ty {
+        Ty::StructList { st, go, elem_ptr: false }
+    }
+    const fn imp(name: &'static str, fields: &'static [(&'static str, Ty)]) -> Struct {
+        Struct { name, pkg: "imports", fields }
+    }
+
+    pub static LINE: Struct = imp(
+        "LineImportData",
+        &[
+            ("type", PLAIN),
+            ("role", st(&ROLE)),
+            ("scheme", st(&SCHEME)),
+            ("team", st(&TEAM)),
+            ("channel", st(&CHANNEL)),
+            ("user", st(&USER)),
+            ("bot", st(&BOT)),
+            ("post", st(&POST)),
+            ("direct_channel", st(&DIRECT_CHANNEL)),
+            ("direct_post", st(&DIRECT_POST)),
+            ("emoji", st(&EMOJI)),
+            ("version", Ty::Int { go: "int" }),
+            ("info", st(&INFO)),
+        ],
+    );
+    static INFO: Struct =
+        imp("VersionInfoImportData", &[("generator", PLAIN), ("version", PLAIN), ("created", PLAIN), ("additional", Ty::Raw)]);
+    pub static EXPORT_SCOPE: Struct = imp("ExportScopeAdditional", &[("team_name", PLAIN), ("channel_name", PLAIN)]);
+    static TEAM: Struct = imp(
+        "TeamImportData",
+        &[("name", S), ("display_name", S), ("type", S), ("description", S), ("allow_open_invite", B), ("scheme", S)],
+    );
+    static CHANNEL: Struct = imp(
+        "ChannelImportData",
+        &[
+            ("team", S),
+            ("name", S),
+            ("display_name", S),
+            ("type", Ty::Str { go: "model.ChannelType", ptr: true }),
+            ("header", S),
+            ("purpose", S),
+            ("scheme", S),
+            ("deleted_at", I64),
+        ],
+    );
+    static USER: Struct = imp(
+        "UserImportData",
+        &[
+            ("Avatar.profile_image", S),
+            ("username", S),
+            ("email", S),
+            ("auth_service", S),
+            ("auth_data", S),
+            ("password", S),
+            ("nickname", S),
+            ("first_name", S),
+            ("last_name", S),
+            ("position", S),
+            ("roles", S),
+            ("locale", S),
+            ("feature_enabled_markdown_preview", S),
+            ("formatting", S),
+            ("show_unread_section", S),
+            ("delete_at", I64),
+            ("send_on_ctrl_enter", S),
+            ("code_block_ctrl_enter", S),
+            ("show_join_leave", S),
+            ("show_unread_scroll_position", S),
+            ("sync_drafts", S),
+            ("limit_visible_dms_gms", S),
+            ("name_format", S),
+            ("teams", list(&USER_TEAM, "[]imports.UserTeamImportData")),
+            ("theme", S),
+            ("military_time", S),
+            ("link_previews", S),
+            ("message_display", S),
+            ("collapse_consecutive_messages", S),
+            ("colorize_usernames", S),
+            ("channel_display_mode", S),
+            ("tutorial_step", S),
+            ("email_interval", S),
+            ("notify_props", st(&USER_NOTIFY)),
+            ("custom_status", st(&CUSTOM_STATUS)),
+        ],
+    );
+    static CUSTOM_STATUS: Struct = Struct {
+        name: "CustomStatus",
+        pkg: "model",
+        fields: &[("emoji", PLAIN), ("text", PLAIN), ("duration", PLAIN), ("expires_at", Ty::Time)],
+    };
+    static BOT: Struct = imp(
+        "BotImportData",
+        &[("Avatar.profile_image", S), ("username", S), ("owner", S), ("display_name", S), ("description", S), ("delete_at", I64)],
+    );
+    static USER_NOTIFY: Struct = imp(
+        "UserNotifyPropsImportData",
+        &[
+            ("desktop", S),
+            ("desktop_sound", S),
+            ("email", S),
+            ("mobile", S),
+            ("mobile_push_status", S),
+            ("channel", S),
+            ("comments", S),
+            ("mention_keys", S),
+        ],
+    );
+    static USER_TEAM: Struct = imp(
+        "UserTeamImportData",
+        &[("name", S), ("roles", S), ("theme", S), ("channels", list(&USER_CHANNEL, "[]imports.UserChannelImportData"))],
+    );
+    static USER_CHANNEL: Struct = imp(
+        "UserChannelImportData",
+        &[
+            ("name", S),
+            ("roles", S),
+            ("notify_props", st(&CHANNEL_NOTIFY)),
+            ("favorite", B),
+            ("mention_count", I64),
+            ("mention_count_root", I64),
+            ("urgend_mention_count", I64),
+            ("msg_count", I64),
+            ("msg_count_root", I64),
+            ("last_viewed_at", I64),
+        ],
+    );
+    static DIRECT_MEMBER: Struct = imp(
+        "DirectChannelMemberImportData",
+        &[
+            ("username", S),
+            ("notify_props", st(&CHANNEL_NOTIFY)),
+            ("scheme_user", B),
+            ("scheme_admin", B),
+            ("scheme_guest", B),
+            ("mention_count", I64),
+            ("mention_count_root", I64),
+            ("urgend_mention_count", I64),
+            ("msg_count", I64),
+            ("msg_count_root", I64),
+            ("last_viewed_at", I64),
+        ],
+    );
+    static CHANNEL_NOTIFY: Struct = imp(
+        "UserChannelNotifyPropsImportData",
+        &[
+            ("desktop", S),
+            ("mobile", S),
+            ("mark_unread", S),
+            ("email", S),
+            ("ignore_channel_mentions", S),
+            ("channel_auto_follow_threads", S),
+        ],
+    );
+    static EMOJI: Struct = imp("EmojiImportData", &[("name", S), ("image", S)]);
+    static REACTION: Struct = imp("ReactionImportData", &[("user", S), ("create_at", I64), ("emoji_name", S)]);
+    static ATTACHMENT: Struct = imp("AttachmentImportData", &[("path", S)]);
+    static FOLLOWER: Struct =
+        imp("ThreadFollowerImportData", &[("user", S), ("last_viewed", I64), ("unread_mentions", I64)]);
+    const REACTIONS: Ty = Ty::StructList { st: &REACTION, go: "[]imports.ReactionImportData", elem_ptr: false };
+    const ATTACHMENTS: Ty = Ty::StructList { st: &ATTACHMENT, go: "[]imports.AttachmentImportData", elem_ptr: false };
+    const FOLLOWERS: Ty = Ty::StructList { st: &FOLLOWER, go: "[]imports.ThreadFollowerImportData", elem_ptr: false };
+    const REPLIES: Ty = Ty::StructList { st: &REPLY, go: "[]imports.ReplyImportData", elem_ptr: false };
+    static REPLY: Struct = imp(
+        "ReplyImportData",
+        &[
+            ("user", S),
+            ("type", S),
+            ("message", S),
+            ("props", PROPS),
+            ("create_at", I64),
+            ("edit_at", I64),
+            ("flagged_by", LIST),
+            ("reactions", REACTIONS),
+            ("attachments", ATTACHMENTS),
+            ("is_pinned", B),
+        ],
+    );
+    static POST: Struct = imp(
+        "PostImportData",
+        &[
+            ("team", S),
+            ("channel", S),
+            ("user", S),
+            ("type", S),
+            ("message", S),
+            ("props", PROPS),
+            ("create_at", I64),
+            ("edit_at", I64),
+            ("flagged_by", LIST),
+            ("reactions", REACTIONS),
+            ("replies", REPLIES),
+            ("attachments", ATTACHMENTS),
+            ("is_pinned", B),
+            ("thread_followers", FOLLOWERS),
+        ],
+    );
+    static DIRECT_CHANNEL: Struct = imp(
+        "DirectChannelImportData",
+        &[
+            ("members", LIST),
+            (
+                "participants",
+                Ty::StructList { st: &DIRECT_MEMBER, go: "[]*imports.DirectChannelMemberImportData", elem_ptr: true },
+            ),
+            ("favorited_by", LIST),
+            ("shown_by", LIST),
+            ("header", S),
+        ],
+    );
+    static DIRECT_POST: Struct = imp(
+        "DirectPostImportData",
+        &[
+            ("channel_members", LIST),
+            ("user", S),
+            ("type", S),
+            ("message", S),
+            ("props", PROPS),
+            ("create_at", I64),
+            ("edit_at", I64),
+            ("flagged_by", LIST),
+            ("reactions", REACTIONS),
+            ("replies", REPLIES),
+            ("attachments", ATTACHMENTS),
+            ("is_pinned", B),
+            ("thread_followers", FOLLOWERS),
+        ],
+    );
+    static SCHEME: Struct = imp(
+        "SchemeImportData",
+        &[
+            ("name", S),
+            ("display_name", S),
+            ("description", S),
+            ("scope", S),
+            ("default_team_admin_role", st(&ROLE)),
+            ("default_team_user_role", st(&ROLE)),
+            ("default_channel_admin_role", st(&ROLE)),
+            ("default_channel_user_role", st(&ROLE)),
+            ("default_team_guest_role", st(&ROLE)),
+            ("default_channel_guest_role", st(&ROLE)),
+        ],
+    );
+    static ROLE: Struct = imp(
+        "RoleImportData",
+        &[("name", S), ("display_name", S), ("description", S), ("permissions", LIST), ("scheme_managed", B)],
+    );
+}
+
 /// `UsernameRemap`: source username (lower case) → the destination's, found by auth data.
 #[derive(Default)]
 pub struct Report {
@@ -1708,14 +1975,12 @@ pub async fn bulk_import(
         if line_number.is_multiple_of(8192) {
             crate::logs::info(&format!("Reader progress processed_lines={line_number}"), &[]);
         }
-        let mut line: LineData = match serde_json::from_slice(&raw) {
+        let mut line: LineData = match decode_line(&raw) {
             Ok(l) => l,
-            Err(e) => {
+            Err(text) => {
                 if let Some(s) = segment.take() {
                     s.drain().await;
                 }
-                // Go's text for a cut line; other decode errors keep serde's words.
-                let text = if e.is_eof() { "unexpected end of JSON input".to_string() } else { e.to_string() };
                 return (line_number, Some(IErr::bad("app.import.bulk_import.json_decode.error").wrap(text)));
             }
         };
@@ -1731,7 +1996,9 @@ pub async fn bulk_import(
                 return (line_number, Some(IErr::bad("app.import.bulk_import.unsupported_version.error")));
             }
             if let Some(add) = line.info.as_ref().and_then(|i| i.additional.clone()) {
-                match serde_json::from_value::<ExportScope>(add) {
+                match crate::gojson::unmarshal_value(&add, &go_types::EXPORT_SCOPE)
+                    .and_then(|v| serde_json::from_value::<ExportScope>(v).map_err(|e| e.to_string()))
+                {
                     Err(e) => crate::logs::warn(&format!(
                         "Failed to decode export scope metadata; proceeding as unscoped import err={e}"
                     ), &[]),
@@ -1921,4 +2188,71 @@ mod tests {
         let e = IErr::bad("app.import.import_line.unknown_line_type.error").p("Type", "x");
         assert!(e.text().starts_with("BulkImport: "), "{}", e.text());
     }
+
+    /// Lines and what Go 1.26's `json.Unmarshal` into `LineImportData` says of them ("" when it decodes them).
+    #[test]
+    fn lines_decode_as_go() {
+        let cases: &[(&str, &str)] = &[
+            ("{\"type\":\"version\",\"version\":1}", ""),
+            ("{\"Type\":\"version\",\"VERSION\":1}", ""),
+            ("{\"type\":\"user\",\"User\":{\"Username\":\"a\",\"EMAIL\":\"a@x.org\",\"Teams\":[{\"NAME\":\"t\",\"Channels\":[{\"Name\":\"c\",\"Favorite\":true}]}]}}", ""),
+            ("{\"type\":\"user\",\"user\":{\"username\":5}}", "json: cannot unmarshal number into Go struct field UserImportData.user.username of type string"),
+            ("{\"type\":\"user\",\"user\":{\"teams\":[{\"name\":true}]}}", "json: cannot unmarshal bool into Go struct field UserTeamImportData.user.teams.name of type string"),
+            ("{\"type\":\"user\",\"user\":{\"teams\":\"x\"}}", "json: cannot unmarshal string into Go struct field UserImportData.user.teams of type []imports.UserTeamImportData"),
+            ("{\"type\":\"user\",\"user\":{\"delete_at\":1.5}}", "json: cannot unmarshal number 1.5 into Go struct field UserImportData.user.delete_at of type int64"),
+            ("{\"type\":\"user\",\"user\":{\"delete_at\":\"1\"}}", "json: cannot unmarshal string into Go struct field UserImportData.user.delete_at of type int64"),
+            ("{\"type\":\"user\",\"user\":{\"delete_at\":1e3}}", "json: cannot unmarshal number 1e3 into Go struct field UserImportData.user.delete_at of type int64"),
+            ("{\"type\":\"user\",\"user\":{\"custom_status\":{\"expires_at\":5}}}", "Time.UnmarshalJSON: input is not a JSON string"),
+            ("{\"type\":\"user\",\"user\":\"x\"}", "json: cannot unmarshal string into Go struct field LineImportData.user of type imports.UserImportData"),
+            ("{\"type\":\"post\",\"post\":{\"props\":[1]}}", "json: cannot unmarshal array into Go struct field PostImportData.post.props of type model.StringInterface"),
+            ("{\"type\":\"post\",\"post\":{\"reactions\":[{\"user\":1}]}}", "json: cannot unmarshal number into Go struct field ReactionImportData.post.reactions.user of type string"),
+            ("{\"type\":\"post\",\"post\":{\"flagged_by\":[1]}}", "json: cannot unmarshal number into Go struct field PostImportData.post.flagged_by of type string"),
+            ("{\"type\":\"direct_channel\",\"direct_channel\":{\"participants\":\"x\"}}", "json: cannot unmarshal string into Go struct field DirectChannelImportData.direct_channel.participants of type []*imports.DirectChannelMemberImportData"),
+            ("{\"type\":\"direct_channel\",\"direct_channel\":{\"participants\":[5]}}", "json: cannot unmarshal number into Go struct field DirectChannelImportData.direct_channel.participants of type imports.DirectChannelMemberImportData"),
+            ("{\"type\":\"channel\",\"channel\":{\"type\":1}}", "json: cannot unmarshal number into Go struct field ChannelImportData.channel.type of type model.ChannelType"),
+            ("{\"type\":\"version\",\"version\":\"1\"}", "json: cannot unmarshal string into Go struct field LineImportData.version of type int"),
+            ("{\"type\":\"version\",\"version\":1.0}", "json: cannot unmarshal number 1.0 into Go struct field LineImportData.version of type int"),
+            ("{\"type\":5}", "json: cannot unmarshal number into Go struct field LineImportData.type of type string"),
+            ("[1]", "json: cannot unmarshal array into Go value of type imports.LineImportData"),
+            ("\"x\"", "json: cannot unmarshal string into Go value of type imports.LineImportData"),
+            ("x", "invalid character 'x' looking for beginning of value"),
+            ("{\"type\":\"user\",}", "invalid character '}' looking for beginning of object key string"),
+            ("{\"type\" \"user\"}", "invalid character '\"' after object key"),
+            ("{\"type\":\"user\" \"x\":1}", "invalid character '\"' after object key:value pair"),
+            ("[1 2]", "invalid character '2' after array element"),
+            ("{\"a\":\"\\x\"}", "invalid character 'x' in string escape code"),
+            ("{\"a\":\"\\u12g4\"}", "invalid character 'g' in \\u hexadecimal character escape"),
+            ("{\"a\":-x}", "invalid character 'x' in numeric literal"),
+            ("{\"a\":1.e}", "invalid character 'e' after decimal point in numeric literal"),
+            ("{\"a\":1ex}", "invalid character 'x' in exponent of numeric literal"),
+            ("{\"a\":tru}", "invalid character '}' in literal true (expecting 'e')"),
+            ("{\"a\":nul}", "invalid character '}' in literal null (expecting 'l')"),
+            ("{\"a\":", "unexpected end of JSON input"),
+            ("{\"type\":\"user\"} x", "invalid character 'x' after top-level value"),
+            ("{\"type\":\"user\",\"user\":{\"username\":\"a\",\"username\":\"b\",\"Username\":\"c\"}}", ""),
+            ("{\"type\":\"role\",\"role\":{\"permissions\":[\"a\",null,\"b\"],\"scheme_managed\":\"yes\"}}", "json: cannot unmarshal string into Go struct field RoleImportData.role.scheme_managed of type bool"),
+            ("{\"type\":\"emoji\",\"emoji\":{\"name\":\"x\"},\"emoji\":{\"image\":\"y\"}}", ""),
+            ("{\"type\":\"emoji\",\"emoji\":{\"name\":\"x\"},\"emoji\":null}", ""),
+            ("{\"type\":\"scheme\",\"scheme\":{\"default_team_admin_role\":{\"name\":3}}}", "json: cannot unmarshal number into Go struct field RoleImportData.scheme.default_team_admin_role.name of type string"),
+            ("{\"type\":\"post\",\"post\":{\"replies\":[{\"attachments\":[{\"path\":2}]}]}}", "json: cannot unmarshal number into Go struct field AttachmentImportData.post.replies.attachments.path of type string"),
+            ("{\"type\":\"user\",\"user\":{\"notify_props\":{\"channel\":false}}}", "json: cannot unmarshal bool into Go struct field UserNotifyPropsImportData.user.notify_props.channel of type string"),
+            ("{\"type\":\"user\",\"user\":{\"profile_image\":7}}", "json: cannot unmarshal number into Go struct field UserImportData.user.Avatar.profile_image of type string"),
+            ("{\"type\":\"version\",\"version\":1,\"info\":{\"additional\":5}}", ""),
+        ];
+        for (line, want) in cases {
+            let got = decode_line(line.as_bytes()).err().unwrap_or_default();
+            assert_eq!(&got, want, "{line}");
+        }
+        let l = decode_line(br#"{"Type":"user","User":{"Username":"a","Teams":[{"NAME":"t","Channels":[{"Favorite":true}]}]}}"#).unwrap();
+        let u = l.user.unwrap();
+        assert_eq!((l.r#type.as_str(), u.username.as_deref()), ("user", Some("a")));
+        assert_eq!(u.teams.unwrap()[0].channels.as_ref().unwrap()[0].favorite, Some(true));
+        let l = decode_line(br#"{"type":"user","user":{"username":"a","username":"b","Username":"c"}}"#).unwrap();
+        assert_eq!(l.user.unwrap().username.as_deref(), Some("c"));
+        let l = decode_line(br#"{"type":"emoji","emoji":{"name":"x"},"emoji":{"image":"y"}}"#).unwrap();
+        let e = l.emoji.unwrap();
+        assert_eq!((e.name.as_deref(), e.image.as_deref()), (Some("x"), Some("y")));
+        assert!(decode_line(br#"{"type":"emoji","emoji":{"name":"x"},"emoji":null}"#).unwrap().emoji.is_none());
+    }
+
 }

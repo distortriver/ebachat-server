@@ -292,6 +292,9 @@ pub struct AppError {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub request_id: String,
     pub status_code: u16,
+    /// `Context.RemoveSessionCookie` before the error is written: the `Set-Cookie` header that clears the session.
+    #[serde(skip)]
+    pub set_cookie: Option<Box<str>>,
 }
 
 impl AppError {
@@ -302,7 +305,13 @@ impl AppError {
             detailed_error: String::new(),
             request_id: new_id(),
             status_code: status.as_u16(),
+            set_cookie: None,
         }
+    }
+    /// The error with `Context.RemoveSessionCookie`'s header: `MMAUTHTOKEN` cleared under the site's subpath.
+    pub fn clearing_session_cookie(mut self, app: &App) -> AppError {
+        self.set_cookie = Some(remove_session_cookie(app).into());
+        self
     }
     pub fn detail(mut self, d: impl Into<String>) -> AppError {
         self.detailed_error = d.into();
@@ -401,9 +410,13 @@ impl IntoResponse for AppError {
         }
         let status = StatusCode::from_u16(self.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let rid = self.request_id.clone();
+        let cookie = self.set_cookie.take();
         let mut r = (status, axum::Json(self)).into_response();
         if let Ok(v) = rid.parse() {
             r.headers_mut().insert("X-Request-Id", v);
+        }
+        if let Some(v) = cookie.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+            r.headers_mut().append(axum::http::header::SET_COOKIE, v);
         }
         r
     }
@@ -420,23 +433,75 @@ pub enum TokenLocation {
     Query,
 }
 
-/// `ParseAuthTokenFromRequest`: `Authorization: Bearer|Token <t>`, the `MMAUTHTOKEN` cookie, or `?access_token=`.
-pub fn token_from(parts: &Parts) -> Option<(String, TokenLocation)> {
-    if let Some(h) = parts.headers.get("authorization").and_then(|v| v.to_str().ok())
-        && let Some((kind, t)) = h.split_once(' ')
-        && (kind.eq_ignore_ascii_case("bearer") || kind.eq_ignore_ascii_case("token"))
-    {
-        return Some((t.trim().to_string(), TokenLocation::Header));
-    }
-    for c in parts.headers.get_all("cookie") {
-        for kv in c.to_str().unwrap_or("").split(';') {
-            if let Some(t) = kv.trim().strip_prefix("MMAUTHTOKEN=") {
-                return Some((t.to_string(), TokenLocation::Cookie));
+/// `Context.RemoveSessionCookie`: `MMAUTHTOKEN` cleared (`MaxAge: -1`, `HttpOnly`) under the site's subpath.
+pub fn remove_session_cookie(app: &App) -> String {
+    let path = crate::web::subpath(app.cfg.str("ServiceSettings.SiteURL"));
+    format!("MMAUTHTOKEN=; Path={path}; Max-Age=0; HttpOnly")
+}
+
+/// textproto.TrimString: without ASCII spaces, tabs, CRs and LFs around.
+fn trim_ascii_ws(s: &[u8]) -> &[u8] {
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+    let start = s.iter().position(|b| !ws(b)).unwrap_or(s.len());
+    let end = s.iter().rposition(|b| !ws(b)).map_or(start, |i| i + 1);
+    &s[start..end]
+}
+
+/// `Request.Cookie(name)` (`readCookies`): the first well-formed cookie of that name in the `Cookie` headers, its
+/// value without surrounding double quotes. A cookie whose name or value has a byte Go refuses is skipped.
+pub fn go_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    // isTokenRune: visible ASCII that is not a separator.
+    let token_byte = |b: u8| b > 0x20 && b < 0x7f && !br#"()<>@,;:\"/[]?={}"#.contains(&b);
+    let value_byte = |b: u8| (0x20..0x7f).contains(&b) && b != b'"' && b != b';' && b != b'\\';
+    for line in headers.get_all(axum::http::header::COOKIE) {
+        for part in trim_ascii_ws(line.as_bytes()).split(|b| *b == b';') {
+            let part = trim_ascii_ws(part);
+            if part.is_empty() {
+                continue;
+            }
+            let (n, val) = match part.iter().position(|b| *b == b'=') {
+                Some(i) => (&part[..i], &part[i + 1..]),
+                None => (part, &b""[..]),
+            };
+            let n = trim_ascii_ws(n);
+            if n.is_empty() || !n.iter().all(|b| token_byte(*b)) || n != name.as_bytes() {
+                continue;
+            }
+            let v = if val.len() > 1 && val[0] == b'"' && val[val.len() - 1] == b'"' { &val[1..val.len() - 1] } else { val };
+            if v.iter().all(|b| value_byte(*b)) {
+                return Some(String::from_utf8_lossy(v).into_owned());
             }
         }
     }
-    let t = parts.uri.query()?.split('&').find_map(|kv| kv.strip_prefix("access_token=").map(str::to_string))?;
-    Some((t, TokenLocation::Query))
+    None
+}
+
+/// `ParseAuthTokenFromRequest`: the `MMAUTHTOKEN` cookie first (even an empty one), then `Authorization: Bearer
+/// <t>` or `Token <t>`, then `?access_token=` as `URL.Query` reads it; cut to 50 bytes. An empty token is none: Go
+/// only looks a token up when it is not empty.
+pub fn token_from(parts: &Parts) -> Option<(String, TokenLocation)> {
+    let (t, loc) = parse_auth_token(parts)?;
+    if t.is_empty() { None } else { Some((t, loc)) }
+}
+
+fn parse_auth_token(parts: &Parts) -> Option<(String, TokenLocation)> {
+    let cut = |b: &[u8]| String::from_utf8_lossy(&b[..b.len().min(50)]).into_owned();
+    if let Some(v) = go_cookie(&parts.headers, "MMAUTHTOKEN") {
+        return Some((cut(v.as_bytes()), TokenLocation::Cookie));
+    }
+    let auth = parts.headers.get(axum::http::header::AUTHORIZATION).map(|v| v.as_bytes()).unwrap_or(b"");
+    if auth.len() > 6 && auth[..6].eq_ignore_ascii_case(b"bearer") {
+        return Some((cut(&auth[7..]), TokenLocation::Header));
+    }
+    if auth.len() > 5 && auth[..5].eq_ignore_ascii_case(b"token") {
+        return Some((cut(&auth[6..]), TokenLocation::Header));
+    }
+    let q = crate::gourl::parse_query(parts.uri.query().unwrap_or("")).0;
+    let t = q.get("access_token");
+    if !t.is_empty() {
+        return Some((cut(t.as_bytes()), TokenLocation::Query));
+    }
+    None
 }
 
 /// A request with a valid session (`APISessionRequired`), CSRF-checked for cookie sessions.
@@ -460,36 +525,60 @@ impl FromRequestParts<State> for AuthTrusted {
     }
 }
 
-async fn session_required(parts: &Parts, app: &State, trust_requester: bool) -> Result<Arc<Session>, AppError> {
-    {
-        let (token, loc) = token_from(parts).ok_or_else(invalid_token)?;
-        // web/handlers.go: any session error but a 500 is "session expired" for the client.
-        let s = app.session(&token).await.map_err(|e| if e.status_code == 500 { e } else { invalid_token() })?;
-        if loc == TokenLocation::Query && !s.is_oauth {
-            return Err(AppError::new(
-                StatusCode::UNAUTHORIZED,
-                "api.context.token_provided.app_error",
-                "Session is not OAuth but token was provided in the query string",
-            ));
-        }
-        if loc == TokenLocation::Cookie && !trust_requester && parts.method != Method::GET {
-            let csrf = parts.headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).unwrap_or("");
-            let xhr = parts.headers.get("x-requested-with").and_then(|v| v.to_str().ok()) == Some("XMLHttpRequest");
-            let strict = app.cfg.bool("ServiceSettings.ExperimentalStrictCSRFEnforcement");
-            if !(csrf == s.prop(session::PROP_CSRF) && !csrf.is_empty() || xhr && !strict) {
-                return Err(invalid_token());
-            }
-        }
-        if s.user_id.is_empty()
-            || (!app.cfg.bool("ServiceSettings.EnableUserAccessTokens")
-                && s.is_user_access_token()
-                && s.prop(session::PROP_IS_BOT) != "true")
-        {
-            return Err(invalid_token());
-        }
-        crate::audit::set_user(&s.user_id);
-        Ok(s)
+/// What `web.Handler.ServeHTTP` makes of the request's token before the handler runs: the session; none (no token,
+/// or a token Go cannot find where no session is required); or the error the handler is not run for:
+///
+/// - a session lookup failing with a 500;
+/// - an unknown or expired token where a session is required: "session expired", the session cookie removed;
+/// - a token in the query string that is not an OAuth session's;
+/// - a cookie session failing `checkCSRFToken` on anything but GET, unless the handler trusts the requester (the
+///   `X-CSRF-Token` header must equal the session's CSRF token, both possibly empty, or `X-Requested-With` be
+///   `XMLHttpRequest` without `ExperimentalStrictCSRFEnforcement`): "session expired", the session cookie removed.
+pub async fn request_session(
+    parts: &Parts,
+    app: &State,
+    require: bool,
+    trust_requester: bool,
+) -> Result<Option<Arc<Session>>, AppError> {
+    let Some((token, loc)) = token_from(parts) else { return Ok(None) };
+    let s = match app.session(&token).await {
+        Ok(s) => s,
+        Err(e) if e.status_code == 500 => return Err(e),
+        Err(_) if require => return Err(invalid_token().clearing_session_cookie(app)),
+        Err(_) => return Ok(None),
+    };
+    if loc == TokenLocation::Query && !s.is_oauth {
+        return Err(AppError::new(
+            StatusCode::UNAUTHORIZED,
+            "api.context.token_provided.app_error",
+            "Session is not OAuth but token was provided in the query string",
+        ));
     }
+    if loc == TokenLocation::Cookie && !trust_requester && parts.method != Method::GET {
+        // `Header.Get`: the first value.
+        let first = |n: &str| parts.headers.get(n).map(|v| v.as_bytes()).unwrap_or(b"");
+        let passed = first("x-csrf-token") == s.prop(session::PROP_CSRF).as_bytes()
+            || (first("x-requested-with") == b"XMLHttpRequest"
+                && !app.cfg.bool("ServiceSettings.ExperimentalStrictCSRFEnforcement"));
+        if !passed {
+            return Err(invalid_token().clearing_session_cookie(app));
+        }
+    }
+    Ok(Some(s))
+}
+
+async fn session_required(parts: &Parts, app: &State, trust_requester: bool) -> Result<Arc<Session>, AppError> {
+    let s = request_session(parts, app, true, trust_requester).await?.ok_or_else(invalid_token)?;
+    // `Context.SessionRequired`.
+    if (!app.cfg.bool("ServiceSettings.EnableUserAccessTokens")
+        && s.is_user_access_token()
+        && s.prop(session::PROP_IS_BOT) != "true")
+        || s.user_id.is_empty()
+    {
+        return Err(invalid_token());
+    }
+    crate::audit::set_user(&s.user_id);
+    Ok(s)
 }
 
 /// `APISessionRequiredDisableWhenBusy`: `Auth`, then Go's server-busy error (`SetServerBusyError`) while the
@@ -511,14 +600,73 @@ impl FromRequestParts<State> for BusyAuth {
     }
 }
 
-/// The session if there is a valid one (`APIHandler` endpoints).
+/// A handler's query parameters as Go reads them (`r.URL.Query()`, then `Values.Get`): `url.ParseQuery` drops
+/// every pair with a raw `;` or a bad escape, and a key given more than once has its first value.
+pub struct Query<T>(pub T);
+
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> FromRequestParts<S> for Query<T> {
+    type Rejection = axum::extract::rejection::QueryRejection;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Query<T>, Self::Rejection> {
+        axum::extract::Query::<T>::try_from_uri(&go_query_uri(parts.uri.query().unwrap_or(""))).map(|q| Query(q.0))
+    }
+}
+
+impl<T> std::ops::Deref for Query<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+/// `/?` and the query `url.ParseQuery` keeps, one (the first) value per key.
+fn go_query_uri(raw: &str) -> axum::http::Uri {
+    let esc = crate::gourl::query_escape;
+    let kept: Vec<String> = crate::gourl::parse_query(raw)
+        .0
+        .0
+        .iter()
+        .filter_map(|(k, vs)| vs.first().map(|v| format!("{}={}", esc(k), esc(v))))
+        .collect();
+    format!("/?{}", kept.join("&")).parse().unwrap_or_else(|_| axum::http::Uri::from_static("/"))
+}
+
+/// The session if there is a valid one (`APIHandler` endpoints): no token, or a token Go cannot find, is no
+/// session; a query-string token that is not an OAuth session's, a failed CSRF check or a 500 from the session
+/// lookup stop the request as in Go (JSON under the API, the web error page elsewhere).
 pub struct MaybeAuth(pub Option<Arc<Session>>);
 
 impl FromRequestParts<State> for MaybeAuth {
-    type Rejection = std::convert::Infallible;
-    async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<MaybeAuth, Self::Rejection> {
-        Ok(MaybeAuth(Auth::from_request_parts(parts, app).await.ok().map(|a| a.0)))
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<MaybeAuth, Response> {
+        match request_session(parts, app, false, false).await {
+            Ok(s) => {
+                if let Some(s) = &s {
+                    crate::audit::set_user(&s.user_id);
+                }
+                Ok(MaybeAuth(s))
+            }
+            Err(e) => Err(error_response(app, parts, e).await),
+        }
     }
+}
+
+/// `handleContextError`'s answer for an error before the handler: JSON under the API, for webhooks, the OAuth API
+/// and the mobile app; the web error page otherwise.
+pub async fn error_response(app: &App, parts: &Parts, mut e: AppError) -> Response {
+    let sub = crate::web::subpath(app.cfg.str("ServiceSettings.SiteURL"));
+    let path = parts.uri.path();
+    let rel = path.strip_prefix(sub.trim_end_matches('/')).unwrap_or(path);
+    let oauth_api = (parts.method == Method::POST && rel == "/oauth/authorize")
+        || matches!(rel, "/oauth/apps/authorized" | "/oauth/deauthorize" | "/oauth/access_token" | "/oauth/intune");
+    if rel.starts_with("/api/") || rel.starts_with("/hooks/") || oauth_api {
+        return e.into_response();
+    }
+    let cookie = e.set_cookie.take();
+    let mut r = crate::web::web_error(app, &parts.headers, e).await;
+    if let Some(v) = cookie.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+        r.headers_mut().append(axum::http::header::SET_COOKIE, v);
+    }
+    r
 }
 
 impl Session {

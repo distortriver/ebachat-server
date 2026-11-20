@@ -125,7 +125,11 @@ error when it is not a URL (unless `IS_CI`/`IS_LOCAL_TESTING`), "Printing curren
 config" (`source`: `file://` and the absolute path, or the DSN with `****:****` credentials), "Mail server
 connection test failed" (with email notifications on; the same error text), "Problem with file storage settings",
 the push server over plain HTTP warning, "Starting Server...", then "Server is listening on". Checked against Go
-with an unreachable SMTP port. Go's version and build lines are not written (they describe Go's build).
+with an unreachable SMTP port. Before them, as Go's platform logs them once logging is set up: "Server is
+initializing..." (`go_version`: here the Rust compiler's version), "Current version is 12.1.0 (12.1.0//<hash>/)"
+with `current_version`, `build_number`, `build_date`, `build_hash`, `build_hash_enterprise` and
+`service_environment` (the values this server reports elsewhere: 12.1.0 as in `X-Version-Id` and the client config,
+the 12.1.0 release's hash, no date or enterprise hash), and "Team Edition Build" (`enterprise_build: false`).
 
 ## Custom profile attributes (`src/cpa.rs`)
 

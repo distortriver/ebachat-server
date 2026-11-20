@@ -8,7 +8,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use axum::extract::{Multipart, Path, Query, State as St};
+use axum::extract::{Multipart, Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};

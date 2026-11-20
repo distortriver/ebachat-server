@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         if l.starts_with(':') { format!("0.0.0.0{l}") } else { l.to_string() }
     });
     ebachat_server::logs::configure(cfg.value());
+    ebachat_server::logs::initializing();
     let app = App::new(db, cfg)?;
     app.hub.set_app(&app);
     ebachat_server::license::load(&app).await;

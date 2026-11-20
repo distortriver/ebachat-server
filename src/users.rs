@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -496,18 +497,19 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// `Logout` behind `APIHandler`: a failed CSRF check never gets here (`MaybeAuth` answers Go's 401). The session
+/// cookie is removed (`RemoveSessionCookie`: `MMAUTHTOKEN` only), then the session, if any, revoked.
 async fn logout(St(app): St<State>, crate::app::MaybeAuth(s): crate::app::MaybeAuth) -> Response {
     crate::audit::log(&app, s.as_deref(), "").await;
-    if let Some(s) = &s
-        && let Err(e) = app.revoke_session(s).await
-    {
-        return e.into_response();
-    }
-    let mut r = Json(json!({"status": "OK"})).into_response();
-    for name in ["MMAUTHTOKEN", "MMUSERID", "MMCSRF"] {
-        let c = format!("{name}=; Path=/; Max-Age=0");
-        r.headers_mut().append(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
-    }
+    let mut r = match &s {
+        Some(s) => match app.revoke_session(s).await {
+            Ok(()) => Json(json!({"status": "OK"})).into_response(),
+            Err(e) => e.into_response(),
+        },
+        None => Json(json!({"status": "OK"})).into_response(),
+    };
+    let c = crate::app::remove_session_cookie(&app);
+    r.headers_mut().append(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
     r
 }
 

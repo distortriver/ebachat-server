@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -502,6 +503,12 @@ async fn patch_user(
     if s.is_oauth && patch.email.as_ref().is_some_and(|e| *e != old.email) {
         return Err(AppError::forbidden_perm(perm::EDIT_OTHER_USERS));
     }
+    // CheckProviderAttributes: a user of any login provider keeps its username (LDAP and SAML have no further
+    // checks without a license).
+    if !old.auth_service.is_empty() && patch.username.as_ref().is_some_and(|n| *n != old.username) {
+        return Err(AppError::new(StatusCode::CONFLICT, "api.user.patch_user.login_provider_attribute_set.app_error", "")
+            .with_param("Field", "username"));
+    }
     if let Some(e) = &patch.email
         && *e != old.email
         && s.user_id == user_id
@@ -511,12 +518,9 @@ async fn patch_user(
     }
     let mut u = (*old).clone();
     patch.apply(&mut u);
-    let mut r = app.update_user(u, true, false).await?;
+    // `UpdateUser` answers `Sanitize({})` (password, MFA secret and last login removed) whoever asks.
+    let r = app.update_user(u, true, false).await?;
     crate::audit::log(&app, Some(&s), "").await;
-    // The API answers with the profile as the caller may see it.
-    if r.id != s.user_id {
-        r.sanitize_profile(app.show(&s).await);
-    }
     Ok(Json(r))
 }
 

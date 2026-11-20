@@ -27,6 +27,7 @@ pub mod emoji;
 pub mod extract;
 pub mod file_api;
 pub mod files;
+pub mod gojson;
 pub mod gourl;
 pub mod hub;
 pub mod i18n;

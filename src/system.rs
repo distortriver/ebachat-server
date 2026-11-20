@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Query, State as St};
+use axum::extract::State as St;
+use crate::app::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};

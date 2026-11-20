@@ -248,7 +248,7 @@ pub enum Invalid {
 }
 
 /// `model.GetServiceEnvironment`.
-fn service_environment() -> &'static str {
+pub fn service_environment() -> &'static str {
     match std::env::var("MM_SERVICEENVIRONMENT").unwrap_or_default().to_lowercase().as_str() {
         "dev" => "dev",
         "test" => "test",

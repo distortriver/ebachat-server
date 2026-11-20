@@ -10,7 +10,8 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};

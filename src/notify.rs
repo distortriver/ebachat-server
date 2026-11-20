@@ -753,7 +753,7 @@ pub async fn send_notifications(
         format!("@{}", sender.username)
     };
     let bpost = app.post_for_broadcast(post).await;
-    let post_for = bpost.per_user();
+    let post_hook = bpost.hook();
     let mut data = json!({
         "channel_display_name": channel_display_name, "channel_name": c.name, "channel_type": c.r#type,
         "post": serde_json::to_string(&bpost.post).unwrap(), "sender_name": sender_name, "set_online": set_online,
@@ -777,15 +777,12 @@ pub async fn send_notifications(
         if f_set.contains(uid) {
             extra.insert("followers".into(), Value::String(format!("[\"{uid}\"]")));
         }
-        if let Some(p) = post_for.as_ref().and_then(|f| f(uid)) {
-            extra.insert("post".into(), Value::String(p));
-        }
         (!extra.is_empty()).then_some(extra)
     });
     let b = if kind::is_add_membership(&post.r#type) && crate::posts::excludes_membership(c) {
-        Broadcast { user_id: post.prop_str("addedUserId").to_string(), per_user: Some(per_user), ..Default::default() }
+        Broadcast { user_id: post.prop_str("addedUserId").to_string(), per_user: Some(per_user), post_hook: post_hook.clone(), ..Default::default() }
     } else {
-        Broadcast { channel_id: post.channel_id.clone(), per_user: Some(per_user), ..Default::default() }
+        Broadcast { channel_id: post.channel_id.clone(), per_user: Some(per_user), post_hook: post_hook.clone(), ..Default::default() }
     };
     app.hub.publish("posted", data, b);
 

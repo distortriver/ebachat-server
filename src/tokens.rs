@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};

@@ -110,14 +110,104 @@ fn gz_cache() -> &'static GzCache {
 /// `staticFilesHandler(http.StripPrefix(..., http.FileServer(http.Dir(dir))))` under `gzhttp.GzipHandler`: Go's
 /// `http.ServeContent` (conditional requests, ranges), and a full 200 answer gzip-compressed when the client takes it.
 async fn serve(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, head: bool) -> Response {
-    let mut r = serve_static(dir, rel, req_path, headers, head).await;
-    // gzhttp adds it before anything else, whatever the answer.
-    r.headers_mut().append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    let gzip = gzip_mode();
+    let mut r = serve_static(dir, rel, req_path, headers, head, gzip).await;
+    if gzip {
+        // gzhttp adds it before anything else, whatever the answer.
+        r.headers_mut().append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     r.extensions_mut().insert(NoExpires);
     r
 }
 
-async fn serve_static(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, head: bool) -> Response {
+/// `ServiceSettings.WebserverMode` as read at start (`InitStatic`): "gzip" wraps the static, plugin and docs
+/// handlers in gzhttp; "disabled" registers none of the web client's routes.
+static WEBSERVER_MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn gzip_mode() -> bool {
+    WEBSERVER_MODE.get().is_none_or(|m| m == "gzip")
+}
+
+/// Whether the web client's routes are served (`WebserverMode` is not "disabled").
+pub fn static_enabled() -> bool {
+    WEBSERVER_MODE.get().is_none_or(|m| m != "disabled")
+}
+
+/// `docsStaticExts`: real asset and page suffixes, so `v10.5` is not taken for a file with an extension.
+fn has_docs_static_ext(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let ext = base.rfind('.').map(|i| base[i..].to_ascii_lowercase()).unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        ".html" | ".htm" | ".css" | ".js" | ".mjs" | ".map" | ".json" | ".png" | ".jpg" | ".jpeg" | ".gif" | ".svg"
+            | ".webp" | ".ico" | ".avif" | ".woff" | ".woff2" | ".ttf" | ".eot" | ".otf" | ".mp4" | ".webm" | ".txt"
+            | ".xml" | ".pdf"
+    )
+}
+
+/// `NewDocsHandler`: the offline docs bundle in `<client>/_documentation`, any method, clean URLs mapped to
+/// `<path>.html` or `<path>/index.html` (`docsFileSystem`); HTML pages not cached for a year.
+async fn docs(req: Request) -> Response {
+    let dir = client_dir().join("_documentation");
+    let path = req.uri().path();
+    let mut upath = path.strip_prefix("/_documentation").unwrap_or(path).to_string();
+    if !upath.starts_with('/') {
+        upath.insert(0, '/');
+    }
+    // `http.Dir.Open`: the name cleaned, under the root.
+    let open = |name: &str| -> Option<PathBuf> {
+        let file = clean(name).iter().fold(dir.clone(), |p, s| p.join(s));
+        std::fs::metadata(&file).ok().map(|_| file)
+    };
+    let found = if upath.contains("..") {
+        None
+    } else {
+        open(&upath)
+            .filter(|f| f.is_file())
+            .or_else(|| if has_docs_static_ext(&upath) { None } else { open(&format!("{upath}.html")) })
+            .or_else(|| open(&format!("{upath}/index.html")))
+    };
+    let mut r = match found.filter(|f| f.is_file()) {
+        None => not_found(),
+        Some(file) => {
+            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut r = serve_file(&file, req.headers(), req.method() == Method::HEAD, None).await;
+            let cc = if r.status() == StatusCode::NOT_FOUND || name.to_lowercase().ends_with(".html") {
+                "no-cache, public"
+            } else {
+                "max-age=31556926, public"
+            };
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cc));
+            r
+        }
+    };
+    r.extensions_mut().insert(NoExpires);
+    r
+}
+
+/// `/_documentation`: Go's `http.Redirect` (302) to the slashed path, from the main router itself.
+async fn docs_redirect(req: Request) -> Response {
+    let mut url = format!("{}/", req.uri().path());
+    if let Some(q) = req.uri().query() {
+        url = format!("{url}?{q}");
+    }
+    let mut r = Response::new(axum::body::Body::empty());
+    *r.status_mut() = StatusCode::FOUND;
+    let h = r.headers_mut();
+    h.insert(header::LOCATION, HeaderValue::from_str(&url).unwrap_or(HeaderValue::from_static("/_documentation/")));
+    if req.method() == Method::GET || req.method() == Method::HEAD {
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    }
+    if req.method() == Method::GET {
+        let body = format!("<a href=\"{}\">Found</a>.\n\n", html_escape(&url));
+        r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+        *r.body_mut() = axum::body::Body::from(body);
+    }
+    r.extensions_mut().insert(Raw);
+    r
+}
+
+async fn serve_static(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, head: bool, gzip: bool) -> Response {
     if req_path.ends_with('/') {
         return not_found();
     }
@@ -144,7 +234,7 @@ async fn serve_static(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderM
     if r.status() != StatusCode::RANGE_NOT_SATISFIABLE {
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
     }
-    if r.status() != StatusCode::OK || head {
+    if r.status() != StatusCode::OK || head || !gzip {
         return r;
     }
     // Go's file server answers every method as GET, so only HEAD stays plain.
@@ -366,6 +456,11 @@ fn parse_range(s: &str, size: u64) -> Result<Vec<(u64, u64)>, bool> {
 fn multipart_boundary() -> String {
     let b: [u8; 30] = rand::random();
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `/static/` itself: `staticFilesHandler`'s 404 for a path ending in a slash.
+async fn static_dir(req: Request) -> Response {
+    serve(client_dir(), "", req.uri().path(), req.headers(), req.method() == Method::HEAD).await
 }
 
 async fn static_files(Path(rel): Path<String>, req: Request) -> Response {
@@ -636,12 +731,22 @@ async fn saml(AxState(app): AxState<State>, headers: HeaderMap) -> Response {
     web_error(&app, &headers, e).await
 }
 
-pub fn routes() -> axum::Router<State> {
+/// The web routes; `InitStatic`'s only when `WebserverMode` (read once, here) is not "disabled".
+pub fn routes(webserver_mode: &str) -> axum::Router<State> {
     use axum::routing::get;
-    axum::Router::new()
-        .route("/login/sso/saml", get(saml).post(saml))
+    let _ = WEBSERVER_MODE.set(webserver_mode.to_string());
+    let r = axum::Router::new().route("/login/sso/saml", get(saml).post(saml));
+    if !static_enabled() {
+        return r;
+    }
+    r
         // Go's file servers answer every method as GET.
         .route("/static/plugins/{*rel}", axum::routing::any(static_plugins))
+        .route("/static/", axum::routing::any(static_dir))
+        .route("/static/plugins/", axum::routing::any(static_dir))
+        .route("/_documentation", axum::routing::any(docs_redirect))
+        .route("/_documentation/", axum::routing::any(docs))
+        .route("/_documentation/{*rel}", axum::routing::any(docs))
         .route("/static/{*rel}", axum::routing::any(static_files))
         .route("/robots.txt", axum::routing::any(robots))
         .route("/unsupported_browser.js", axum::routing::any(unsupported_browser_js))

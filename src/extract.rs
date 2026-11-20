@@ -3,13 +3,15 @@
 //!
 //! As Go's `docextractor`: the extractors are tried in order, the first that matches the name and succeeds
 //! wins: documents (docx, pptx, odt as their XML text, pdf through `pdftotext` as `docconv` runs it), archives
-//! (the names of their entries), then plain text (anything that starts as printable UTF-8). `.doc` and `.rtf`
-//! need `wvText` and `unrtf` in Go too; without them they fall through to plain text, as in Go.
+//! (the names of their entries), then plain text (anything that starts as printable UTF-8). `.html`, `.doc` and
+//! `.rtf` run the external tools Go's `docconv` runs (`tidy`, `wvText`, `unrtf`), with Go's outcome when they are
+//! missing: `.html` and `.rtf` fall through to plain text, `.doc` is tried as a docx.
 
 // Based on Mattermost server/platform/services/docextractor/*.go, channels/app/file.go
 // (ExtractContentFromFileInfo), channels/jobs/extract_content/worker.go, and docconv's docx.go, pptx.go, odt.go,
-// xml.go and pdf_text.go (code.sajari.com/docconv, MIT), Copyright (c) 2015-present Mattermost, Inc. Licensed under
-// AGPL-3.0.
+// doc.go, rtf.go, html.go, tidy.go, xml.go and pdf_text.go (code.sajari.com/docconv, MIT), Copyright (c)
+// 2015-present Mattermost, Inc. Licensed under AGPL-3.0. HTML paragraphs as github.com/JalfResi/justext (MIT) finds
+// them.
 
 use std::io::Read;
 
@@ -92,9 +94,154 @@ fn document(e: &str, d: &[u8]) -> Result<String, String> {
             }
         }
         "pdf" => pdftotext(d),
-        // doc (wvText), rtf (unrtf): their converters are external tools Go does not ship; html: not ported.
+        "html" => convert_html(d),
+        "doc" => convert_doc(d),
+        "rtf" => convert_rtf(d),
         _ => Err("unsupported".into()),
     }
+}
+
+/// A converter's input in a temporary file (docconv's `NewLocalFile`), removed when dropped.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(prefix: &str, d: &[u8]) -> Result<TempFile, String> {
+        let path = std::env::temp_dir().join(format!("{prefix}{}", crate::app::new_id()));
+        std::fs::write(&path, d).map_err(|e| format!("error creating local file: {e}"))?;
+        Ok(TempFile(path))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `ConvertHTML(r, readability=true)`: `Tidy` (`tidy -numeric -asxml -quiet -utf8`, exit status 1 taken), then
+/// justext with all-zero options and the class list `[""]`, which keeps no paragraph: the text is empty when
+/// justext finds a paragraph and an error ("MAIN: P is nil") when it finds none. Without `tidy` (missing, or its
+/// exit status 2), Go cleans the buffer `Tidy` has already read to the end, which leaves nothing: no paragraph,
+/// the error, and the file goes on to the plain-text extractor.
+fn convert_html(d: &[u8]) -> Result<String, String> {
+    let f = TempFile::new("docconv", d)?;
+    let out = std::process::Command::new("tidy")
+        .args(["-numeric", "-asxml", "-quiet", "-utf8"])
+        .arg(&f.0)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return Err("MAIN: P is nil".into());
+    }
+    if justext_has_paragraph(&String::from_utf8_lossy(&out.stdout)) { Ok(String::new()) } else { Err("MAIN: P is nil".into()) }
+}
+
+/// Whether justext's `ReadAll` finds a paragraph: the document parsed, `head`, `script` and `style` removed, only
+/// the document's last child rendered (`nodesToString`), then a non-blank text closed by the start or end of a
+/// paragraph tag (or a second `br` in a row). Text after the last such tag is never kept.
+fn justext_has_paragraph(html: &str) -> bool {
+    use html5ever::tendril::TendrilSink;
+    use markup5ever_rcdom::{Handle, NodeData, RcDom};
+    const PARAGRAPH: &[&str] = &[
+        "blockquote", "caption", "center", "col", "colgroup", "dd", "div", "dl", "dt", "fieldset", "form", "legend",
+        "optgroup", "option", "p", "pre", "table", "td", "textarea", "tfoot", "th", "thead", "tr", "ul", "li", "h1", "h2",
+        "h3", "h4", "h5", "h6",
+    ];
+    const SELF_CLOSING: &[&str] = &["area", "base", "basefont", "br", "hr", "input", "img", "link", "meta"];
+    #[derive(Default)]
+    struct Walk {
+        pending: bool,
+        br: bool,
+        found: bool,
+    }
+    impl Walk {
+        fn start(&mut self, name: &str) {
+            if PARAGRAPH.contains(&name) || (name == "br" && self.br) {
+                self.found |= self.pending;
+                self.pending = false;
+            } else {
+                self.br = name == "br";
+            }
+        }
+        fn end(&mut self, name: &str) {
+            if PARAGRAPH.contains(&name) {
+                self.found |= self.pending;
+                self.pending = false;
+            }
+        }
+        fn node(&mut self, n: &Handle) {
+            match &n.data {
+                NodeData::Text { contents } => {
+                    if !contents.borrow().trim().is_empty() {
+                        // addKwTags wraps it in a `kw` element first.
+                        self.br = false;
+                        self.pending = true;
+                    }
+                }
+                NodeData::Element { name, .. } => {
+                    let tag = name.local.to_string();
+                    if matches!(tag.as_str(), "head" | "script" | "style") {
+                        return;
+                    }
+                    self.start(&tag);
+                    if SELF_CLOSING.contains(&tag.as_str()) {
+                        return;
+                    }
+                    for c in n.children.borrow().iter() {
+                        self.node(c);
+                    }
+                    self.end(&tag);
+                }
+                // A doctype renders as an empty `html` element.
+                NodeData::Doctype { .. } => {
+                    self.start("html");
+                    self.end("html");
+                }
+                _ => {}
+            }
+        }
+    }
+    let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
+    let last = dom.document.children.borrow().last().cloned();
+    let mut w = Walk::default();
+    if let Some(n) = last {
+        w.node(&n);
+    }
+    w.found
+}
+
+/// `ConvertDoc`: `wvText <file> <out>`; with no text (no `wvText` either) the file is read as a docx, which fails
+/// for a real Word 97 file.
+fn convert_doc(d: &[u8]) -> Result<String, String> {
+    let f = TempFile::new("docconv", d)?;
+    let out = TempFile::new("sajari-convert-", b"")?;
+    let _ = std::process::Command::new("wvText").arg(&f.0).arg(&out.0).output();
+    let body = std::fs::read(&out.0).unwrap_or_default();
+    if body.is_empty() {
+        return document("docx", d);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// `ConvertRTF`: `unrtf --nopict --text <file>` without its `### ` comment lines; an error without `unrtf`.
+fn convert_rtf(d: &[u8]) -> Result<String, String> {
+    let f = TempFile::new("docconv", d)?;
+    let out = std::process::Command::new("unrtf")
+        .args(["--nopict", "--text"])
+        .arg(&f.0)
+        .output()
+        .map_err(|e| format!("unrtf error: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("unrtf error: {}", out.status));
+    }
+    let mut text = String::new();
+    for line in String::from_utf8_lossy(&out.stdout).split('\n') {
+        if !line.starts_with("### ") {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    Ok(text)
 }
 
 /// `[Content_Types].xml`'s overrides: (content type, part name without its leading slash).
@@ -300,7 +447,7 @@ fn plain(d: &[u8], max_file_size: i64) -> String {
 }
 
 /// `utf8.DecodeRune`: the char and its size, U+FFFD and 1 for an invalid byte, size 0 at the end.
-fn decode_rune(b: &[u8]) -> (char, usize) {
+pub(crate) fn decode_rune(b: &[u8]) -> (char, usize) {
     if b.is_empty() {
         return ('\u{FFFD}', 0);
     }
@@ -419,6 +566,20 @@ mod tests {
         assert_eq!(extract("a.txt", b"hello world", 0), "hello world");
         assert_eq!(extract("a.bin", b"\x00\x01\x02binary", 0), "");
         assert_eq!(extract("a.txt", "привет".as_bytes(), 0), "привет");
+    }
+
+    /// Tidy's output for files Go's docconv (with justext) gives empty text (a paragraph) or an error (none).
+    #[test]
+    fn justext_paragraphs() {
+        let doc = |body: &str| format!("<!DOCTYPE html>\n<html>\n<head>\n<title>t</title>\n</head>\n<body>\n{body}\n</body>\n</html>\n");
+        assert!(justext_has_paragraph(&doc("<p>fragment</p>")));
+        assert!(justext_has_paragraph(&doc("<div>x</div>")));
+        assert!(justext_has_paragraph(&doc("text<br>\n<br>\nmore")));
+        assert!(justext_has_paragraph(&doc("<table><tr><td>cell</td></tr></table>")));
+        assert!(!justext_has_paragraph(&doc("no tags at all, just text")));
+        assert!(!justext_has_paragraph(&doc("tail text only<span>x</span>")));
+        assert!(!justext_has_paragraph(&doc("<script>var x = 1;</script>")));
+        assert!(!justext_has_paragraph(&format!("{}<!-- last -->", doc("<p>a</p>"))));
     }
 
     #[test]

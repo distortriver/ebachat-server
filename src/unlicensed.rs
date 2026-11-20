@@ -29,7 +29,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Query, RawPathParams, State as St};
+use axum::extract::{RawPathParams, State as St};
+use crate::app::Query;
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter};
