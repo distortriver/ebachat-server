@@ -18,7 +18,7 @@ use axum::extract::{Path, Request, State as St};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use serde::Deserialize;
 
 use crate::app::{ApiResult, App, AppError, MaybeAuth, State, decode_json, new_id, now_ms};
@@ -73,6 +73,14 @@ pub fn go_map_json(m: &BTreeMap<String, String>) -> String {
     s.replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029")
 }
 
+/// An error whose translation wants parameters Go did not pass: they print as `<no value>`.
+fn no_value(mut e: AppError) -> AppError {
+    if let Some(m) = crate::i18n::tr(&e.id, &[]) {
+        e.message = regex::Regex::new(r"\{\{\s*\.[A-Za-z]+\s*\}\}").unwrap().replace_all(&m, "<no value>").into_owned();
+    }
+    e
+}
+
 /// `[A-Za-z0-9]+`, the pattern of Go's `{service}`: anything else is no route.
 fn valid_service(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -113,7 +121,7 @@ impl App {
     /// `getSSOProvider`: GitLab is the only provider an unlicensed server registers.
     fn sso_provider(&self, service: &str) -> ApiResult<Sso> {
         let sso = self.sso_settings(service).filter(|s| s.enable).ok_or_else(|| {
-            AppError::new(StatusCode::NOT_IMPLEMENTED, "api.user.authorize_oauth_user.unsupported.app_error", "")
+            no_value(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.user.authorize_oauth_user.unsupported.app_error", ""))
                 .detail(format!("service={service}"))
         })?;
         let provider = if sso.scope.contains("openid") { "openid" } else { service };
@@ -1329,7 +1337,8 @@ pub async fn login_with_desktop_token(app: &State, headers: &HeaderMap, body: &[
     let mut u = (*app.user(&user_id).await?.unwrap_or(user)).clone();
     u.password.clear();
     u.mfa_secret.clear();
-    let mut r = Json(u).into_response();
+    u.mfa_used_timestamps = Default::default();
+    let mut r = crate::oauth_provider::go_encode(StatusCode::OK, &u);
     r.headers_mut().extend(h);
     Ok(r)
 }
