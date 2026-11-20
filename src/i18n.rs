@@ -181,11 +181,12 @@ fn plural_category(lang: &str, n: i64) -> &'static str {
     }
 }
 
-fn fill(mut s: String, args: &[(&str, &str)]) -> String {
-    for (k, v) in args {
-        s = s.replace(&format!("{{{{.{k}}}}}"), v);
-    }
-    s
+/// Go template parameters, `{{.Name}}` or `{{ .Name }}`; unknown ones become `<no value>` as Go prints them.
+fn fill(s: String, args: &[(&str, &str)]) -> String {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\{\{-?\s*\.(\w+)\s*-?\}\}").unwrap());
+    re.replace_all(&s, |c: &regex::Captures| args.iter().find(|(k, _)| *k == &c[1]).map(|(_, v)| v.to_string()).unwrap_or_else(|| "<no value>".into()))
+        .into_owned()
 }
 
 /// `i18n.GetUserTranslations(locale)(id, args)`: the user's locale (English when the server does not have it),

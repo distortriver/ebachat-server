@@ -880,7 +880,7 @@ async fn hyperlink_channels(app: &App, html: &str, team_name: &str, landing: &st
         return html.to_string();
     }
     let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT c.Id, c.Name, c.Type FROM Channels c JOIN Teams t ON t.Id = c.TeamId
+        "SELECT c.Id, c.Name, c.Type::text FROM Channels c JOIN Teams t ON t.Id = c.TeamId
          WHERE t.Name = $1 AND c.Name = ANY($2) AND c.DeleteAt = 0",
     )
     .bind(team_name)

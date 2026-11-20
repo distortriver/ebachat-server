@@ -60,20 +60,17 @@ fn walk<'a>(n: &'a comrak::nodes::AstNode<'a>, src: &str, out: &mut String) {
 static REL_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(.*)]\((/.*)\)").unwrap());
 static BLOCKQUOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\n)(&gt;)").unwrap());
 
-/// `html.EscapeString` then `MarkdownToHTML(siteURL)` (GFM), as Go prepares a message for email. Go's goldmark
-/// writes the escaped quotes back as `&#39;` and `&#34;`, so they ride through the parser as private-use
-/// characters.
+/// `html.EscapeString` then `MarkdownToHTML(siteURL)` (GFM), as Go prepares a message for email. goldmark reads the
+/// escaped quotes back as characters, as comrak does.
 pub fn escaped_to_html(text: &str, site_url: &str) -> String {
-    const APOS: char = '\u{E000}';
-    const QUOT: char = '\u{E001}';
     let mut esc = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '<' => esc.push_str("&lt;"),
             '>' => esc.push_str("&gt;"),
             '&' => esc.push_str("&amp;"),
-            '\'' => esc.push(APOS),
-            '"' => esc.push(QUOT),
+            '\'' => esc.push_str("&#39;"),
+            '"' => esc.push_str("&#34;"),
             c => esc.push(c),
         }
     }
@@ -84,8 +81,7 @@ pub fn escaped_to_html(text: &str, site_url: &str) -> String {
     opts.extension.table = true;
     opts.extension.autolink = true;
     opts.extension.tasklist = true;
-    let html = comrak::markdown_to_html(&clean, &opts);
-    html.replace(APOS, "&#39;").replace(QUOT, "&#34;")
+    comrak::markdown_to_html(&clean, &opts)
 }
 
 #[cfg(test)]
@@ -102,7 +98,7 @@ mod tests {
 
     #[test]
     fn html_for_email() {
-        assert_eq!(escaped_to_html("it's **bold**", "http://s"), "<p>it&#39;s <strong>bold</strong></p>\n");
+        assert_eq!(escaped_to_html("it's **bold**", "http://s"), "<p>it's <strong>bold</strong></p>\n");
         assert_eq!(escaped_to_html("> quote", "http://s"), "<blockquote>\n<p>quote</p>\n</blockquote>\n");
         assert_eq!(escaped_to_html("[x](/y)", "http://s"), "<p><a href=\"http://s/y\">x</a></p>\n");
     }

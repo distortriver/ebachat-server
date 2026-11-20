@@ -487,7 +487,7 @@ pub fn build(m: &Mail, cfg: &SmtpConfig, date: chrono::DateTime<chrono::Utc>) ->
         m.message_id.clone()
     };
     gen_h.push(("Message-ID", msg_id));
-    gen_h.push(("Date", date.format("%a, %d %b %Y %H:%M:%S %z").to_string()));
+    gen_h.push(("Date", date.with_timezone(&chrono::Local).format("%a, %d %b %Y %H:%M:%S %z").to_string()));
     gen_h.push(("MIME-Version", "1.0".into()));
     gen_h.push(("User-Agent", "go-mail v0.8.1 // https://github.com/wneessen/go-mail".into()));
     gen_h.push(("X-Mailer", "go-mail v0.8.1 // https://github.com/wneessen/go-mail".into()));
