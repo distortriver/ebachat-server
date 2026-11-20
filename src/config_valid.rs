@@ -145,6 +145,7 @@ pub fn is_valid(cfg: &Value) -> R {
     email_settings(c)?;
     ldap_settings(c)?;
     saml_settings(c)?;
+    openid_settings(c)?;
     intune_settings(c)?;
     for p in ["NativeAppSettings.AppDownloadLink", "NativeAppSettings.AndroidAppDownloadLink", "NativeAppSettings.IosAppDownloadLink"] {
         let l = c.s(p);
@@ -221,6 +222,8 @@ pub fn is_valid(cfg: &Value) -> R {
     ] {
         check(c.i(p) > 0, || ep("model.config.is_valid.connected_workspaces.batch_size.app_error", &[("Setting", p)]))?;
     }
+    content_flagging_settings(c)?;
+    delivery_and_recap_settings(c)?;
     if c.b("MobileEphemeralModeSettings.Enable") {
         for (p, max, id) in [
             ("DisconnectionTimeoutSeconds", 600, "disconnection_timeout"),
@@ -240,7 +243,25 @@ pub fn is_valid(cfg: &Value) -> R {
     check(c.i("AccessControlSettings.AttributeRefreshIntervalSeconds") >= 0, || {
         e("model.config.is_valid.access_control_attribute_refresh_interval.app_error")
     })?;
+    // FeatureFlags.isValid: retired features.
+    check(!c.b("FeatureFlags.AppsEnabled"), || e("model.config.is_valid.feature_flags.apps_enabled.app_error"))?;
+    check(!c.b("FeatureFlags.MoveThreadsEnabled"), || e("model.config.is_valid.feature_flags.move_threads_enabled.app_error"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod ldap_tests {
+    use super::ldap_filter_ok;
+
+    #[test]
+    fn filters() {
+        for ok in ["(a=b)", "(&(a=b)(c=*))", "(|(a=b*c)(!(d=e)))", "(cn:dn:=x)", "(a=\\2a)", "((a=b))", "(a~=b)"] {
+            assert!(ldap_filter_ok(ok), "{ok}");
+        }
+        for bad in ["a=b", "(a=b", "(ab)", "(a=b))", "(a=\\zz)", "(&(a=b)", "(a=\\2)", ""] {
+            assert!(!ldap_filter_ok(bad), "{bad}");
+        }
+    }
 }
 
 fn team_settings(c: &C) -> R {
@@ -417,17 +438,174 @@ fn ldap_settings(c: &C) -> R {
         ] {
             check(!c.s(&format!("LdapSettings.{k}")).is_empty(), || e(id))?;
         }
-        // ldap.CompileFilter: a filter is parenthesized.
         for (k, id) in [
             ("UserFilter", "ent.ldap.validate_filter.app_error"),
             ("GuestFilter", "ent.ldap.validate_guest_filter.app_error"),
             ("AdminFilter", "ent.ldap.validate_admin_filter.app_error"),
             ("GroupFilter", "ent.ldap.validate_group_filter.app_error"),
         ] {
-            let v = c.s(&format!("LdapSettings.{k}")).trim();
-            let balanced = v.chars().fold(0i32, |d, ch| d + i32::from(ch == '(') - i32::from(ch == ')')) == 0;
-            check(v.is_empty() || (v.starts_with('(') && v.ends_with(')') && balanced), || e(id))?;
+            let v = c.s(&format!("LdapSettings.{k}"));
+            check(v.is_empty() || ldap_filter_ok(v), || e(id))?;
         }
+    }
+    Ok(())
+}
+
+/// `ldap.CompileFilter` (github.com/mattermost/ldap, MIT): whether the filter compiles.
+pub fn ldap_filter_ok(f: &str) -> bool {
+    f.starts_with('(') && ldap_compile(f, 1).is_some_and(|p| p == f.len())
+}
+
+fn ldap_compile_set(f: &str, mut pos: usize) -> Option<usize> {
+    while pos < f.len() && f.as_bytes()[pos] == b'(' {
+        pos = ldap_compile(f, pos + 1)?;
+    }
+    if pos >= f.len() {
+        return None;
+    }
+    Some(pos + 1)
+}
+
+/// `escapedStringToEncodedBytes`: `\` must be followed by two hex digits.
+fn ldap_escapes_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            if i + 3 > b.len() || !b[i + 1].is_ascii_hexdigit() || !b[i + 2].is_ascii_hexdigit() {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    true
+}
+
+fn ldap_compile(f: &str, pos: usize) -> Option<usize> {
+    let c = f.get(pos..)?.chars().next()?;
+    match c {
+        '(' => ldap_compile(f, pos + 1).map(|p| p + 1),
+        '&' | '|' => ldap_compile_set(f, pos + 1),
+        '!' => ldap_compile(f, pos + 1),
+        _ => {
+            // 0: the attribute, 1: an extensible matching rule, 2: the condition.
+            let (mut state, mut op, mut extensible) = (0, false, false);
+            let mut cond = String::new();
+            let mut p = pos;
+            while p < f.len() {
+                let rest = &f[p..];
+                let ch = rest.chars().next()?;
+                if ch == ')' {
+                    break;
+                }
+                match state {
+                    0 => {
+                        let (skip, next, ext) = if rest.starts_with(":dn:=") {
+                            (5, 2, true)
+                        } else if rest.starts_with(":dn:") {
+                            (4, 1, true)
+                        } else if rest.starts_with(":=") {
+                            (2, 2, true)
+                        } else if ch == ':' {
+                            (1, 1, true)
+                        } else if ch == '=' {
+                            (1, 2, false)
+                        } else if rest.starts_with(">=") || rest.starts_with("<=") || rest.starts_with("~=") {
+                            (2, 2, false)
+                        } else {
+                            (0, 0, false)
+                        };
+                        if skip == 0 {
+                            p += ch.len_utf8();
+                        } else {
+                            op = true;
+                            extensible = ext;
+                            state = next;
+                            p += skip;
+                        }
+                    }
+                    1 => {
+                        if rest.starts_with(":=") {
+                            state = 2;
+                            p += 2;
+                        } else {
+                            p += ch.len_utf8();
+                        }
+                    }
+                    _ => {
+                        cond.push(ch);
+                        p += ch.len_utf8();
+                    }
+                }
+            }
+            if p >= f.len() || !op {
+                return None;
+            }
+            let ok = if !extensible && cond == "*" {
+                true
+            } else if !extensible && cond.contains('*') {
+                cond.split('*').all(ldap_escapes_ok)
+            } else {
+                ldap_escapes_ok(&cond)
+            };
+            ok.then_some(p + 1)
+        }
+    }
+}
+
+/// `SSOSettings.isValid` (OpenID): the additional scopes, RFC 6749 scope tokens.
+fn openid_settings(c: &C) -> R {
+    let scopes = c.s("OpenIdSettings.AdditionalScopes");
+    let ok = scopes.len() <= 1024
+        && scopes.split(' ').all(|s| s.chars().all(|ch| ch == '\x21' || ('\x23'..='\x5B').contains(&ch) || ('\x5D'..='\x7E').contains(&ch)));
+    check(ok, || ep("model.config.is_valid.sso_additional_scopes.app_error", &[("MaxLength", "1024")]))
+}
+
+/// `ContentFlaggingSettings.IsValid`: known events and targets, reviewers told of a flag, some reasons.
+fn content_flagging_settings(c: &C) -> R {
+    let mapping = c.v("ContentFlaggingSettings.NotificationSettings.EventTargetMapping");
+    if let Some(m) = mapping.as_object() {
+        for (event, targets) in m {
+            check(matches!(event.as_str(), "flagged" | "assigned" | "removed" | "dismissed"), || {
+                e("model.config.is_valid.notification_settings.invalid_event")
+            })?;
+            for t in targets.as_array().into_iter().flatten() {
+                let t = t.as_str().unwrap_or("");
+                check(matches!(t, "reviewers" | "author" | "reporter"), || {
+                    e("model.config.is_valid.notification_settings.invalid_target").detail(format!("target: {t}"))
+                })?;
+            }
+        }
+    }
+    let flagged = mapping.get("flagged").and_then(Value::as_array).cloned().unwrap_or_default();
+    check(flagged.iter().any(|t| t.as_str() == Some("reviewers")), || {
+        e("model.config.is_valid.notification_settings.reviewer_flagged_notification_disabled")
+    })?;
+    let reasons = c.v("ContentFlaggingSettings.AdditionalSettings.Reasons").as_array().map_or(0, Vec::len);
+    check(reasons > 0, || e("model.config.is_valid.content_flagging.reasons_not_set.app_error"))
+}
+
+/// `DeliveryTrackingSettings.IsValid` and `AIRecapSettings.IsValid`.
+fn delivery_and_recap_settings(c: &C) -> R {
+    check(c.v("DeliveryTrackingSettings.Enable").is_boolean() && c.v("DeliveryTrackingSettings.EnableForAllChannels").is_boolean(), || {
+        e("model.delivery_tracking.is_valid.missing_toggle.app_error")
+    })?;
+    if c.v("AIRecapSettings.DefaultLimits").is_object() {
+        for (k, id) in [
+            ("MaxRecapsPerDay", "max_recaps_per_day"),
+            ("MaxScheduledRecaps", "max_scheduled_recaps"),
+            ("MaxChannelsPerRecap", "max_channels_per_recap"),
+            ("MaxPostsPerRecap", "max_posts_per_recap"),
+            ("MaxTokensPerRecap", "max_tokens_per_recap"),
+            ("MaxPostsPerDay", "max_posts_per_day"),
+        ] {
+            let v = c.v(&format!("AIRecapSettings.DefaultLimits.{k}"));
+            check(v.as_i64().is_none_or(|n| n == -1 || n >= 1), || e(&format!("model.config.is_valid.ai_recap.{id}.app_error")))?;
+        }
+        let v = c.v("AIRecapSettings.DefaultLimits.CooldownMinutes");
+        check(v.as_i64().is_none_or(|n| n >= 0), || e("model.config.is_valid.ai_recap.cooldown_minutes.app_error"))?;
     }
     Ok(())
 }

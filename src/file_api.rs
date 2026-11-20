@@ -822,7 +822,7 @@ fn path_escape(s: &str) -> String {
 }
 
 /// `web.setHeaders`.
-fn file_headers(h: &mut HeaderMap, content_type: &str, force_download: bool, filename: &str) {
+pub(crate) fn file_headers(h: &mut HeaderMap, content_type: &str, force_download: bool, filename: &str) {
     if !h.contains_key(header::CACHE_CONTROL) {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
     }

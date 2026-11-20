@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State as St};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -34,8 +34,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/database/recycle", post(recycle_database))
         .route("/api/v4/latest_version", get(latest_version))
         .route("/api/v4/limits/server", get(server_limits))
-        .route("/api/v4/logs", get(get_logs).post(post_log))
-        .route("/api/v4/logs/query", post(query_logs))
         .route("/api/v4/plugins/marketplace/first_admin_visit", get(first_admin_visit).post(set_first_admin_visit))
         .route("/api/v4/server_busy", get(get_busy).post(set_busy).delete(clear_busy))
         .route("/api/v4/sharedchannels/users/{user_id}/can_dm/{other_user_id}", get(can_dm))
@@ -54,8 +52,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/email/test", post(test_email))
         .route("/api/v4/permissions/ancillary", post(ancillary_permissions))
         .route("/api/v4/restart", post(restart))
-        .route("/api/v4/license", post(add_license))
-        .route("/api/v4/license/preview", post(add_license))
         .route("/api/v4/reports/users", get(user_report))
         .route("/api/v4/reports/users/count", get(user_report_count))
         .route("/api/v4/jobs", get(jobs))
@@ -68,7 +64,7 @@ const NO_CACHE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-cache, 
 
 impl App {
     /// `SessionHasPermissionToAndNotRestrictedAdmin`.
-    async fn require_unrestricted(&self, s: &Session, permission: &str) -> ApiResult<()> {
+    pub(crate) async fn require_unrestricted(&self, s: &Session, permission: &str) -> ApiResult<()> {
         if self.has_perm(s, permission).await && !self.cfg.bool("ExperimentalSettings.RestrictSystemAdmin") {
             Ok(())
         } else {
@@ -352,66 +348,17 @@ async fn server_limits(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Valu
                    "singleChannelGuestLimit": 0, "postHistoryLimit": 0, "lastAccessiblePostTime": 0})))
 }
 
-// ---------- logs ----------
-
-/// `getLogs`: this server logs to its standard error, not to a file the API could page through.
-async fn get_logs(St(app): St<State>, Auth(s): Auth) -> ApiResult<Response> {
-    app.require_unrestricted(&s, "get_logs").await?;
-    Ok(json_raw(&json!([""])))
-}
-
-/// `queryLogs`: as `getLogs`, no log file, no lines.
-async fn query_logs(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
-    app.require_unrestricted(&s, "get_logs").await?;
-    match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(_)) => Ok(json_raw(&json!({}))),
-        _ => Err(AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.system.logs.invalidFilter", "")),
-    }
-}
-
-/// `postLog`: a client's message in the server log, at error level or (debug) otherwise.
-async fn post_log(St(app): St<State>, MaybeAuth(s): MaybeAuth, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Value>> {
-    let mut force_debug = false;
-    if !app.cfg.bool("ServiceSettings.EnableDeveloper") {
-        let Some(s) = &s else { return Err(AppError::forbidden()) };
-        if !app.has_perm(s, crate::perm::MANAGE_SYSTEM).await {
-            force_debug = true;
-        }
-    }
-    let mut m: Map<String, Value> = match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(m)) => m.into_iter().filter(|(_, v)| v.is_string()).collect(),
-        _ => Map::new(),
-    };
-    let level = m.get("level").and_then(Value::as_str).unwrap_or("").to_lowercase();
-    let mut msg = m.get("message").and_then(Value::as_str).unwrap_or("").to_string();
-    if msg.len() > 400 {
-        let mut cut = 399;
-        while !msg.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        msg.truncate(cut);
-    }
-    let msg = format!("Client Logs API Endpoint Message: {msg}");
-    let (sid, uid) = s.as_ref().map_or((String::new(), String::new()), |s| (s.id.clone(), s.user_id.clone()));
-    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !force_debug && level == "error" {
-        eprintln!("error {msg} type=client_message user_agent={ua:?} session_id={sid} user_id={uid}");
-    } else if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") {
-        eprintln!("debug {msg} type=client_message user_agent={ua:?} session_id={sid} user_id={uid}");
-    }
-    m.insert("message".into(), Value::String(msg));
-    Ok(Json(Value::Object(m)))
-}
-
 // ---------- first admin visit, onboarding ----------
 
 async fn first_admin_visit(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>> {
+    crate::audit::log(&app, Some(&s), "attempt").await;
     app.require(&s, crate::perm::MANAGE_SYSTEM).await?;
     let v = app.admin_system_value("FirstAdminVisitMarketplace").await?.unwrap_or_else(|| "false".into());
     Ok(Json(json!({"name": "FirstAdminVisitMarketplace", "value": v})))
 }
 
 async fn set_first_admin_visit(St(app): St<State>, MaybeAuth(s): MaybeAuth) -> ApiResult<Json<Value>> {
+    crate::audit::log(&app, s.as_deref(), "attempt").await;
     let Some(s) = s else { return Err(AppError::forbidden_perm(crate::perm::MANAGE_SYSTEM)) };
     app.require(&s, crate::perm::MANAGE_SYSTEM).await?;
     app.save_system("FirstAdminVisitMarketplace", "true")
@@ -545,25 +492,6 @@ async fn upgrade_status(St(app): St<State>, Auth(s): Auth) -> ApiResult<Response
     Ok(json_raw(&json!({"error": null, "percentage": 0})))
 }
 
-/// `addLicense` / `previewLicense`: a license file is read from the form, and no license validates here (there
-/// is no license key to check it against): Go's answer to an invalid license.
-async fn add_license(St(app): St<State>, Auth(s): Auth, headers: HeaderMap, body: Bytes) -> ApiResult<Response> {
-    app.require_unrestricted(&s, "manage_license_information").await?;
-    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let Some(boundary) = ct.strip_prefix("multipart/form-data").and_then(|r| r.split("boundary=").nth(1)) else {
-        return Err(AppError::bad_request("api.license.parse_license.parse_form.app_error", ""));
-    };
-    let boundary = boundary.trim_matches('"');
-    let text = String::from_utf8_lossy(&body);
-    if !text.contains(&format!("--{boundary}")) {
-        return Err(AppError::bad_request("api.license.parse_license.parse_form.app_error", ""));
-    }
-    if !text.contains("name=\"license\"") {
-        return Err(AppError::bad_request("api.license.add_license.no_file.app_error", ""));
-    }
-    Err(AppError::bad_request("api.license.add_license.invalid.app_error", ""))
-}
-
 /// `restart`: answered, then the server starts again in place (the same program, arguments and environment), as
 /// Go's `Server.Restart` does within its process.
 async fn restart(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>> {
@@ -616,6 +544,7 @@ async fn usage_teams(St(app): St<State>, _: Auth) -> ApiResult<Response> {
 
 /// `updateViewedProductNotices`: each notice seen once more, now.
 async fn view_notices(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Json<Value>> {
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let ids: Vec<String> =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("api.payload.parse.error", ""))?;
     let fail = |_| AppError::bad_request("api.system.update_viewed_notices.failed", "");
@@ -1024,7 +953,37 @@ const REPORT_SORT: &[(&str, &str)] = &[
     ("totalposts", "TotalPosts"),
 ];
 
-/// `getUsersForReporting`: a page of people (not bots) with their activity over all time.
+/// `GetReportDateRange` for `date_range` (`last_30_days`, `previous_month`, `last_6_months`, else all time) as the
+/// `PostStats.Day` bounds Go joins on: local dates, the start inclusive, the end exclusive.
+fn report_days(range: &str) -> String {
+    use chrono::{Datelike, Duration, Local, NaiveDate};
+    let now = Local::now().date_naive();
+    // Go's `AddDate` normalizes an overflowing day into the next month (Aug 31 - 6 months = Mar 3).
+    let add_months = |d: NaiveDate, months: i32| {
+        let total = d.year() * 12 + d.month0() as i32 + months;
+        let first = NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap();
+        first + Duration::days(d.day() as i64 - 1)
+    };
+    let (start, end) = match range {
+        "last_30_days" => (Some(now - Duration::days(30)), None),
+        "previous_month" => {
+            let first = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap();
+            (Some(add_months(first, -1)), Some(first))
+        }
+        "last_6_months" => (Some(add_months(now, -6)), None),
+        _ => (None, None),
+    };
+    let mut s = String::new();
+    if let Some(d) = start {
+        s.push_str(&format!(" AND ps.Day >= '{}'", d.format("%Y-%m-%d")));
+    }
+    if let Some(d) = end {
+        s.push_str(&format!(" AND ps.Day < '{}'", d.format("%Y-%m-%d")));
+    }
+    s
+}
+
+/// `getUsersForReporting`: a page of people (not bots) with their activity over all time or `date_range`.
 async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<Response> {
     app.require(&s, "sysconsole_read_user_management_users").await?;
     let col = match query(&q, "sort_column") {
@@ -1052,6 +1011,7 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
         dir = d;
         having = format!("HAVING ({col} {cmp} {typed} OR ({col} = {typed} AND u.Id {cmp} ${i}))");
     }
+    let days = report_days(query(&q, "date_range"));
     let sql = format!(
         "SELECT u.Id, MAX(s.LastActivityAt) AS LastStatusAt, MAX(ps.LastPostDate) AS LastPostDate, \
          COUNT(ps.Day) AS DaysActive, SUM(ps.NumPosts)::bigint AS TotalPosts, \
@@ -1059,7 +1019,7 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
           AND c.Type IN ('O','P') WHERE cm.UserId = u.Id) AS ChannelCount, \
          COALESCE((SELECT string_agg(t.DisplayName, ', ' ORDER BY t.DisplayName) FROM TeamMembers tm \
           INNER JOIN Teams t ON t.Id = tm.TeamId AND t.DeleteAt = 0 WHERE tm.UserId = u.Id AND tm.DeleteAt = 0), '') AS Teams \
-         FROM Users u LEFT JOIN Status s ON s.UserId = u.Id LEFT JOIN PostStats ps ON ps.UserId = u.Id \
+         FROM Users u LEFT JOIN Status s ON s.UserId = u.Id LEFT JOIN PostStats ps ON ps.UserId = u.Id{days} \
          WHERE {cond} GROUP BY u.Id {having} ORDER BY {col} {dir}, u.Id {dir} LIMIT {page_size}"
     );
     type Row = (String, Option<i64>, Option<i64>, i64, Option<i64>, i64, String);

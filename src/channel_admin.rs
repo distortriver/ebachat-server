@@ -318,6 +318,7 @@ pub async fn update_channel(
     if !new.display_name.is_empty() && old_display != new.display_name {
         app.post_display_name_change(&s.user_id, &old, &old_display).await;
     }
+    crate::audit::log(&app, Some(&s), &format!("name={}", new.name)).await;
     Ok(Json(old))
 }
 
@@ -729,6 +730,8 @@ async fn move_channel(
         .replace("%v", &previous.name);
     app.post_system(system_post(&moved.id, &user.id, "system_move_channel", message, json!({"username": user.username})))
         .await;
+    crate::audit::log(&app, Some(&s), &format!("channel={}", channel.name)).await;
+    crate::audit::log(&app, Some(&s), &format!("team={}", team.name)).await;
     // The handler answers with the channel as it was read, before the move.
     Ok(Json(channel))
 }

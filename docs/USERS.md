@@ -33,17 +33,12 @@ These answer with Go's license or "not available" error:
 
 ## Not ported
 
-- **Permanent user deletion** (`DELETE /users/{id}?permanent=true` with `EnableAPIUserDeletion`) answers 501. It
-  is off by default, and Go then answers 401, as Rust does.
-- **Custom profile attribute values** (`PATCH /users/{id}/custom_profile_attributes`): Go's checks are ported up to
-  the field lookup. The database has no user attribute fields, so every valid request ends in Go's
-  `app.property_field.not_found.app_error`.
+- **Permanent user deletion** and **custom profile attributes:** ported, see `docs/ADMIN.md`.
 - **Account-type switches** end in the provider's "not available" error after Go's user and password checks. No
   SSO provider or LDAP can be set up without a license.
 - **`trigger-notify-admin-posts`** is Cloud's job. It answers Go's 403 unless `EnableAPITriggerAdminNotifications`
   is on.
-- **Audits:** Go writes `Audits` rows (`LogAudit`). The Rust server writes none, so `GET /users/{id}/audits` shows
-  only what Go wrote.
+- **Audits:** written as Go writes them, see `docs/ADMIN.md`.
 
 ## Go bugs fixed, not reproduced
 

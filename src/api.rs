@@ -62,7 +62,9 @@ pub fn router(app: State) -> Router {
     crate::outgoing::spawn_worker(app.clone());
     crate::push::spawn(app.clone());
     crate::email::spawn_batching(app.clone());
-    let r = routes(app).layer(axum::middleware::from_fn(go_headers));
+    let r = routes(app.clone())
+        .layer(axum::middleware::from_fn_with_state(app, crate::audit::layer))
+        .layer(axum::middleware::from_fn(go_headers));
     if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
 }
 
@@ -95,6 +97,9 @@ fn routes(app: State) -> Router {
         .merge(crate::admin::routes())
         .merge(crate::jobs::routes())
         .merge(crate::bulk_export::routes())
+        .merge(crate::logs::routes())
+        .merge(crate::license::routes())
+        .merge(crate::cpa::routes())
         .merge(crate::unlicensed::routes())
         .merge(crate::properties::routes())
         .merge(crate::commands::routes())

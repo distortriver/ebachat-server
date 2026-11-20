@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State, decode_json, is_valid_id, map_from_json, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State, decode_json, map_from_json, now_ms};
 use crate::channels_api::paging;
 use crate::hub::Broadcast;
 use crate::model::{Session, User};
@@ -57,7 +57,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/users/{user_id}/data_retention/channel_policies", get(data_retention))
         .route("/api/v4/users/{user_id}/data_retention/team_policies", get(data_retention))
         .route("/api/v4/users/{user_id}/groups", get(groups))
-        .route("/api/v4/users/{user_id}/custom_profile_attributes", axum::routing::patch(patch_cpa))
         .route("/api/v4/users/group_channels", post(group_channels))
         .route("/api/v4/users/invalid_emails", get(invalid_emails))
         .route("/api/v4/users/auth_data", get(by_auth_data))
@@ -149,6 +148,7 @@ async fn revoke_session(
     }
     app.revoke_session(&found).await?;
     app.clear_sessions_for_user(&found.user_id);
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -159,6 +159,7 @@ async fn revoke_all_for_user(St(app): St<State>, Auth(s): Auth, Path(user_id): P
         return Err(AppError::forbidden_perm(EDIT_OTHER_USERS));
     }
     app.revoke_all_sessions(&user_id).await?;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -178,6 +179,7 @@ async fn revoke_all_users(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<V
     for (t,) in tokens {
         app.hub.close_session(&t);
     }
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -276,7 +278,9 @@ async fn update_user(
     if !user.email.is_empty() && old.email != user.email && s.user_id == user_id {
         app.double_check_password(&old, &user.password).await.map_err(|_| AppError::invalid_param("password"))?;
     }
-    Ok(Json(app.update_user(user, true, false).await?))
+    let r = app.update_user(user, true, false).await?;
+    crate::audit::log(&app, Some(&s), "").await;
+    Ok(Json(r))
 }
 
 #[derive(Deserialize, Default)]
@@ -309,8 +313,8 @@ async fn delete_user(
     }
     if permanent {
         if app.cfg.bool("ServiceSettings.EnableAPIUserDeletion") {
-            // PermanentDeleteUser removes the user's rows from every table; not ported.
-            return Err(AppError::not_implemented("Permanent user deletion"));
+            app.permanent_delete_user(user).await?;
+            return Ok(ok());
         }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {
@@ -524,6 +528,7 @@ async fn update_roles(
         e
     })?;
     app.update_user_roles(user, &roles, true).await?;
+    crate::audit::log(&app, Some(&s), &format!("user={user_id} roles={roles}")).await;
     Ok(ok())
 }
 
@@ -567,7 +572,9 @@ async fn update_active(
         ));
     }
     let (email, locale) = (user.email.clone(), user.locale.clone());
+    let uid = user.id.clone();
     app.update_active(user, active).await?;
+    crate::audit::log(&app, Some(&s), &format!("user_id={uid} active={active}")).await;
     if self_deactivate {
         crate::email::go(&app, "deactivate email", move |app| async move { crate::email::send_deactivate(&app, &email, &locale).await });
     }
@@ -644,6 +651,7 @@ async fn update_auth(
         ua.auth_service.clear();
     }
     app.update_user_auth(&user_id, &ua.auth_service, ua.auth_data.as_deref()).await?;
+    crate::audit::log(&app, Some(&s), &format!("updated user {user_id} auth to service={}", ua.auth_service)).await;
     Ok(Json(ua))
 }
 
@@ -665,12 +673,13 @@ async fn update_mfa(
     let Some(activate) = props.get("activate").and_then(Value::as_bool) else {
         return Err(AppError::invalid_param("activate"));
     };
+    let code = props.get("code").and_then(Value::as_str).unwrap_or("");
+    if activate && code.is_empty() {
+        return Err(AppError::invalid_param("code"));
+    }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let user = get_user(&app, &user_id).await?;
     if activate {
-        let code = props.get("code").and_then(Value::as_str).unwrap_or("");
-        if code.is_empty() {
-            return Err(AppError::invalid_param("code"));
-        }
         // ActivateMfa
         if !user.auth_service.is_empty() && user.auth_service != "ldap" {
             return Err(AppError::bad_request("api.user.activate_mfa.email_and_ldap_only.app_error", ""));
@@ -703,6 +712,7 @@ async fn update_mfa(
         let (email, locale) = (u.email.clone(), u.locale.clone());
         crate::email::go(&app, "mfa change email", move |app| async move { crate::email::send_mfa_change(&app, &email, activate, &locale).await });
     }
+    crate::audit::log(&app, Some(&s), "success - mfa updated").await;
     Ok(ok())
 }
 
@@ -821,7 +831,23 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
         return Err(AppError::invalid_param("token"));
     }
     let new_password = props.remove("new_password").unwrap_or_default();
-    let t = token_row(&app, &token)
+    let prefix = &token[..5];
+    crate::audit::log(&app, None, &format!("attempt - token_prefix={prefix}")).await;
+    match reset_password_from_token(&app, &token, &new_password).await {
+        Ok(()) => {
+            crate::audit::log(&app, None, &format!("success - token_prefix={prefix}")).await;
+            Ok(ok())
+        }
+        Err(e) => {
+            crate::audit::log(&app, None, &format!("fail - token_prefix={prefix}")).await;
+            Err(e)
+        }
+    }
+}
+
+/// `ResetPasswordFromToken`.
+async fn reset_password_from_token(app: &App, token: &str, new_password: &str) -> ApiResult<()> {
+    let t = token_row(app, token)
         .await?
         .ok_or_else(|| AppError::bad_request("api.user.reset_password.invalid_link.app_error", ""))?;
     if t.r#type != "password_recovery" {
@@ -832,7 +858,7 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
     }
     let extra: TokenExtra = serde_json::from_str(&t.extra)
         .map_err(|_| AppError::internal("api.user.reset_password.token_parse.error", ""))?;
-    let user = get_user(&app, &extra.user_id).await?;
+    let user = get_user(app, &extra.user_id).await?;
     if user.email != extra.email {
         return Err(AppError::bad_request("api.user.reset_password.link_expired.app_error", ""));
     }
@@ -845,10 +871,10 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
     if user.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
         return Err(AppError::bad_request("api.user.reset_password.broken_token.app_error", ""));
     }
-    app.set_password(&user, &new_password, None).await?;
-    crate::user_edit::password_change_email(&app, &user, "api.user.reset_password.method");
-    delete_token(&app, &t.token).await;
-    Ok(ok())
+    app.set_password(&user, new_password, None).await?;
+    crate::user_edit::password_change_email(app, &user, "api.user.reset_password.method");
+    delete_token(app, &t.token).await;
+    Ok(())
 }
 
 /// `verifyUserEmail` (`VerifyEmailFromToken`): any failure is a bad link.
@@ -872,6 +898,7 @@ async fn verify_email(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value>>
         crate::email::go(&app, "email change email", move |app| async move { crate::email::send_email_change(&app, &old, &new_email, &locale).await });
     }
     delete_token(&app, &t.token).await;
+    crate::audit::log(&app, None, "Email Verified").await;
     Ok(ok())
 }
 
@@ -898,6 +925,7 @@ async fn verify_member(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<St
     let user = get_user(&app, &user_id).await?;
     app.require(&s, MANAGE_SYSTEM).await?;
     app.verify_user_email(&user.id, &user.email).await?;
+    crate::audit::log(&app, Some(&s), "user verified").await;
     let mut u = user;
     u.sanitize_profile(app.show(&s).await);
     Ok(Json(u))
@@ -1093,6 +1121,7 @@ async fn save_user_terms(
             .await
             .map_err(|e| AppError::internal("app.user_terms_of_service.delete.app_error", e.to_string()))?;
     }
+    crate::audit::log(&app, Some(&s), &format!("TermsOfServiceId={terms_id}, accepted={accepted}")).await;
     Ok(ok())
 }
 
@@ -1160,66 +1189,6 @@ async fn data_retention(Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult
 async fn groups(Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Value>> {
     user_param(&s, &user_id)?;
     Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.license_error", "api endpoint requires a license"))
-}
-
-/// `patchCPAValuesForUser`: the checks of `cpaPatchValues` up to the fields; this server has no custom profile
-/// attribute fields to set values of.
-async fn patch_cpa(
-    St(app): St<State>,
-    Auth(s): Auth,
-    Path(user_id): Path<String>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
-    let user_id = user_param(&s, &user_id)?;
-    let updates: BTreeMap<String, Value> = decode_json(&body, "value")?;
-    let group: Option<(String,)> =
-        sqlx::query_as("SELECT Id FROM PropertyGroups WHERE Name = 'access_control'").fetch_optional(&app.db).await?;
-    let Some((group,)) = group else {
-        return Err(AppError::not_found("app.property_group.get.app_error", ""));
-    };
-    if user_id != s.user_id {
-        let bot_manager = user_or_bot_perm(&app, &s, &user_id).await?
-            && app.users(std::slice::from_ref(&user_id)).await?.iter().any(|u| u.is_bot);
-        if !app.has_perm(&s, EDIT_OTHER_USERS).await && !bot_manager {
-            return Err(AppError::forbidden_perm(EDIT_OTHER_USERS));
-        }
-        if !app.has_perm(&s, MANAGE_SYSTEM).await {
-            let target = get_user(&app, &user_id).await?;
-            if target.is_system_admin() {
-                return Err(AppError::forbidden_perm(MANAGE_SYSTEM));
-            }
-        }
-    }
-    if updates.is_empty() {
-        return Err(AppError::bad_request("api.property_value.patch.empty_body.app_error", ""));
-    }
-    if updates.len() > 100 {
-        return Err(
-            AppError::bad_request("api.property_value.patch.too_many_items.request_error", "").with_param("Max", "100")
-        );
-    }
-    let ids: Vec<String> = updates.keys().cloned().collect();
-    if ids.iter().any(|id| !is_valid_id(id)) {
-        return Err(AppError::bad_request("api.property_value.patch.invalid_field_id.app_error", ""));
-    }
-    let fields: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ID, COALESCE(ObjectType, '') FROM PropertyFields WHERE GroupID = $1 AND ID = ANY($2) AND DeleteAt = 0",
-    )
-    .bind(&group)
-    .bind(&ids)
-    .fetch_all(&app.db)
-    .await?;
-    for id in &ids {
-        match fields.iter().find(|f| f.0 == *id) {
-            // PropertyService.GetPropertyFields: every id must be a field of the group.
-            None => return Err(AppError::not_found("app.property_field.not_found.app_error", "")),
-            Some((_, t)) if t != "user" => {
-                return Err(AppError::not_found("api.property_field.object_type_mismatch.app_error", ""));
-            }
-            Some(_) => {}
-        }
-    }
-    Err(AppError::not_implemented("Setting custom profile attribute values"))
 }
 
 /// `getUsersByGroupChannelIds`: the other members of the caller's group channels (at most 50 channels).
@@ -1431,6 +1400,7 @@ async fn switch_account(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes
             return Err(AppError::bad_request("api.user.oauth_to_email.not_oauth_user.app_error", ""));
         }
         app.set_password(&user, &r.password, None).await?;
+        crate::audit::log(&app, Some(&s), "success").await;
         return Ok(Json(json!({"follow_link": "/login?extra=signin_change"})));
     }
     if ldap_to_email {

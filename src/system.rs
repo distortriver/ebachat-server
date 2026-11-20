@@ -23,12 +23,10 @@ pub fn routes() -> Router<State> {
     Router::new()
         .route("/api/v4/system/ping", get(ping))
         .route("/api/v4/config/client", get(client_config))
-        .route("/api/v4/license/client", get(client_license))
         .route("/api/v4/license/load_metric", get(load_metric))
         .route("/api/v4/roles/names", post(roles_by_names))
         .route("/api/v4/brand/image", get(|| async { StatusCode::NOT_FOUND }))
         .route("/api/v4/system/onboarding/complete", get(onboarding))
-        .route("/api/v4/users/{user_id}/custom_profile_attributes", get(|_: Auth| async { Json(json!({})) }))
         .route("/api/v4/notifications/ack", post(push_ack))
 }
 
@@ -181,17 +179,13 @@ async fn client_config(St(app): St<State>, MaybeAuth(s): MaybeAuth) -> ApiResult
     Ok(Json(app.client_config(s.is_none()).await?).into_response())
 }
 
-/// `getClientLicense`: there is no license, sanitized or not.
-async fn client_license(MaybeAuth(_): MaybeAuth) -> Json<Value> {
-    Json(json!({"IsLicensed": "false"}))
-}
-
 async fn load_metric(_: Auth) -> Json<Value> {
     Json(json!({"load": 0}))
 }
 
 
 async fn onboarding(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>> {
+    crate::audit::log(&app, Some(&s), "attempt").await;
     app.require(&s, perm::MANAGE_SYSTEM).await?;
     let v: Option<(String,)> = sqlx::query_as("SELECT Value FROM Systems WHERE Name = 'FirstAdminSetupComplete'")
         .fetch_optional(&app.db)

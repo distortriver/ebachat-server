@@ -230,6 +230,7 @@ async fn create(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Res
     .execute(&app.db)
     .await
     .map_err(|e| AppError::internal("app.oauth.save_app.save.app_error", e.to_string()))?;
+    crate::audit::log(&app, Some(&s), &format!("client_id={}", a.id)).await;
     Ok((StatusCode::CREATED, Json(a)).into_response())
 }
 
@@ -249,6 +250,7 @@ async fn managed(app: &App, s: &crate::model::Session, id: &str) -> ApiResult<OA
 /// `updateOAuthApp`.
 async fn update(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<OAuthApp>> {
     require_app_id(&id)?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     app.require(&s, MANAGE_OAUTH).await?;
     let mut a: OAuthApp = decode_json(&body, "oauth_app")?;
     if a.id != id {
@@ -263,7 +265,9 @@ async fn update(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body:
     a.create_at = old.create_at;
     a.client_secret = old.client_secret.clone();
     a.is_dynamically_registered = old.is_dynamically_registered;
-    Ok(Json(app.store_oauth_app(a).await?))
+    let a = app.store_oauth_app(a).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
+    Ok(Json(a))
 }
 
 /// `getOAuthApps`: all of them with `manage_system_wide_oauth`, else one's own.
@@ -308,6 +312,7 @@ async fn info(St(app): St<State>, _: Auth, Path(id): Path<String>) -> ApiResult<
 /// invalidates every cache; here the sessions it ended leave the session cache.
 async fn delete(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     require_app_id(&id)?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     app.require(&s, MANAGE_OAUTH).await?;
     let a = managed(&app, &s, &id).await?;
     app.oauth_on("api.oauth.allow_oauth.turn_off.app_error")?;
@@ -335,6 +340,7 @@ async fn delete(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> Ap
         app.caches.session.remove(&t);
         app.hub.close_session(&t);
     }
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(ok())
 }
 
@@ -348,7 +354,9 @@ async fn regen_secret(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>)
     }
     app.oauth_on("api.oauth.allow_oauth.turn_off.app_error")?;
     a.client_secret = new_id();
-    Ok(Json(app.store_oauth_app(a).await?))
+    let a = app.store_oauth_app(a).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
+    Ok(Json(a))
 }
 
 /// `getAuthorizedOAuthApps`: the apps of the user's `oauth_app` preferences, without secrets.

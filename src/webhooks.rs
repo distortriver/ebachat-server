@@ -684,15 +684,23 @@ fn split_webhook_post(post: &Post, max: usize, attachments: Option<&[MessageAtta
 /// `createIncomingHook`.
 async fn create_hook(St(app): St<State>, Auth(s): Auth, Body(mut hook): Body<IncomingWebhook>) -> ApiResult<Response> {
     let channel = app.channel_or_404(&hook.channel_id).await?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     app.require_team(&s, &channel.team_id, MANAGE_OWN).await?;
     if !app.can_read_channel(&s, &channel).await?.0 {
+        crate::audit::log(&app, Some(&s), "fail - bad channel permissions").await;
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
     let mut owner = s.user_id.clone();
     if !hook.user_id.is_empty() && hook.user_id != s.user_id {
-        app.require_team(&s, &channel.team_id, MANAGE_OTHERS).await?;
+        if !app.has_team_perm(&s, &channel.team_id, MANAGE_OTHERS).await {
+            crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
+            return Err(AppError::forbidden_perm(MANAGE_OTHERS));
+        }
         let u = app.user(&hook.user_id).await?.ok_or_else(crate::users::missing_account)?;
-        validate_hook_user(&app, &s, &u.id, u.is_system_admin(), &channel).await?;
+        if let Err(e) = validate_hook_user(&app, &s, &u.id, u.is_system_admin(), &channel).await {
+            crate::audit::log(&app, Some(&s), "fail - invalid webhook user").await;
+            return Err(e);
+        }
         owner = hook.user_id.clone();
     }
     if !app.has_team_perm(&s, &channel.team_id, BYPASS_LOCK).await {
@@ -723,6 +731,7 @@ async fn create_hook(St(app): St<State>, Auth(s): Auth, Body(mut hook): Body<Inc
     hook.update_at = hook.create_at;
     hook.validate()?;
     db::insert(&app.db, &hook).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok((StatusCode::CREATED, Json(hook)).into_response())
 }
 
@@ -754,6 +763,7 @@ async fn update_hook(
     if updated.id != hook_id {
         return Err(AppError::invalid_param("hook_id"));
     }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let old = app.get_incoming_webhook(&hook_id).await?;
     if updated.team_id.is_empty() {
         updated.team_id = old.team_id.clone();
@@ -766,14 +776,19 @@ async fn update_hook(
         return Err(AppError::invalid_param("channel_id"));
     }
     app.require_team(&s, &channel.team_id, MANAGE_OWN).await?;
-    if s.user_id != old.user_id {
-        app.require_team(&s, &channel.team_id, MANAGE_OTHERS).await?;
+    if s.user_id != old.user_id && !app.has_team_perm(&s, &channel.team_id, MANAGE_OTHERS).await {
+        crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
+        return Err(AppError::forbidden_perm(MANAGE_OTHERS));
     }
     if channel.r#type != channel::OPEN && !app.can_read_channel(&s, &channel).await?.0 {
+        crate::audit::log(&app, Some(&s), "fail - bad channel permissions").await;
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
-    if updated.channel_id != old.channel_id {
-        validate_hook_channel_access(&app, &old.user_id, &channel).await?;
+    if updated.channel_id != old.channel_id
+        && let Err(e) = validate_hook_channel_access(&app, &old.user_id, &channel).await
+    {
+        crate::audit::log(&app, Some(&s), "fail - invalid webhook user").await;
+        return Err(e);
     }
     if !app.has_team_perm(&s, &channel.team_id, BYPASS_LOCK).await {
         updated.channel_locked = true;
@@ -818,6 +833,7 @@ async fn update_hook(
     .await
     .map_err(|e| AppError::internal("app.webhooks.update_incoming.app_error", e.to_string()))?;
     app.caches.webhook.remove(&old.id);
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok((StatusCode::CREATED, Json(updated)).into_response())
 }
 
@@ -888,21 +904,28 @@ async fn list_hooks(St(app): St<State>, Auth(s): Auth, Query(q): Query<ListQuery
 
 /// `getIncomingHook`.
 async fn get_hook(St(app): St<State>, Auth(s): Auth, Path(hook_id): Path<String>) -> ApiResult<Json<IncomingWebhook>> {
-    let hook = checked_hook(&app, &s, &hook_id).await?;
+    let hook = checked_hook(&app, &s, &hook_id, true).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json((*hook).clone()))
 }
 
-async fn checked_hook(app: &App, s: &Session, hook_id: &str) -> ApiResult<Arc<IncomingWebhook>> {
+/// The hook the session may manage, with Go's audit rows (`attempt` only for a read).
+async fn checked_hook(app: &App, s: &Session, hook_id: &str, attempt: bool) -> ApiResult<Arc<IncomingWebhook>> {
     if !is_valid_id(hook_id) {
         return Err(AppError::invalid_url_param("hook_id"));
     }
     let hook = app.get_incoming_webhook(hook_id).await?;
+    if attempt {
+        crate::audit::log(app, Some(s), "attempt").await;
+    }
     let channel = app.channel_or_404(&hook.channel_id).await?;
     let restricted = channel.r#type != channel::OPEN && !app.can_read_channel(s, &channel).await?.0;
     if !app.has_team_perm(s, &hook.team_id, MANAGE_OWN).await || restricted {
+        crate::audit::log(app, Some(s), "fail - bad permissions").await;
         return Err(AppError::forbidden_perm(MANAGE_OWN));
     }
     if s.user_id != hook.user_id && !app.has_team_perm(s, &hook.team_id, MANAGE_OTHERS).await {
+        crate::audit::log(app, Some(s), "fail - inappropriate permissions").await;
         return Err(AppError::forbidden_perm(MANAGE_OTHERS));
     }
     Ok(hook)
@@ -910,7 +933,7 @@ async fn checked_hook(app: &App, s: &Session, hook_id: &str) -> ApiResult<Arc<In
 
 /// `deleteIncomingHook`.
 async fn delete_hook(St(app): St<State>, Auth(s): Auth, Path(hook_id): Path<String>) -> ApiResult<Json<Value>> {
-    let hook = checked_hook(&app, &s, &hook_id).await?;
+    let hook = checked_hook(&app, &s, &hook_id, false).await?;
     if !app.hooks_on() {
         return Err(disabled());
     }

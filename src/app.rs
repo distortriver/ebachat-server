@@ -382,9 +382,19 @@ pub static DEVELOPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 impl IntoResponse for AppError {
     fn into_response(mut self) -> Response {
-        if self.status_code >= 500 {
-            eprintln!("error {} {}: {}", self.status_code, self.id, self.detailed_error);
-        }
+        // `LogErrorByCode`: 4xx at debug, 501 at info, the rest at error.
+        let mut fields = crate::logs::request_fields(&self.request_id);
+        fields.extend([
+            ("err_where", serde_json::Value::from("")),
+            ("http_code", self.status_code.into()),
+            ("error", format!("{}: {}, {}", self.id, self.message, self.detailed_error).into()),
+        ]);
+        let level = match self.status_code {
+            400..=499 => crate::logs::Level::Debug,
+            501 => crate::logs::Level::Info,
+            _ => crate::logs::Level::Error,
+        };
+        crate::logs::log(level, &self.message, &fields);
         // Go blocks out the detail when not in developer mode.
         if !DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) {
             self.detailed_error.clear();
@@ -477,6 +487,7 @@ async fn session_required(parts: &Parts, app: &State, trust_requester: bool) -> 
         {
             return Err(invalid_token());
         }
+        crate::audit::set_user(&s.user_id);
         Ok(s)
     }
 }

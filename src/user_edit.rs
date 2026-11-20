@@ -512,6 +512,7 @@ async fn patch_user(
     let mut u = (*old).clone();
     patch.apply(&mut u);
     let mut r = app.update_user(u, true, false).await?;
+    crate::audit::log(&app, Some(&s), "").await;
     // The API answers with the profile as the caller may see it.
     if r.id != s.user_id {
         r.sanitize_profile(app.show(&s).await);
@@ -550,10 +551,29 @@ async fn update_password(
     Body(b): Body<PasswordBody>,
 ) -> ApiResult<Json<Value>> {
     let user_id = user_param(&s, &user_id)?;
+    crate::audit::log(&app, Some(&s), "attempted").await;
+    match password_update(&app, &s, &user_id, &b).await {
+        Ok(()) => {
+            crate::audit::log(&app, Some(&s), "completed").await;
+            Ok(ok())
+        }
+        // A missing current password is answered before the update, without a "failed" row.
+        Err(e) if e.id == "api.context.invalid_body_param.app_error" => Err(e),
+        Err(e) => {
+            crate::audit::log(&app, Some(&s), "failed").await;
+            Err(e)
+        }
+    }
+}
+
+/// The update of `updatePassword`, by the flow its body asks for.
+async fn password_update(app: &App, s: &Session, user_id: &str, b: &PasswordBody) -> ApiResult<()> {
+    let s = s.clone();
+    let user_id = user_id.to_string();
     let user = app.user(&user_id).await?;
     let can = match &user {
         Some(u) if u.is_system_admin() => app.has_perm(&s, perm::MANAGE_SYSTEM).await,
-        Some(u) if u.is_bot => user_or_bot_perm(&app, &s, &user_id).await?,
+        Some(u) if u.is_bot => user_or_bot_perm(app, &s, &user_id).await?,
         Some(_) => app.has_perm(&s, "sysconsole_write_user_management_users").await,
         None => false,
     };
@@ -569,7 +589,7 @@ async fn update_password(
         let u = user.ok_or_else(missing_account)?;
         app.store_password(&u.id, &b.new_password).await?;
         password_change_email(&app, &u, "api.user.reset_password.method");
-        return Ok(ok());
+        return Ok(());
     }
     if user_id == s.user_id {
         if b.current_password.is_empty() {
@@ -596,7 +616,7 @@ async fn update_password(
     } else {
         return Err(context_err());
     }
-    Ok(ok())
+    Ok(())
 }
 
 /// `SendPasswordChangeEmail` after the change, the method in the user's words.
@@ -1229,6 +1249,8 @@ async fn device_props(St(app): St<State>, Auth(s): Auth, Body(props): Body<BTree
             .bind(&s.id)
             .execute(&app.db)
             .await?;
+        // attachDeviceIds
+        crate::audit::log(&app, Some(&s), "").await;
     }
     let mut changed = false;
     for (k, v) in new_props {

@@ -514,6 +514,7 @@ async fn patch_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<Strin
     app.update_team_row(&mut team).await?;
     app.send_team_event(&team, "update_team");
     app.sanitize_team(&s, &mut team).await;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(Json(team))
 }
 
@@ -563,6 +564,7 @@ async fn regenerate_invite_id(St(app): St<State>, Auth(s): Auth, Path(team_id): 
     app.update_team_row(&mut team).await?;
     app.send_team_event(&team, "update_team");
     app.sanitize_team(&s, &mut team).await;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(Json(team))
 }
 
@@ -577,6 +579,11 @@ async fn delete_team(
     require_team_id(&team_id)?;
     app.require_team(&s, &team_id, perm::MANAGE_TEAM).await?;
     if parse_bool(q.get("permanent")) {
+        if app.cfg.bool("ServiceSettings.EnableAPITeamDeletion") {
+            let team = (*app.team(&team_id).await?).clone();
+            app.permanent_delete_team(team).await?;
+            return Ok(status_ok());
+        }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {
             "api.user.delete_team.not_enabled.for_admin.app_error"
@@ -672,6 +679,7 @@ async fn set_icon(
     let mut team = (*team).clone();
     team.last_team_icon_update = now;
     app.send_team_event(&team, "update_team");
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(status_ok())
 }
 
@@ -692,6 +700,7 @@ async fn remove_icon(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<Stri
     let mut team = (*team).clone();
     team.last_team_icon_update = 0;
     app.send_team_event(&team, "update_team");
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(status_ok())
 }
 

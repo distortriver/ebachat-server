@@ -20,14 +20,17 @@ async fn main() -> anyhow::Result<()> {
         let l = cfg.str("ServiceSettings.ListenAddress");
         if l.starts_with(':') { format!("0.0.0.0{l}") } else { l.to_string() }
     });
+    ebachat_server::logs::configure(cfg.value());
     let app = App::new(db, cfg)?;
     app.hub.set_app(&app);
+    ebachat_server::license::load(&app).await;
     ebachat_server::status::spawn_jobs(app.clone());
     ebachat_server::reminders::spawn(app.clone());
     ebachat_server::job_workers::startup(&app).await;
     ebachat_server::jobs::spawn(app.clone());
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("listening on {listen}");
-    axum::serve(listener, api::router(app)).await?;
+    ebachat_server::logs::info(&format!("Server is listening on {}", listener.local_addr()?), &[]);
+    axum::serve(listener, api::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }

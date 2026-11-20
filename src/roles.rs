@@ -320,12 +320,14 @@ async fn patch_role(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, b
     // PatchRole
     if let Some(perms) = patch.permissions {
         if perms == role.permissions.0 {
+            crate::audit::log(&app, Some(&s), "").await;
             return Ok(Json(role));
         }
         role.permissions = Spaced(perms);
     }
     app.update_role(&mut role).await?;
     app.send_role_event(&role).await?;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(Json(role))
 }
 

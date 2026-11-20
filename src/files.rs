@@ -77,6 +77,21 @@ impl FileStore {
         Ok(())
     }
 
+    /// `RemoveDirectory`: every file under the directory.
+    pub async fn remove_dir(&self, p: &str) -> anyhow::Result<()> {
+        use futures_util::StreamExt;
+        let prefix = self.path(p);
+        let mut list = self.store.list(Some(&prefix));
+        let mut paths = vec![];
+        while let Some(m) = list.next().await {
+            paths.push(m?.location);
+        }
+        for l in paths {
+            self.store.delete(&l).await?;
+        }
+        Ok(())
+    }
+
     /// A file read as a stream, a range of its bytes or whole.
     pub async fn stream(&self, p: &str, range: Option<std::ops::Range<u64>>) -> anyhow::Result<Reading> {
         let opts = object_store::GetOptions { range: range.map(object_store::GetRange::Bounded), ..Default::default() };

@@ -231,6 +231,7 @@ Code by area:
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
 | Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs` |
+| Admin | `admin.rs`, `audit.rs` (Audits rows), `logs.rs` (server log, `/logs`), `license.rs`, `permanent.rs`, `cpa.rs`, `config_order.rs`; see `docs/ADMIN.md` |
 
 ## Running
 

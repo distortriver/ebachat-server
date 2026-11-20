@@ -133,6 +133,7 @@ async fn create_channel(St(app): St<State>, Auth(s): Auth, Body(c): Body<Option<
     }
     c.props = None;
     let c = app.create_channel_with_user(c, &s.user_id).await?;
+    crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
     Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
@@ -434,7 +435,11 @@ async fn delete_channel(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
         app.require_channel(&s, &id, perm::DELETE_PRIVATE_CHANNEL).await?;
     }
     if parse_bool(q.get("permanent")) {
-        // EnableAPIChannelDeletion is off on the servers this replaces.
+        if app.cfg.bool("ServiceSettings.EnableAPIChannelDeletion") {
+            app.permanent_delete_channel(&c).await?;
+            crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
+            return Ok(status_ok());
+        }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {
             "api.user.delete_channel.not_enabled.for_admin.app_error"
@@ -448,6 +453,7 @@ async fn delete_channel(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
         ));
     }
     app.delete_channel(&c, &s.user_id).await?;
+    crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
     Ok(status_ok())
 }
 
@@ -545,6 +551,7 @@ async fn patch_channel(
         ));
     }
     let c = app.patch_channel(old, &patch, &s.user_id).await?;
+    crate::audit::log(&app, Some(&s), "").await;
     let mut list = [c];
     app.fill_channel_props(&mut list).await?;
     let [c] = list;
@@ -577,7 +584,9 @@ async fn update_privacy(
     }
     let user = app.user(&s.user_id).await?.ok_or_else(crate::users::missing_account)?;
     c.r#type = privacy;
-    Ok(Json(app.update_channel_privacy(c, &user).await?))
+    let c = app.update_channel_privacy(c, &user).await?;
+    crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
+    Ok(Json(c))
 }
 
 /// `restoreChannel`.
@@ -589,7 +598,9 @@ async fn restore_channel(St(app): St<State>, Auth(s): Auth, Path(id): Path<Strin
     {
         return Err(AppError::forbidden_perm(perm::MANAGE_TEAM));
     }
-    Ok(Json(app.restore_channel(c, &s.user_id).await?))
+    let c = app.restore_channel(c, &s.user_id).await?;
+    crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
+    Ok(Json(c))
 }
 
 /// `model.ChannelStats`.
@@ -740,7 +751,10 @@ async fn add_member(
             continue;
         }
         match app.add_channel_member(&c, u, &s.user_id, &root_id).await {
-            Ok(m) => added.push(m),
+            Ok(m) => {
+                crate::audit::log(&app, Some(&s), &format!("name={} user_id={}", c.name, m.user_id)).await;
+                added.push(m)
+            }
             Err(e) => last_error = Some(e),
         }
     }
@@ -816,6 +830,7 @@ async fn remove_member(
         }
     }
     app.remove_user_from_channel(&user_id, &s.user_id, &c).await?;
+    crate::audit::log(&app, Some(&s), &format!("name={} user_id={user_id}", c.name)).await;
     Ok(status_ok())
 }
 
