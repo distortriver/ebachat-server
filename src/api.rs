@@ -12,11 +12,12 @@ use crate::app::{AppError, State};
 async fn not_found(
     axum::extract::State(app): axum::extract::State<State>,
     method: axum::http::Method,
+    headers: axum::http::HeaderMap,
     uri: Uri,
 ) -> axum::response::Response {
     let api = uri.path().starts_with("/api/");
     if !api && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
-        return crate::web::root(&app).await;
+        return crate::web::root_for(&app, &headers, &uri).await;
     }
     route_not_found(uri.path()).into_response()
 }
@@ -88,6 +89,7 @@ fn routes(app: State) -> Router {
         .merge(crate::bots::routes())
         .merge(crate::oauth::routes())
         .merge(crate::oauth_provider::routes())
+        .merge(crate::sso::routes())
         .merge(crate::terms::routes())
         .merge(crate::system::routes())
         .merge(crate::config_api::routes())

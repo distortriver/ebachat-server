@@ -464,7 +464,7 @@ async fn do_login(app: &State, headers: &HeaderMap, b: LoginBody) -> ApiResult<R
 }
 
 /// `AttachSessionCookies`.
-fn attach_cookies(app: &App, h: &mut HeaderMap, s: &Session, req: &HeaderMap) {
+pub fn attach_cookies(app: &App, h: &mut HeaderMap, s: &Session, req: &HeaderMap) {
     let max_age = app.cfg.i64("ServiceSettings.SessionLengthWebInHours") * 3600;
     let secure = req.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https")
         || app.cfg.str("ServiceSettings.SiteURL").starts_with("https://");
@@ -481,7 +481,7 @@ fn attach_cookies(app: &App, h: &mut HeaderMap, s: &Session, req: &HeaderMap) {
 }
 
 /// RFC 1123 date for cookies.
-fn httpdate(secs: i64) -> String {
+pub fn httpdate(secs: i64) -> String {
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
     let (y, m, d) = civil_from_days(days);

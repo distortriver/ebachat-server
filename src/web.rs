@@ -401,11 +401,45 @@ async fn robots(req: Request) -> Response {
     "User-agent: *\nDisallow: /\n".into_response()
 }
 
+/// `unsupportedBrowserScriptHandler`: the script of the unsupported-browser page, from the templates directory
+/// (`EBACHAT_TEMPLATES_DIR`, default `templates/`) as `http.ServeFile` serves it, or the built-in copy.
+async fn unsupported_browser_js(req: Request) -> Response {
+    if req.uri().path().ends_with('/') {
+        let mut r = (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
+        r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+        return r;
+    }
+    let dir = PathBuf::from(std::env::var("EBACHAT_TEMPLATES_DIR").unwrap_or_else(|_| "templates".into()));
+    let file = dir.join("unsupported_browser.js");
+    let head = req.method() == Method::HEAD;
+    if tokio::fs::metadata(&file).await.is_ok() {
+        return serve_file(&file, req.headers(), head, None).await;
+    }
+    let body = crate::unsupported::BROWSER_SCRIPT;
+    let mut r = if head { StatusCode::OK.into_response() } else { body.into_response() };
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/javascript; charset=utf-8"));
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+    r
+}
+
+/// `root` for a request: an old browser or desktop app gets its page instead of the client.
+pub async fn root_for(app: &State, headers: &HeaderMap, uri: &axum::http::Uri) -> Response {
+    match crate::unsupported::page_for(app, headers, uri) {
+        Some(r) => static_headers(app, r),
+        None => root(app).await,
+    }
+}
+
 /// `root`: the web client's page with the site's name and description, for every GET or HEAD outside `/api/`,
 /// with the headers of Go's static handler (`NewStaticHandler`): no framing by other origins, and the script
 /// policy root.html also states.
 pub async fn root(app: &State) -> Response {
-    let mut r = root_page(app).await;
+    static_headers(app, root_page(app).await)
+}
+
+fn static_headers(app: &App, mut r: Response) -> Response {
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
     if let Ok(v) = HeaderValue::from_str(&content_security_policy(app)) {
@@ -469,7 +503,7 @@ async fn root_page(app: &State) -> Response {
 }
 
 /// Go's `html.EscapeString` (and `template.HTMLEscapeString`).
-fn html_escape(s: &str) -> String {
+pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('\'', "&#39;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&#34;")
 }
 
@@ -592,6 +626,7 @@ pub fn routes() -> axum::Router<State> {
         .route("/static/plugins/{*rel}", get(static_plugins))
         .route("/static/{*rel}", get(static_files))
         .route("/robots.txt", get(robots))
+        .route("/unsupported_browser.js", get(unsupported_browser_js))
 }
 
 #[cfg(test)]
