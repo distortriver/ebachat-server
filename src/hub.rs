@@ -62,6 +62,10 @@ pub struct Broadcast {
     /// `ContainsSensitiveData`: admins only.
     #[serde(skip)]
     pub admin_only: bool,
+    /// `RequiredPermissions`: only sessions with every one of these system permissions (it takes precedence
+    /// over `admin_only`).
+    #[serde(skip)]
+    pub required_permissions: Vec<&'static str>,
     /// Broadcast hooks (`add_mentions`, `add_followers`): fields added to the data for one recipient.
     #[serde(skip)]
     pub per_user: Option<PerUser>,
@@ -84,6 +88,11 @@ fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
 impl Hub {
     pub fn set_app(&self, app: &State) {
         let _ = self.app.set(Arc::downgrade(app));
+    }
+
+    /// The app, for work spawned from code that only borrows it.
+    pub fn app(&self) -> Option<State> {
+        self.app.get().and_then(|w| w.upgrade())
     }
 
     fn add(&self, c: Arc<Conn>) {
@@ -139,7 +148,7 @@ impl Hub {
                     if b.omit_users.as_ref().is_some_and(|o| o.contains_key(&c.user_id)) {
                         return false;
                     }
-                    if b.admin_only && !c.admin {
+                    if b.admin_only && b.required_permissions.is_empty() && !c.admin {
                         return false;
                     }
                     if !b.team_id.is_empty() && b.channel_id.is_empty() {
@@ -157,6 +166,7 @@ impl Hub {
         let sanitized = b.sanitized.as_ref().map(|d| prefix(event, d, &b));
         let event = event.to_string();
         let channel_id = b.channel_id.clone();
+        let required = b.required_permissions.clone();
         // The event for one connection: admin or sanitized data, and the hooks' fields.
         let render = move |c: &Conn| -> Arc<str> {
             let base = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
@@ -167,6 +177,23 @@ impl Hub {
             }
             prefix(&event, &d, &b)
         };
+        if !required.is_empty() {
+            // The permissions of each connection's session, off the caller's path.
+            let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
+            tokio::spawn(async move {
+                for c in targets {
+                    let Ok(s) = app.session(&c.token).await else { continue };
+                    let mut ok = true;
+                    for p in &required {
+                        ok = ok && app.has_perm(&s, p).await;
+                    }
+                    if ok {
+                        let _ = c.tx.send(Out::Event(render(&c)));
+                    }
+                }
+            });
+            return;
+        }
         if channel_id.is_empty() {
             for c in targets {
                 let _ = c.tx.send(Out::Event(render(&c)));

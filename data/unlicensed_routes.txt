@@ -80,7 +80,6 @@ POST   /api/v4/elasticsearch/test | cfgnil:ElasticsearchSettings:400:api.elastic
 POST   /api/v4/ephemeral_mode/cleanup |  | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
 POST   /api/v4/ephemeral_mode/purge |  | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
 POST   /api/v4/ephemeral_mode/wipe | anon | 501 license_error.feature_unavailable.specific | Ephemeral Mode feature is not available for the current license
-GET    /api/v4/exports | perm:manage_system | json []
 GET    /api/v4/groups |  | 501 api.license_error | api endpoint requires a license
 POST   /api/v4/groups |  | 501 api.license_error | api endpoint requires a license
 POST   /api/v4/groups/names |  | 501 api.license_error | api endpoint requires a license
@@ -94,7 +93,6 @@ POST   /api/v4/groups/{group_id}/restore |  | 501 api.license_error | api endpoi
 GET    /api/v4/groups/{group_id}/stats |  | 501 api.license_error | api endpoint requires a license
 GET    /api/v4/health/findings | perm:manage_system on:FeatureFlags.HealthDashboard:501:api.health_finding.license.app_error | 501 api.health_finding.feature_disabled.app_error
 GET    /api/v4/hosted_customer/signup_available |  | 501 api.server.hosted_signup_unavailable.error | Portal unavailable for self-hosted signup.
-GET    /api/v4/imports | perm:manage_system | json []
 GET    /api/v4/ip_filtering |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
 POST   /api/v4/ip_filtering |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
 GET    /api/v4/ip_filtering/my_ip |  | 501 api.context.ip_filtering.not_available.app_error | IP Filtering is not available on this server
@@ -180,9 +178,5 @@ PUT    /api/v4/system/e2e/ai_bridge |  | 501 api.ai_bridge_test_helper.disabled.
 GET    /api/v4/system/support_packet | perm:manage_system | 403 api.no_license | E10 or E20 license required to use this endpoint.
 GET    /api/v4/trial-license/prev |  | 403 api.license.upgrade_needed.app_error | Feature requires an upgrade to Enterprise Edition.
 GET    /api/v4/upgrade_to_enterprise/allowed | perm:manage_system | 403 api.upgrade_to_enterprise.system_not_supported.app_error | Mattermost was unable to upgrade to Enterprise Edition. This feature will only work on Linux systems with x86-64 architecture.
-POST   /api/v4/jobs | obj:job | 400 api.job.unable_to_create_job.incorrect_job_type | The job type of the job you are trying to create is invalid
-POST   /api/v4/jobs/{job_id}/cancel | id:job_id | 404 app.job.get.app_error | Unable to get the job.
-GET    /api/v4/jobs/{job_id}/download | id:job_id off:MessageExportSettings.DownloadExportResults:501:app.job.download_export_results_not_enabled | 404 app.job.get.app_error | Unable to get the job.
-PATCH  /api/v4/jobs/{job_id}/status | id:job_id prop:status:status | 404 app.job.get.app_error | Unable to get the job.
 POST   /api/v4/trial-license | rperm:manage_license_information | 403 api.license.upgrade_needed.app_error
 DELETE /api/v4/license | rperm:manage_license_information | ok

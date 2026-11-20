@@ -442,6 +442,15 @@ where
     f.update_at = f.create_at;
     f.remote_id = Some(String::new());
     save_file_info(app, &f).await?;
+    // UploadFileX: the text extracted in the background (`FileSettings.ExtractContent`).
+    if app.cfg.bool("FileSettings.ExtractContent")
+        && let Some(a) = app.hub.app()
+    {
+        let (id, name, path, mime, post) = (f.id.clone(), f.name.clone(), f.path.clone(), f.mime_type.clone(), f.post_id.clone());
+        tokio::spawn(async move {
+            let _ = a.extract_content_from_file_info(&id, &name, &path, &mime, &post).await;
+        });
+    }
     Ok(f)
 }
 
