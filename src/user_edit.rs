@@ -724,7 +724,7 @@ async fn remove_custom_status(St(app): St<State>, Auth(s): Auth, Path(user_id): 
 }
 
 /// `removeUserRecentCustomStatus`.
-async fn remove_recent_custom_status(
+pub(crate) async fn remove_recent_custom_status(
     St(app): St<State>,
     Auth(s): Auth,
     Path(user_id): Path<String>,

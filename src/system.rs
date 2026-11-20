@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Query, State as St};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,17 +25,11 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/config/client", get(client_config))
         .route("/api/v4/license/client", get(client_license))
         .route("/api/v4/license/load_metric", get(load_metric))
-        .route("/api/v4/trial-license/prev", get(prev_trial))
         .route("/api/v4/roles/names", post(roles_by_names))
         .route("/api/v4/brand/image", get(|| async { StatusCode::NOT_FOUND }))
-        .route("/api/v4/plugins/webapp", get(plugins_none))
-        .route("/api/v4/plugins/statuses", get(plugins_none))
-        .route("/api/v4/plugins", get(plugins_none))
-        .route("/api/v4/system/notices/{team_id}", get(|_: Auth| async { Json(json!([])) }))
         .route("/api/v4/system/onboarding/complete", get(onboarding))
         .route("/api/v4/users/{user_id}/custom_profile_attributes", get(|_: Auth| async { Json(json!({})) }))
         .route("/api/v4/users/{user_id}/oauth/apps/authorized", get(|_: Auth| async { Json(json!([])) }))
-        .route("/api/v4/properties/groups/{group}/system/values", get(property_group))
         .route("/api/v4/notifications/ack", post(push_ack))
 }
 
@@ -179,35 +173,20 @@ impl App {
     }
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct FormatQuery {
-    format: String,
-}
-
-/// `getClientConfig`: the limited config without a session.
-async fn client_config(St(app): St<State>, MaybeAuth(s): MaybeAuth, Query(q): Query<FormatQuery>) -> ApiResult<Response> {
-    if q.format != "old" {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.config.client.old_format.app_error", ""));
-    }
+/// `getClientConfig`: the limited config without a session (any `format`; 12.1 no longer checks it).
+async fn client_config(St(app): St<State>, MaybeAuth(s): MaybeAuth) -> ApiResult<Response> {
     Ok(Json(app.client_config(s.is_none()).await?).into_response())
 }
 
-/// `getClientLicense`: there is no license.
-async fn client_license(MaybeAuth(_): MaybeAuth, Query(q): Query<FormatQuery>) -> ApiResult<Json<Value>> {
-    if q.format != "old" {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.license.client.old_format.app_error", ""));
-    }
-    Ok(Json(json!({"IsLicensed": "false"})))
+/// `getClientLicense`: there is no license, sanitized or not.
+async fn client_license(MaybeAuth(_): MaybeAuth) -> Json<Value> {
+    Json(json!({"IsLicensed": "false"}))
 }
 
 async fn load_metric(_: Auth) -> Json<Value> {
     Json(json!({"load": 0}))
 }
 
-async fn prev_trial(_: Auth) -> AppError {
-    AppError::new(StatusCode::FORBIDDEN, "api.license.upgrade_needed.app_error", "")
-}
 
 async fn onboarding(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>> {
     app.require(&s, perm::MANAGE_SYSTEM).await?;
@@ -245,17 +224,7 @@ async fn roles_by_names(St(app): St<State>, _: Auth, Body(mut names): Body<Vec<S
     Ok(Json(roles))
 }
 
-/// Plugins: a server with plugins enabled has none; disabled, Go's 501.
-async fn plugins_none(St(app): St<State>, _: Auth) -> ApiResult<Json<Value>> {
-    if !app.cfg.bool("PluginSettings.Enable") {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "app.plugin.disabled.app_error", ""));
-    }
-    Ok(Json(json!([])))
-}
 
-async fn property_group(_: Auth, Path(_group): Path<String>) -> AppError {
-    AppError::not_found("api.property.v2_group_not_found.app_error", "")
-}
 
 /// `model.PushNotificationAck`.
 #[derive(Deserialize, Default)]

@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod api;
 pub mod app;
 pub mod cache;
@@ -34,6 +35,7 @@ pub mod status;
 pub mod system;
 pub mod teams;
 pub mod threads;
+pub mod unlicensed;
 pub mod user_agent;
 pub mod user_edit;
 pub mod user_image;

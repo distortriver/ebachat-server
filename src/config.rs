@@ -442,13 +442,13 @@ fn typed(old: &Value, s: &str) -> Option<Value> {
     })
 }
 
-/// Go's `model.Config` after `SetDefaults` (`data/config_defaults.json`, made by `tools/configdefs`).
+/// Go's `model.Config` after `SetDefaults` (`data/config_defaults.json`, made by `tools/gomodel`).
 pub fn defaults() -> &'static Value {
     static D: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
     D.get_or_init(|| serde_json::from_str(include_str!("../data/config_defaults.json")).expect("config defaults"))
 }
 
-/// The `access` tag of every setting, by path (`data/config_access.json`, made by `tools/configdefs`).
+/// The `access` tag of every setting, by path (`data/config_access.json`, made by `tools/gomodel`).
 pub fn access_tags() -> &'static BTreeMap<String, String> {
     static A: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
     A.get_or_init(|| serde_json::from_str(include_str!("../data/config_access.json")).expect("config access tags"))

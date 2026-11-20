@@ -222,6 +222,36 @@ impl Caches {
         ])
     }
 
+    /// `InvalidateAllCaches`: every store, session, status and link cache emptied (not the pending post ids,
+    /// which guard against duplicate posts rather than cache the database).
+    pub fn clear_all(&self) {
+        self.session.clear();
+        self.status.clear();
+        self.open_graph.clear();
+        self.user.clear();
+        self.all_profiles.clear();
+        self.profiles_in_channel.clear();
+        self.channel.clear();
+        self.channel_by_name.clear();
+        self.member_count.clear();
+        self.guest_count.clear();
+        self.pinned_count.clear();
+        self.members_for_user.clear();
+        self.members_notify_props.clear();
+        self.last_post_time.clear();
+        self.last_posts.clear();
+        self.team_ids_for_user.clear();
+        self.role.clear();
+        self.role_permissions.clear();
+        self.scheme.clear();
+        self.reactions.clear();
+        self.file_infos.clear();
+        self.emoji_by_id.clear();
+        self.emoji_by_name.clear();
+        self.terms_of_service.clear();
+        self.webhook.clear();
+    }
+
     // ---- Go's invalidation entry points ----
 
     /// `InvalidateProfileCacheForUser` and `InvalidateProfilesInChannelCacheByUser`.
