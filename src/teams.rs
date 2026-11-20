@@ -1088,7 +1088,7 @@ async fn invite_by_email(
     }
     let mut out: Vec<EmailInviteWithError> = vec![];
     let mut good = vec![];
-    for email in emails.iter().cloned() {
+    for email in emails.clone() {
         let error = if !email_allowed(&email, &allowed) {
             Some(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &email))
         } else if deactivated(email.clone()).await? {

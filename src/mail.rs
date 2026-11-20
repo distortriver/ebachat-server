@@ -351,7 +351,7 @@ fn address(name: &str, addr: &str) -> String {
 
 /// `mime.QEncoding.Encode("UTF-8", s)`.
 pub fn word_encode(s: &str) -> String {
-    let needs = s.bytes().any(|b| (b < b' ' || b > b'~') && b != b'\t');
+    let needs = s.bytes().any(|b| !(b' '..=b'~').contains(&b) && b != b'\t');
     if !needs {
         return s.to_string();
     }

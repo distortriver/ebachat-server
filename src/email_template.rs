@@ -140,7 +140,7 @@ fn parse(src: &str) -> Set {
 }
 
 /// Nodes up to the `{{end}}` or `{{else}}` that closes them (returned: whether it was `else`).
-fn parse_list<'a>(it: &mut std::iter::Peekable<std::vec::IntoIter<(bool, &'a str)>>) -> (Vec<Node>, bool) {
+fn parse_list(it: &mut std::iter::Peekable<std::vec::IntoIter<(bool, &str)>>) -> (Vec<Node>, bool) {
     let mut out = vec![];
     while let Some((action, t)) = it.next() {
         if !action {

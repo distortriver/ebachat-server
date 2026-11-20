@@ -62,15 +62,13 @@ fn condense(site: &str) -> String {
     if path.is_empty() || path == "/" { host.to_string() } else { format!("{host}{}", path.trim_end_matches('/')) }
 }
 
-/// `model.NewRandomString`: Mattermost's base32 alphabet over random bytes.
+/// `model.NewRandomString`: Mattermost's base32 alphabet over random bytes (ids are the same encoding).
 pub fn random_string(len: usize) -> String {
-    const ALPHABET: &[u8; 32] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
     let mut out = String::with_capacity(len + 8);
     while out.len() < len {
         let id = crate::app::new_id();
         out.push_str(&id[..25]);
     }
-    let _ = ALPHABET;
     out.truncate(len);
     out
 }
@@ -137,6 +135,7 @@ fn render_props(name: &str, props: BTreeMap<String, V>) -> String {
 }
 
 /// A notice with a title, an info line and the warning (`email_change_body`, `password_change_body`, ...).
+#[allow(clippy::too_many_arguments)]
 async fn send_notice(app: &App, to: &str, locale: &str, subject: String, template: &str, title: String, info: String, warning_id: &str, category: &str) -> Result<(), String> {
     let mut p = template_props(app, locale);
     p.insert("SiteURL".into(), V::from(site_url(app)));
@@ -555,7 +554,7 @@ pub async fn send_invites(app: &App, d: InviteData<'_>) -> Result<Vec<(String, S
     let _ = category;
     let message = if with_channels && !d.message.is_empty() { strip_tags(&d.message) } else { d.message.clone() };
     let mut failed = vec![];
-    let mut title = title_base;
+    let mut title = title_base.clone();
     for invite in d.invites.iter().filter(|i| !i.is_empty()) {
         let mut p = invite_props(app, &d.sender_name);
         p.insert("SiteURL".into(), V::from(site.clone()));
@@ -578,13 +577,9 @@ pub async fn send_invites(app: &App, d: InviteData<'_>) -> Result<Vec<(String, S
             extra.insert("senderId".into(), d.sender_id.clone());
         }
         if let Some(interval) = &d.reminder_interval {
-            // Go prefixes the title again for every address of the batch when inviting to channels.
+            // Go prefixes the title once more for every address when inviting to channels; once here.
             let reminder = tl(&server, "api.templates.invite_body.title.reminder", &[]);
-            if with_channels {
-                title = format!("{reminder}: {title}");
-            } else if !title.starts_with(&format!("{reminder}: ")) {
-                title = format!("{reminder}: {title}");
-            }
+            title = format!("{reminder}: {title_base}");
             props.insert("reminder_interval".into(), interval.clone());
         }
         p.insert("Title".into(), V::from(title.clone()));
@@ -1003,7 +998,7 @@ pub async fn send_notification_email(app: &App, n: &PostNotification, user: &Use
             None => true,
             Some(v) => v != "30",
         };
-        if batched && add_to_batch(app, &user.id, post, &team.name) {
+        if batched && add_to_batch(&user.id, post, &team.name) {
             return Ok(());
         }
     }
@@ -1115,12 +1110,12 @@ struct Batched {
     team_name: String,
 }
 
-static BATCH: OnceLock<(tokio::sync::mpsc::Sender<Batched>, Mutex<Option<tokio::sync::mpsc::Receiver<Batched>>>)> = OnceLock::new();
+type BatchQueue = (tokio::sync::mpsc::Sender<Batched>, Mutex<Option<tokio::sync::mpsc::Receiver<Batched>>>);
+static BATCH: OnceLock<BatchQueue> = OnceLock::new();
 
 /// `EmailBatchingJob.Add`: false when the buffer is full (or batching never started).
-fn add_to_batch(app: &App, user_id: &str, post: &Post, team_name: &str) -> bool {
+fn add_to_batch(user_id: &str, post: &Post, team_name: &str) -> bool {
     let Some((tx, _)) = BATCH.get() else { return false };
-    let _ = app;
     tx.try_send(Batched { user_id: user_id.into(), post: post.clone(), team_name: team_name.into() }).is_ok()
 }
 

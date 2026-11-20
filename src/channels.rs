@@ -1209,7 +1209,8 @@ impl App {
         // GetChannelsWithUnreadsAndWithMentions: the channels to view, and those whose push notifications the
         // user's other devices drop.
         let user_push = self.user(user_id).await?.map(|u| u.notify_prop("push").to_string()).unwrap_or_default();
-        let rows: Vec<(String, i64, i64, i64, i64, i64, String, Option<String>)> = sqlx::query_as(
+        type Row = (String, i64, i64, i64, i64, i64, String, Option<String>);
+        let rows: Vec<Row> = sqlx::query_as(
             "SELECT Channels.Id, COALESCE(Channels.TotalMsgCount, 0), COALESCE(Channels.LastPostAt, 0),
                     COALESCE(ChannelMembers.MsgCount, 0), COALESCE(ChannelMembers.MentionCount, 0),
                     COALESCE(ChannelMembers.LastViewedAt, 0), COALESCE(Channels.Type::text, ''), ChannelMembers.NotifyProps->>'push'

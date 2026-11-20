@@ -73,8 +73,7 @@ cd tools/emailtpl && go run . -templates ../../../ebac-messenger/mattermost/serv
   attachments, the sender's picture. `EmailNotificationContentsType` needs a license: always full.
 - **Batching** (`EnableEmailBatching`): users whose `email_interval` is not "immediate" (`30`) are batched; every
   `EmailBatchingInterval` the batches older than the user's interval (default 900 s) go out as one email, unless
-  the user read the team's channels since. (Checked by reading the Go code; not run against Go, whose shortest
-  batch is 15 minutes unless the preference is edited.)
+  the user read the team's channels since.
 - **Transactional emails**, wired where Go sends them:
 
   | Email | Route |
@@ -113,6 +112,8 @@ scenarios ran against both, and the records were compared after normalizing ids,
 - **Emails:** the notification emails of those scenarios (96 of them, `@channel` reaches every member who is
   offline) and the 13 transactional emails above: identical headers that matter, MIME structure, text part and
   HTML part.
+- **Batching:** two mentions and a DM with `email_interval` 60 s and a 30 s batching interval: one identical
+  batched email from each server, about a minute later.
 - **Errors** of `POST /email/test` and the routes above: the same status and id.
 
 ## Deviations from Go
