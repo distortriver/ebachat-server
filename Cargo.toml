@@ -48,6 +48,7 @@ sha2 = "0.11.1"
 sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres", "json", "macros"] }
 tar = { version = "0.4", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
+unicode-normalization = "0.1.26"
 tokio-rustls = "0.26"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 zstd = { version = "0.13.3", default-features = false }

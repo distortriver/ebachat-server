@@ -187,7 +187,7 @@ impl App {
     }
 
     /// `BotStore.Update`: description, owner, icon and the times; the user fields stay the store's.
-    async fn store_bot(&self, b: &Bot) -> ApiResult<Bot> {
+    pub(crate) async fn store_bot(&self, b: &Bot) -> ApiResult<Bot> {
         let mut b = b.clone();
         b.update_at = now_ms();
         check_bot(&b)?;
@@ -241,7 +241,7 @@ impl App {
 
     /// `CreateBot`: the bot's user row as `UserFromBot` makes it, the bot row, and the bot's DM with its owner
     /// carrying the "add to teams and channels" post.
-    async fn create_bot(&self, s: &Session, mut b: Bot) -> ApiResult<Bot> {
+    pub(crate) async fn create_bot(&self, s: &Session, mut b: Bot) -> ApiResult<Bot> {
         check_bot(&b)?;
         if is_protected(&b.username) {
             return Err(AppError::bad_request("app.bot.createbot.reserved_username.app_error", ""));
@@ -300,8 +300,8 @@ impl App {
                 r#type: "add_bot_teams_channels".into(),
                 ..Default::default()
             };
+            // CreatePostAsUser: a bot's post (`from_bot`) leaves its last view alone.
             self.create_post(post, true).await?;
-            self.mark_viewed(std::slice::from_ref(&c.id), &saved.user_id, "").await?;
         }
         Ok(saved)
     }

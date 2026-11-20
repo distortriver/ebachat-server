@@ -351,12 +351,17 @@ fn base(p: &str) -> String {
 }
 
 /// `UploadFileTask`.
-struct Upload {
-    name: String,
-    channel_id: String,
-    user_id: String,
-    timestamp: i64,
-    content_length: i64,
+pub(crate) struct Upload {
+    pub name: String,
+    pub channel_id: String,
+    pub user_id: String,
+    pub timestamp: i64,
+    pub content_length: i64,
+    /// `TeamId`: `noteam` from the API, the post's team from bulk import.
+    pub team_id: String,
+    /// `ExtractContent` (with the config's): always from the API, the import job's `extract_content` from bulk
+    /// import.
+    pub extract: Option<bool>,
 }
 
 impl Upload {
@@ -368,12 +373,12 @@ impl Upload {
         let day = chrono::DateTime::from_timestamp_millis(self.timestamp)
             .map(|t| t.with_timezone(&chrono::Local).format("%Y%m%d").to_string())
             .unwrap_or_default();
-        format!("{day}/teams/{NO_TEAM}/channels/{}/users/{}/{file_id}/", self.channel_id, self.user_id)
+        format!("{day}/teams/{}/channels/{}/users/{}/{file_id}/", self.team_id, self.channel_id, self.user_id)
     }
 }
 
 /// `UploadFileX`: streamed to the store (images kept in memory to process), then the info saved.
-async fn upload_file_x<S, E>(app: &App, t: Upload, mut input: S) -> ApiResult<FileInfo>
+pub(crate) async fn upload_file_x<S, E>(app: &App, t: Upload, mut input: S) -> ApiResult<FileInfo>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: std::fmt::Display,
@@ -444,6 +449,7 @@ where
     save_file_info(app, &f).await?;
     // UploadFileX: the text extracted in the background (`FileSettings.ExtractContent`).
     if app.cfg.bool("FileSettings.ExtractContent")
+        && t.extract.unwrap_or(true)
         && let Some(a) = app.hub.app()
     {
         let (id, name, path, mime, post) = (f.id.clone(), f.name.clone(), f.path.clone(), f.mime_type.clone(), f.post_id.clone());
@@ -666,7 +672,7 @@ async fn upload_simple(
     check_upload_channel(app, s, &channel_id, true).await?;
     let client_id = q.get("client_id").cloned().unwrap_or_default();
     let user_id = if bookmark(q) { BOOKMARK_OWNER.to_string() } else { s.user_id.clone() };
-    let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id, timestamp: now_ms(), content_length };
+    let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id, timestamp: now_ms(), content_length, team_id: NO_TEAM.into(), extract: None };
     let info = upload_file_x(app, t, body.into_data_stream()).await?;
     Ok(UploadResponse { file_infos: vec![info], client_ids: (!client_id.is_empty()).then(|| vec![client_id]) })
 }
@@ -754,7 +760,7 @@ async fn upload_multipart(
         } else {
             String::new()
         };
-        let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1 };
+        let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1, team_id: NO_TEAM.into(), extract: None };
         infos.push(upload_file_x(app, t, field).await?);
         if expect_client_ids {
             resp_ids.push(client_id);
@@ -769,7 +775,7 @@ async fn upload_multipart(
             return Err(wrong_client_ids(client_ids.len(), files.len()));
         }
         for (i, (name, data)) in files.into_iter().enumerate() {
-            let t = Upload { name: base(&name), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1 };
+            let t = Upload { name: base(&name), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1, team_id: NO_TEAM.into(), extract: None };
             let one = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(data)]);
             infos.push(upload_file_x(app, t, one).await?);
             if let Some(c) = client_ids.get(i).filter(|c| !c.is_empty()) {

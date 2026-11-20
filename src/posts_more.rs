@@ -309,7 +309,8 @@ async fn create_upload(St(app): St<State>, Auth(s): Auth, body: axum::body::Byte
         us.path = format!("{day}/teams/noteam/channels/{}/users/{}/{}/{}", us.channel_id, us.user_id, us.id, base(&us.filename));
     } else {
         let dir = app.cfg.str("ImportSettings.Directory").trim_end_matches('/').to_string();
-        us.path = format!("{dir}/{}_{}", us.id, base(&us.filename));
+        // filepath.Join: `./import` becomes `import`.
+        us.path = crate::files::clean(&format!("{dir}/{}_{}", us.id, base(&us.filename)));
     }
     let invalid = |id: &str| Err(AppError::bad_request(id, ""));
     if us.kind == ATTACHMENT && !is_valid_id(&us.channel_id) {

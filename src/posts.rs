@@ -1550,7 +1550,7 @@ impl App {
 
     /// `Post.IsValid`.
     /// `Post.IsValid(maxPostSize)`.
-    fn validate_post(&self, p: &Post, max_post_size: usize) -> ApiResult<()> {
+    pub(crate) fn validate_post(&self, p: &Post, max_post_size: usize) -> ApiResult<()> {
         let bad = |what: &str| AppError::bad_request(&format!("model.post.is_valid.{what}.app_error"), &format!("Invalid {what}."));
         if !is_valid_id(&p.id) {
             return Err(bad("id"));

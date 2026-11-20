@@ -132,7 +132,7 @@ pub fn default_notify_props() -> BTreeMap<String, String> {
     .collect()
 }
 
-fn mention_keys(s: &str) -> Vec<String> {
+pub(crate) fn mention_keys(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|k| !k.is_empty()).map(str::to_string).collect()
 }
 
@@ -706,11 +706,11 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     Some(secs * 1000 + (sec * 1000.0).round() as i64)
 }
 
-fn custom_status_of(u: &User) -> Option<CustomStatus> {
+pub(crate) fn custom_status_of(u: &User) -> Option<CustomStatus> {
     serde_json::from_str(u.props.0.get("customStatus")?).ok()
 }
 
-fn set_custom_status_prop(u: &mut User, cs: &CustomStatus) {
+pub(crate) fn set_custom_status_prop(u: &mut User, cs: &CustomStatus) {
     u.props.0.insert("customStatus".into(), serde_json::to_string(cs).unwrap());
 }
 
@@ -1049,8 +1049,44 @@ impl App {
         if u.auth_service.is_empty() {
             check_password(self, &u.password)?;
         }
+        u.id.clear();
+        // Go stores `[]` for the users it creates through the API (`null` for bots and imported users).
+        if u.mfa_used_timestamps.0.is_none() {
+            u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
+        }
+        self.save_user_row(&mut u).await?;
+        self.invalidate_user(&u.id);
+        let prefs = [
+            ("recommended_next_steps", "hide", "false".to_string()),
+            ("tutorial_step", u.id.as_str(), "0".to_string()),
+            ("system_notice", "GMasDM", "true".to_string()),
+        ];
+        for (c, n, v) in prefs {
+            let _ = sqlx::query(
+                "INSERT INTO Preferences (UserId, Category, Name, Value) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (userid, category, name) DO UPDATE SET Value = $4",
+            )
+            .bind(&u.id)
+            .bind(c)
+            .bind(n)
+            .bind(v)
+            .execute(&self.db)
+            .await;
+        }
+        self.hub.publish("new_user", json!({ "user_id": u.id }), Broadcast::default());
+        let mut out = self.user(&u.id).await?.map(|x| (*x).clone()).unwrap_or(u);
+        out.sanitize_own();
+        Ok(out)
+    }
+}
+
+impl App {
+    /// `User.PreSave` and `SqlUserStore.Save` (`IsValid`, the row, the uniqueness errors).
+    pub(crate) async fn save_user_row(&self, u: &mut User) -> ApiResult<()> {
         // PreSave
-        u.id = crate::app::new_id();
+        if u.id.is_empty() {
+            u.id = crate::app::new_id();
+        }
         if u.username.is_empty() {
             u.username = format!("a{}", crate::app::new_id());
         }
@@ -1085,16 +1121,12 @@ impl App {
         if !u.password.is_empty() {
             u.password = password::hash(&u.password);
         }
-        if let Some(mut cs) = custom_status_of(&u) {
+        if let Some(mut cs) = custom_status_of(u) {
             cs.pre_save();
-            set_custom_status_prop(&mut u, &cs);
+            set_custom_status_prop(u, &cs);
         }
-        // Go stores `[]` for the users it creates (`null` only for bots).
-        if u.mfa_used_timestamps.0.is_none() {
-            u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
-        }
-        check_user(&u)?;
-        let r = crate::db::insert(&self.db, &u).await;
+        check_user(u)?;
+        let r = crate::db::insert(&self.db, &*u).await;
         if let Err(e) = r {
             let m = e.to_string();
             if m.contains("email") {
@@ -1105,28 +1137,7 @@ impl App {
             }
             return Err(AppError::internal("app.user.save.app_error", m));
         }
-        self.invalidate_user(&u.id);
-        let prefs = [
-            ("recommended_next_steps", "hide", "false".to_string()),
-            ("tutorial_step", u.id.as_str(), "0".to_string()),
-            ("system_notice", "GMasDM", "true".to_string()),
-        ];
-        for (c, n, v) in prefs {
-            let _ = sqlx::query(
-                "INSERT INTO Preferences (UserId, Category, Name, Value) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (userid, category, name) DO UPDATE SET Value = $4",
-            )
-            .bind(&u.id)
-            .bind(c)
-            .bind(n)
-            .bind(v)
-            .execute(&self.db)
-            .await;
-        }
-        self.hub.publish("new_user", json!({ "user_id": u.id }), Broadcast::default());
-        let mut out = self.user(&u.id).await?.map(|x| (*x).clone()).unwrap_or(u);
-        out.sanitize_own();
-        Ok(out)
+        Ok(())
     }
 }
 

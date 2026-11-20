@@ -47,7 +47,7 @@ pub fn is_system_emoji(name: &str) -> bool {
 }
 
 /// `IsValidEmojiName`.
-fn check_name(name: &str) -> ApiResult<()> {
+pub(crate) fn check_name(name: &str) -> ApiResult<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'+');

@@ -752,6 +752,7 @@ dependencies = [
  "tar",
  "tokio",
  "tokio-rustls",
+ "unicode-normalization",
  "zip",
  "zstd",
 ]

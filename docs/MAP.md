@@ -227,7 +227,7 @@ are a risk for taking turns on one database: switch servers with a restart, neve
 - **Properties:** see `docs/PROPERTIES.md`.
 - **Push and email:** `docs/NOTIFICATIONS.md`.
 - **Background jobs:** Go's job server, the Team Edition workers and schedulers, the recurring cleanups, content
-  extraction and bulk export; see `docs/JOBS.md` (bulk import is not ported).
+  extraction, bulk export and bulk import (every JSONL line type, rows as Go writes them); see `docs/JOBS.md`.
 - **Left:**
   - T3 routes on demand.
 
@@ -242,7 +242,7 @@ Code by area:
 | Posts | `posts.rs`, `notify.rs`, `threads.rs`, `reactions.rs`, `drafts.rs`, `search.rs` |
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
-| Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs` |
+| Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs`, `import_functions.rs` |
 | Admin | `admin.rs`, `audit.rs` (Audits rows), `logs.rs` (server log, `/logs`, startup lines), `license.rs`, `permanent.rs`, `cpa.rs`, `config_order.rs`; see `docs/ADMIN.md` |
 | HTTP | `api.rs` (router, Go's headers, `HEAD`), `compress.rs` (gzhttp), `web.rs` |
 

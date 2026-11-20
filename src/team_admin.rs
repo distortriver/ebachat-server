@@ -256,7 +256,7 @@ impl App {
     }
 
     /// `CreateTeam`: the team saved (a new invite id), its default channels.
-    async fn create_team_row(&self, t: &mut Team) -> ApiResult<()> {
+    pub(crate) async fn create_team_row(&self, t: &mut Team) -> ApiResult<()> {
         t.invite_id.clear();
         if !t.id.is_empty() {
             return Err(bad("store.sql_team.save_team.existing.app_error").detail(format!("id={}", t.id)));
