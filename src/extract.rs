@@ -300,7 +300,7 @@ fn plain(d: &[u8], max_file_size: i64) -> String {
 }
 
 /// `utf8.DecodeRune`: the char and its size, U+FFFD and 1 for an invalid byte, size 0 at the end.
-fn decode_rune(b: &[u8]) -> (char, usize) {
+pub(crate) fn decode_rune(b: &[u8]) -> (char, usize) {
     if b.is_empty() {
         return ('\u{FFFD}', 0);
     }

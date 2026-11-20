@@ -2863,7 +2863,7 @@ impl Ctx {
                 if n == 1 {
                     continue;
                 }
-                if let Ok(l) = serde_json::from_slice::<LineData>(&line)
+                if let Ok(l) = crate::bulk_import::decode_line(&line)
                     && l.r#type == "user"
                     && let Some(u) = l.user
                 {
