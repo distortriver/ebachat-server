@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, Body, State, is_valid_id};
 use crate::model::{Session, Show, User};
 use crate::perm;
 use crate::users::{Arg, query_users, sanitized};
@@ -425,7 +425,7 @@ struct UserSearch {
 }
 
 /// `searchUsers`.
-async fn search(St(app): St<State>, Auth(s): Auth, Body(p): Body<UserSearch>) -> ApiResult<Json<Vec<User>>> {
+async fn search(St(app): St<State>, BusyAuth(s): BusyAuth, Body(p): Body<UserSearch>) -> ApiResult<Json<Vec<User>>> {
     let limit = if p.limit == 0 { DEFAULT_LIMIT } else { p.limit };
     if p.term.is_empty() {
         return Err(AppError::invalid_param("term"));

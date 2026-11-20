@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id};
+use crate::app::{ApiResult, App, AppError, BusyAuth, State, is_valid_id};
 use crate::db;
 use crate::model::{Post, PostList, Session};
 use crate::perm;
@@ -514,11 +514,11 @@ fn body(raw: &[u8]) -> ApiResult<SearchBody> {
     })
 }
 
-async fn search_all(St(app): St<State>, Auth(s): Auth, raw: axum::body::Bytes) -> ApiResult<Response> {
+async fn search_all(St(app): St<State>, BusyAuth(s): BusyAuth, raw: axum::body::Bytes) -> ApiResult<Response> {
     search(&app, &s, "", body(&raw)?).await
 }
 
-async fn search_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<String>, raw: axum::body::Bytes) -> ApiResult<Response> {
+async fn search_team(St(app): St<State>, BusyAuth(s): BusyAuth, Path(team_id): Path<String>, raw: axum::body::Bytes) -> ApiResult<Response> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }

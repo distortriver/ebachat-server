@@ -19,7 +19,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, new_id, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, State, is_valid_id, new_id, now_ms};
 use crate::model::channel::{DIRECT, GROUP, OPEN};
 use crate::model::{Base64, Channel, FileInfo, Session};
 use crate::search_params::{self, SearchParams};
@@ -1153,7 +1153,7 @@ pub struct FileInfoList {
     pub first_inaccessible_file_time: i64,
 }
 
-async fn search_in_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<String>, body: Bytes) -> ApiResult<Response> {
+async fn search_in_team(St(app): St<State>, BusyAuth(s): BusyAuth, Path(team_id): Path<String>, body: Bytes) -> ApiResult<Response> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
@@ -1163,7 +1163,7 @@ async fn search_in_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<S
     search_files(&app, &s, &team_id, &body).await
 }
 
-async fn search_all_teams(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
+async fn search_all_teams(St(app): St<State>, BusyAuth(s): BusyAuth, body: Bytes) -> ApiResult<Response> {
     search_files(&app, &s, "", &body).await
 }
 

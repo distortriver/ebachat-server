@@ -464,6 +464,25 @@ impl FromRequestParts<State> for Auth {
     }
 }
 
+/// `APISessionRequiredDisableWhenBusy`: `Auth`, then Go's server-busy error (`SetServerBusyError`) while the
+/// server is marked busy, before the handler runs.
+pub struct BusyAuth(pub Arc<Session>);
+
+impl FromRequestParts<State> for BusyAuth {
+    type Rejection = AppError;
+    async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<BusyAuth, AppError> {
+        let Auth(s) = Auth::from_request_parts(parts, app).await?;
+        if crate::admin::is_busy() {
+            return Err(AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api.context.server_busy.app_error",
+                "Server is busy, non-critical services are temporarily unavailable.",
+            ));
+        }
+        Ok(BusyAuth(s))
+    }
+}
+
 /// The session if there is a valid one (`APIHandler` endpoints).
 pub struct MaybeAuth(pub Option<Arc<Session>>);
 

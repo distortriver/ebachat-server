@@ -87,8 +87,12 @@ impl App {
         }
     }
 
-    /// `BroadcastStatus`: to the user only; others ask `status/ids`.
+    /// `BroadcastStatus`: to the user only; others ask `status/ids`. Nothing while the server is busy.
     pub fn broadcast_status(&self, s: &Status) {
+        if crate::admin::is_busy() {
+            // A non-critical service, off while the server is busy.
+            return;
+        }
         self.hub.publish(
             "status_change",
             json!({"status": s.status, "user_id": s.user_id}),

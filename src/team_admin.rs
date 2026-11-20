@@ -20,7 +20,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, new_id, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, State, is_valid_id, new_id, now_ms};
 use crate::channels_api::{paging, parse_bool};
 use crate::db::{self, Table};
 use crate::hub::Broadcast;
@@ -891,7 +891,7 @@ struct TeamSearch {
 
 /// `searchTeams`: all the teams with both list permissions (archived ones too, as the system console wants),
 /// otherwise the public or the private ones; `{teams, total_count}` when paged.
-async fn search_teams(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
+async fn search_teams(St(app): St<State>, BusyAuth(s): BusyAuth, body: Bytes) -> ApiResult<Response> {
     let mut o: TeamSearch = decode(&body, "team_search")?;
     if o.exclude_policy_constrained.is_some()
         && !app.has_perm(&s, "sysconsole_read_compliance_data_retention_policy").await
@@ -1184,7 +1184,7 @@ struct ChannelSearch {
 /// the member is in.
 async fn search_channels(
     St(app): St<State>,
-    Auth(s): Auth,
+    BusyAuth(s): BusyAuth,
     Path(team_id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<Vec<Channel>>> {

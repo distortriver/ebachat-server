@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 
-use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, Body, State, is_valid_id, now_ms};
 use crate::db::{self, Table};
 use crate::hub::Broadcast;
 use crate::model::post::{EmbedData, PostEmbed, PreviewPost, kind};
@@ -2868,7 +2868,7 @@ struct TypingBody {
 /// be able to post in the channel.
 async fn user_typing(
     St(app): St<State>,
-    Auth(s): Auth,
+    BusyAuth(s): BusyAuth,
     Path(user_id): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -447,15 +448,21 @@ async fn complete_onboarding(St(app): St<State>, Auth(s): Auth, body: Bytes) -> 
 
 // ---------- server busy ----------
 
-/// `Busy`: until when non-critical services are off (Unix seconds); none when not busy.
-static BUSY: Mutex<Option<i64>> = Mutex::new(None);
+/// `Busy`: until when non-critical services are off (Unix milliseconds); 0 when not busy. An atomic, as Go's
+/// `busy` flag, so that `is_busy` is one load on the hot paths; Go's timer that clears it at the expiry is the
+/// comparison with the clock.
+static BUSY: AtomicI64 = AtomicI64::new(0);
 
+/// `Busy.IsBusy`.
+pub fn is_busy() -> bool {
+    let t = BUSY.load(Ordering::Relaxed);
+    t != 0 && now_ms() < t
+}
+
+/// `Busy.Expires` in Unix seconds (`time.Time.Unix`), none when not busy.
 fn busy_until() -> Option<i64> {
-    let mut b = BUSY.lock().unwrap();
-    if b.is_some_and(|t| t <= chrono::Utc::now().timestamp()) {
-        *b = None;
-    }
-    *b
+    let t = BUSY.load(Ordering::Relaxed);
+    (t != 0 && now_ms() < t).then(|| t.div_euclid(1000))
 }
 
 /// `Busy.ToJSON`: the zero time when not busy, as Go prints it.
@@ -481,13 +488,13 @@ async fn set_busy(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<J
     if secs <= 0 || secs > MAX {
         return Err(AppError::invalid_url_param(&format!("seconds must be 1 - {MAX}")));
     }
-    *BUSY.lock().unwrap() = Some(chrono::Utc::now().timestamp() + secs);
+    BUSY.store(now_ms() + secs * 1000, Ordering::Relaxed);
     Ok(ok())
 }
 
 async fn clear_busy(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>> {
     app.require(&s, crate::perm::MANAGE_SYSTEM).await?;
-    *BUSY.lock().unwrap() = None;
+    BUSY.store(0, Ordering::Relaxed);
     Ok(ok())
 }
 

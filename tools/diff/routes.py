@@ -50,10 +50,16 @@ def main():
             continue  # never deactivate users from a sweep
         if "logout" in r["path"] or "sessions/revoke" in r["path"]:
             continue  # the sweep's own session must live
+        if r["path"] == "/api/v4/restart":
+            continue  # never restart the shared servers
         path = re.sub(r"\{[^}]+\}", ID, r["path"])[len("/api/v4"):]
         body = {} if r["method"] in ("POST", "PUT", "PATCH") else None
         g = summary(*diff.call(a.go, tg, r["method"], path, body)[:2])
         s = summary(*diff.call(a.rust, tr, r["method"], path, body)[:2])
+        if r["path"] == "/api/v4/server_busy" and r["method"] == "POST":
+            # busy turns off search, typing and statuses: clear it at once on both
+            diff.call(a.go, tg, "DELETE", "/server_busy", None)
+            diff.call(a.rust, tr, "DELETE", "/server_busy", None)
         if g == s:
             same += 1
         else:
