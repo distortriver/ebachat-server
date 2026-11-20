@@ -10,9 +10,13 @@ use crate::app::{AppError, State};
 
 /// Go's answer for a path (or a method) the API does not have.
 async fn not_found(uri: Uri) -> impl IntoResponse {
+    route_not_found(uri.path())
+}
+
+/// Go's router 404, also for a path whose parameter fails the route's pattern (`{timestamp:[0-9]+}`).
+pub fn route_not_found(path: &str) -> AppError {
     let mut e = AppError::not_found("api.context.404.app_error", "Sorry, we could not find the page.").detail(format!(
-        "There doesn't appear to be an api call for the url='{}'.  Typo? are you missing a team_id or user_id as part of the url?",
-        uri.path()
+        "There doesn't appear to be an api call for the url='{path}'.  Typo? are you missing a team_id or user_id as part of the url?"
     ));
     e.request_id.clear();
     e
@@ -47,6 +51,7 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
 
 pub fn router(app: State) -> Router {
     crate::app::DEVELOPER.store(app.cfg.bool("ServiceSettings.EnableDeveloper"), std::sync::atomic::Ordering::Relaxed);
+    crate::outgoing::spawn_worker(app.clone());
     let r = routes(app).layer(axum::middleware::from_fn(go_headers));
     if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
 }
@@ -95,6 +100,8 @@ fn routes(app: State) -> Router {
         .merge(crate::admin::routes())
         .merge(crate::unlicensed::routes())
         .merge(crate::commands::routes())
+        .merge(crate::command_admin::routes())
+        .merge(crate::outgoing::routes())
         .merge(crate::status::routes())
         .merge(crate::channels::routes())
         .merge(crate::sidebar::routes())
@@ -105,7 +112,9 @@ fn routes(app: State) -> Router {
         .merge(crate::webhooks::routes())
         .merge(crate::integrations::routes())
         .merge(crate::teams::routes())
+        .merge(crate::team_admin::routes())
         .merge(crate::schemes::routes())
+        .merge(crate::roles::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(app)

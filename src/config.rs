@@ -59,6 +59,20 @@ impl Config {
         }
     }
 
+    /// Settings exactly as given (Go's defaults where they have none), without the environment: what a
+    /// connection test checks.
+    pub fn from_value(v: Value) -> Config {
+        let raw = with_defaults(&v);
+        Config {
+            cur: AtomicPtr::new(leak(raw.clone())),
+            raw: Mutex::new(raw),
+            env_paths: Mutex::new(vec![]),
+            source: String::new(),
+            saving: tokio::sync::Mutex::new(()),
+            diagnostic_id: String::new(),
+        }
+    }
+
     /// The settings in effect.
     pub fn value(&self) -> &'static Value {
         // SAFETY: every pointer stored is a leaked Box, never freed.
@@ -142,6 +156,14 @@ impl Config {
     }
     pub fn i64(&self, path: &str) -> i64 {
         self.get(path).as_i64().unwrap_or(0)
+    }
+    /// A boolean feature flag: the config's `FeatureFlags.<name>`, else the 12.1.0 default.
+    pub fn feature(&self, name: &str) -> bool {
+        match self.get(&format!("FeatureFlags.{name}")) {
+            Value::Bool(b) => *b,
+            Value::String(s) => s == "true",
+            _ => FEATURE_FLAGS.iter().any(|(k, v)| *k == name && *v == "true"),
+        }
     }
 
     /// `Config.Sanitize` without plugin manifests (plugins are off): secrets masked, plugin settings dropped.

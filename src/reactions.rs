@@ -173,14 +173,20 @@ async fn save_reaction(St(app): St<State>, Auth(s): Auth, Body(r): Body<Reaction
     Ok(Json(app.save_reaction(r).await?))
 }
 
-async fn get_reactions(St(app): St<State>, Auth(s): Auth, Path(post_id): Path<String>) -> ApiResult<Json<Vec<Reaction>>> {
+async fn get_reactions(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(post_id): Path<String>,
+) -> ApiResult<Json<Option<Vec<Reaction>>>> {
     if !is_valid_id(&post_id) {
         return Err(AppError::invalid_url_param("post_id"));
     }
     if !app.read_post_perm(&s, &post_id).await?.0 {
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
-    Ok(Json((*app.reactions_for_post(&post_id).await?).clone()))
+    // No reactions is Go's nil slice: `null`.
+    let list = app.reactions_for_post(&post_id).await?;
+    Ok(Json((!list.is_empty()).then(|| (*list).clone())))
 }
 
 async fn delete_reaction(

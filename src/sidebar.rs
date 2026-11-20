@@ -454,7 +454,7 @@ impl App {
     }
 
     /// `UpdateSidebarCategories` with its event and mutes.
-    async fn update_sidebar_categories(
+    pub(crate) async fn update_sidebar_categories(
         &self,
         user_id: &str,
         team_id: &str,

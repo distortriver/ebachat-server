@@ -14,7 +14,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State as St};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{Map, Value, json};
 
@@ -51,8 +51,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/redirect_location", get(redirect_location))
         .route("/api/v4/site_url/test", post(test_site_url))
         .route("/api/v4/email/test", post(test_email))
-        .route("/api/v4/file/s3_test", post(test_file_store))
-        .route("/api/v4/file/test", post(test_file_store))
         .route("/api/v4/permissions/ancillary", post(ancillary_permissions))
         .route("/api/v4/restart", post(restart))
         .route("/api/v4/license", post(add_license))
@@ -62,7 +60,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/jobs", get(jobs))
         .route("/api/v4/jobs/{job_id}", get(job))
         .route("/api/v4/jobs/type/{job_type}", get(jobs_by_type))
-        .route("/api/v4/users/{user_id}/status/custom/recent", delete(remove_recent_custom_status))
         .route("/manualtest", get(manual_test))
 }
 
@@ -650,8 +647,8 @@ async fn notices(Auth(_): Auth, Path(team_id): Path<String>, Query(q): Q) -> Api
         return Err(AppError::invalid_url_param("team_id"));
     }
     // NoticeClientTypeFromString
-    if !matches!(query(&q, "client"), "all" | "web" | "desktop" | "mobile-ios" | "mobile-android") {
-        return Err(AppError::invalid_param("client"));
+    if !matches!(query(&q, "client"), "web" | "desktop" | "mobile-ios" | "mobile-android") {
+        return Err(AppError::invalid_param("client").detail("Invalid client type supplied"));
     }
     Ok(json_raw(&json!([])))
 }
@@ -745,25 +742,6 @@ async fn test_email(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult
         Ok(Err(err)) => Err(AppError::internal("api.admin.test_email.failure", err.to_string())),
         Err(_) => Err(AppError::internal("api.admin.test_email.failure", "timeout")),
     }
-}
-
-/// `testFileStore`: the store the request's file settings describe must take a file and give it back.
-async fn test_file_store(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Json<Value>> {
-    let mut cfg = test_config(&app, &body);
-    app.require(&s, "test_s3").await?;
-    if has_nil_fields(&cfg, "FileSettings") {
-        return Err(AppError::bad_request("api.file.test_connection_settings_nil.app_error", ""));
-    }
-    crate::config::desanitize(app.cfg.value(), &mut cfg);
-    let files = crate::files::FileStore::new(&crate::config::Config::from_raw(cfg, String::new()))
-        .map_err(|e| AppError::internal("api.file.no_driver.app_error", e.to_string()))?;
-    let res = async {
-        files.write("testfile", Bytes::from_static(b"testingwrite")).await?;
-        files.remove("testfile").await
-    }
-    .await;
-    res.map_err(|e| AppError::internal("api.file.test_connection.app_error", e.to_string()))?;
-    Ok(ok())
 }
 
 /// `appendAncillaryPermissionsPost` (`data/ancillary_permissions.json`, Go's `SysconsoleAncillaryPermissions`).
@@ -1090,25 +1068,6 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
 }
 
 // ---------- leftovers ----------
-
-/// `removeUserRecentCustomStatus` (the `DELETE` form of `.../recent/delete`): Go checks the user id, whether
-/// custom statuses are on, then the body.
-async fn remove_recent_custom_status(
-    st: St<State>,
-    auth: Auth,
-    Path(user_id): Path<String>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
-    if user_id != "me" && !is_valid_id(&user_id) {
-        return Err(AppError::invalid_url_param("user_id"));
-    }
-    if !st.0.cfg.bool("TeamSettings.EnableCustomUserStatuses") {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.custom_status.disabled", ""));
-    }
-    let cs: crate::user_edit::CustomStatus = serde_json::from_slice(&body)
-        .map_err(|e| AppError::invalid_param("recent_custom_status").detail(e.to_string()))?;
-    crate::user_edit::remove_recent_custom_status(st, auth, Path(user_id), crate::app::Body(cs)).await
-}
 
 /// `/manualtest`: Go's manual testing page, whose template a server build does not ship.
 async fn manual_test() -> Response {

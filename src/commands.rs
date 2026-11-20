@@ -75,7 +75,7 @@ impl Command {
 }
 
 /// The built-ins Go registers on a server without a license, plugins or testing (`commandProviders`).
-fn builtins() -> &'static [Command] {
+pub(crate) fn builtins() -> &'static [Command] {
     static B: OnceLock<Vec<Command>> = OnceLock::new();
     B.get_or_init(|| serde_json::from_str(include_str!("../data/builtin_commands.json")).unwrap_or_default())
 }

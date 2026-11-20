@@ -200,8 +200,8 @@ async fn by_name(St(app): St<State>, _: Auth, Path(name): Path<String>) -> ApiRe
     Ok(Json((*e).clone()))
 }
 
-async fn by_names(St(app): St<State>, _: Auth, Body(mut names): Body<Vec<String>>) -> ApiResult<Json<Vec<Emoji>>> {
-    names.sort();
+async fn by_names(St(app): St<State>, _: Auth, body: axum::body::Bytes) -> ApiResult<Json<Vec<Emoji>>> {
+    let mut names = crate::posts::sorted_array_from_json(&body)?;
     if names.is_empty() {
         return Err(AppError::invalid_param("names"));
     }
@@ -292,14 +292,20 @@ async fn image(St(app): St<State>, _: Auth, Path(id): Path<String>) -> ApiResult
 // ---------- writes ----------
 
 /// `createEmoji`: multipart `emoji` (JSON) and `image`.
-async fn create(St(app): St<State>, Auth(s): Auth, mut form: Multipart) -> ApiResult<Json<Emoji>> {
+async fn create(
+    St(app): St<State>,
+    Auth(s): Auth,
+    form: Result<Multipart, axum::extract::multipart::MultipartRejection>,
+) -> ApiResult<Json<Emoji>> {
     app.emoji_on()?;
+    let parse_err = |e: String| AppError::bad_request("api.emoji.create.parse.app_error", "").detail(e);
+    // `ParseMultipartForm` fails before the permission check: not a multipart body.
+    let mut form = form.map_err(|e| parse_err(e.body_text()))?;
     if !app.perm_anywhere(&s, perm::CREATE_EMOJIS).await {
         return Err(AppError::forbidden_perm(perm::CREATE_EMOJIS));
     }
     let mut emoji_json = None;
     let mut image: Option<(String, Vec<u8>)> = None;
-    let parse_err = |e: String| AppError::bad_request("api.emoji.create.parse.app_error", "").detail(e);
     while let Some(field) = form.next_field().await.map_err(|e| parse_err(e.to_string()))? {
         match field.name() {
             Some("emoji") => emoji_json = Some(field.text().await.map_err(|e| parse_err(e.to_string()))?),

@@ -197,8 +197,13 @@ async fn onboarding(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>>
 }
 
 /// `getRolesByNames` through the role cache.
-async fn roles_by_names(St(app): St<State>, _: Auth, Body(mut names): Body<Vec<String>>) -> ApiResult<Json<Vec<Role>>> {
+async fn roles_by_names(St(app): St<State>, _: Auth, body: axum::body::Bytes) -> ApiResult<Json<Vec<Role>>> {
+    // `SortedArrayFromJSON`: a bad body is a payload error, duplicates dropped.
+    let mut names: Vec<String> = serde_json::from_slice::<Option<Vec<String>>>(&body)
+        .map_err(|e| AppError::bad_request("api.payload.parse.error", "").detail(e.to_string()))?
+        .unwrap_or_default();
     names.sort();
+    names.dedup();
     if names.is_empty() {
         return Err(AppError::invalid_param("rolenames"));
     }

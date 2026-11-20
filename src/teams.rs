@@ -219,7 +219,7 @@ impl App {
     }
 
     /// `DefaultChannelNames`.
-    fn default_channel_names(&self) -> Vec<String> {
+    pub(crate) fn default_channel_names(&self) -> Vec<String> {
         let mut names = vec!["town-square".to_string()];
         let extra: Vec<String> = self
             .cfg
@@ -695,12 +695,16 @@ async fn members_by_ids(
     St(app): St<State>,
     Auth(s): Auth,
     Path(team_id): Path<String>,
-    Body(mut ids): Body<Vec<String>>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<Vec<TeamMember>>> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
+    // `SortedArrayFromJSON`.
+    let mut ids: Vec<String> = serde_json::from_slice(&body)
+        .map_err(|e| AppError::bad_request("api.payload.parse.error", "").detail(e.to_string()))?;
     ids.sort();
+    ids.dedup();
     if ids.is_empty() {
         return Err(AppError::invalid_param("user_ids"));
     }

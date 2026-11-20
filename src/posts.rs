@@ -54,6 +54,7 @@ pub fn routes() -> Router<State> {
         .merge(crate::reactions::routes())
         .merge(crate::drafts::routes())
         .merge(crate::search::routes())
+        .merge(crate::posts_more::routes())
 }
 
 // ---------- rows ----------
@@ -1361,6 +1362,9 @@ impl App {
         if let Err(e) = crate::notify::send_notifications(self, &rpost, c, &user, parent.as_ref(), flags.set_online).await {
             eprintln!("send notifications for {}: {}", rpost.id, e.detailed_error);
         }
+        if flags.trigger_webhooks {
+            crate::outgoing::post_created(&rpost, c, &user);
+        }
         if let Some(ep) = ephemeral {
             self.send_ephemeral(&user.id, ep).await;
         }
@@ -2075,7 +2079,19 @@ async fn get_post(
     Ok(Json(app.sanitize_for_user(p, &s.user_id).await))
 }
 
-async fn posts_by_ids(St(app): St<State>, Auth(s): Auth, Body(ids): Body<Vec<String>>) -> ApiResult<Json<Vec<Post>>> {
+/// `model.SortedArrayFromJSON`: a JSON array of strings (`null` is empty), sorted without duplicates, or Go's
+/// payload error.
+pub fn sorted_array_from_json(body: &[u8]) -> ApiResult<Vec<String>> {
+    let mut v: Vec<String> = serde_json::from_slice::<Option<Vec<String>>>(body)
+        .map_err(|e| AppError::bad_request("api.payload.parse.error", "").detail(e.to_string()))?
+        .unwrap_or_default();
+    v.sort();
+    v.dedup();
+    Ok(v)
+}
+
+async fn posts_by_ids(St(app): St<State>, Auth(s): Auth, body: axum::body::Bytes) -> ApiResult<Json<Vec<Post>>> {
+    let ids = sorted_array_from_json(&body)?;
     if ids.is_empty() {
         return Err(AppError::invalid_param("post_ids"));
     }
@@ -2397,8 +2413,9 @@ async fn edit_history(St(app): St<State>, Auth(s): Auth, Path(post_id): Path<Str
     if !is_valid_id(&post_id) {
         return Err(AppError::invalid_url_param("post_id"));
     }
-    let post = app.single_post(&post_id, false).await?;
-    if post.user_id != s.user_id {
+    // A missing post is a permission error, as in Go.
+    let post = app.single_post(&post_id, false).await.map_err(|_| AppError::forbidden_perm(perm::EDIT_POST))?;
+    if !app.channel_perm(&s, &post.channel_id, perm::EDIT_POST).await?.0 || post.user_id != s.user_id {
         return Err(AppError::forbidden_perm(perm::EDIT_POST));
     }
     let sql = format!("SELECT {}, 0::bigint AS replycount FROM Posts p WHERE p.OriginalId = $1 ORDER BY p.EditAt DESC", pc("p"));
@@ -2425,14 +2442,27 @@ async fn restore_version(
     if !is_valid_id(&version_id) {
         return Err(AppError::invalid_url_param("restore_version_id"));
     }
-    let post = app.single_post(&post_id, false).await?;
-    if post.user_id != s.user_id {
-        return Err(AppError::forbidden_perm(perm::EDIT_POST));
+    // The version first, then `postPatchChecks`; anything missing is a permission error, as in Go.
+    let forbidden = || AppError::forbidden_perm(perm::EDIT_POST);
+    let v = app.get_single_post(&version_id, true).await?.ok_or_else(forbidden)?;
+    if v.user_id != s.user_id {
+        return Err(forbidden());
+    }
+    let post = app.single_post(&post_id, false).await.map_err(|_| forbidden())?;
+    let permission = if s.user_id == post.user_id { perm::EDIT_POST } else { perm::EDIT_OTHERS_POSTS };
+    if !app.channel_perm(&s, &post.channel_id, permission).await?.0 {
+        return Err(AppError::forbidden_perm(permission));
     }
     check_create_post(&app, &s, &post.channel_id).await?;
-    let v = app.get_single_post(&version_id, true).await?.filter(|v| v.original_id == post_id).ok_or_else(|| {
+    if edit_time_expired(&app, &post) {
+        return Err(AppError::bad_request("api.post.update_post.permissions_time_limit.app_error", "Post edit is only allowed for a limited time."));
+    }
+    let v = Some(v).filter(|v| v.original_id == post_id).ok_or_else(|| {
         AppError::bad_request("app.post.restore_post_version.not_an_history_item.app_error", "The provided post version is not part of the post's edit history.")
     })?;
+    if v.delete_at == 0 {
+        return Err(AppError::bad_request("app.post.restore_post_version.not_valid_post_history_item.app_error", ""));
+    }
     let patch = PostPatch { message: Some(v.message), file_ids: Some(v.file_ids.0), ..Default::default() };
     Ok(Json(app.patch_post(&s, &post_id, patch).await?))
 }
@@ -2751,18 +2781,22 @@ async fn posts_around_unread(
     if !is_valid_id(&channel_id) {
         return Err(AppError::invalid_url_param("channel_id"));
     }
-    if user_id != s.user_id {
-        return Err(AppError::forbidden_perm(perm::EDIT_OTHER_USERS));
+    if !is_valid_id(&user_id) {
+        return Err(AppError::invalid_url_param("user_id"));
     }
-    let num = |v: &Option<String>, d: i64| v.as_deref().and_then(|x| x.parse::<i64>().ok()).unwrap_or(d);
-    let before = num(&q.limit_before, 60);
-    let after = num(&q.limit_after, 60);
-    if !(0..=200).contains(&before) || !(1..=200).contains(&after) {
-        return Err(AppError::invalid_url_param("limit_before"));
-    }
+    app.require_user(&s, &user_id).await?;
     let c = app.channel_or_404(&channel_id).await?;
-    if !app.user_read_channel(&s.user_id, &c).await.0 {
+    if !app.can_read_channel(&s, &c).await?.0 {
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
+    }
+    // `web.Params`: a bad or negative limit is the default, a big one the maximum.
+    let num = |v: &Option<String>| match v.as_deref().and_then(|x| x.parse::<i64>().ok()) {
+        Some(n) if n >= 0 => n.min(200),
+        _ => 60,
+    };
+    let (before, after) = (num(&q.limit_before), num(&q.limit_after));
+    if after == 0 {
+        return Err(AppError::invalid_url_param("limit_after"));
     }
     let crt = parse_bool(&q.collapsed_threads).unwrap_or(false);
     let o = GetPostsOpts {
