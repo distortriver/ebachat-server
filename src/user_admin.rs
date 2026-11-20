@@ -1310,30 +1310,9 @@ async fn sso_code_exchange() -> Response {
     r
 }
 
-/// `loginWithDesktopToken`: desktop tokens are made by the OAuth/SAML login, which this server does not do.
-async fn desktop_token(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value>> {
-    let token = map_from_json(&body).remove("token").unwrap_or_default();
-    let found: Option<(String,)> =
-        sqlx::query_as("SELECT UserId FROM DesktopTokens WHERE Token = $1 AND CreateAt >= $2")
-            .bind(&token)
-            .bind(now_ms() / 1000 - 3 * 60)
-            .fetch_optional(&app.db)
-            .await
-            .unwrap_or(None);
-    if let Some((user_id,)) = found {
-        let _ = sqlx::query("DELETE FROM DesktopTokens WHERE Token = $1").bind(&token).execute(&app.db).await;
-        let user = get_user(&app, &user_id).await?;
-        let sso = matches!(user.auth_service.as_str(), "gitlab" | "google" | "office365" | "openid" | "saml");
-        if !sso {
-            return Err(AppError::new(
-                StatusCode::UNAUTHORIZED,
-                "api.user.login_with_desktop_token.not_oauth_or_saml_user.app_error",
-                "",
-            ));
-        }
-        return Err(AppError::not_implemented("SSO login"));
-    }
-    Err(AppError::new(StatusCode::UNAUTHORIZED, "app.desktop_token.validate.invalid", ""))
+/// `loginWithDesktopToken`: the desktop app's session after an SSO sign-in in the browser (`src/sso.rs`).
+async fn desktop_token(St(app): St<State>, headers: axum::http::HeaderMap, body: Bytes) -> ApiResult<Response> {
+    crate::sso::login_with_desktop_token(&app, &headers, &body).await
 }
 
 /// `loginCWS`: Cloud only.
@@ -1353,13 +1332,19 @@ struct SwitchRequest {
     new_service: String,
     email: String,
     password: String,
+    new_password: String,
     mfa_code: String,
 }
 
-/// `switchAccountType`: no SSO provider or LDAP is set up on an unlicensed server, so every switch ends in the
-/// provider's "not available" after Go's own checks. (Go revokes every session of the user before finding out
-/// LDAP is unavailable for email to LDAP; this server does not.)
-async fn switch_account(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes) -> ApiResult<Json<Value>> {
+/// `switchAccountType`: email to GitLab (or SAML) answers the provider's sign-in link (`src/sso.rs`); LDAP is
+/// not available on an unlicensed server. (Go revokes every session of the user before finding out LDAP is
+/// unavailable for email to LDAP; this server does not.)
+async fn switch_account(
+    St(app): St<State>,
+    MaybeAuth(s): MaybeAuth,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
     let r: SwitchRequest = decode_json(&body, "switch_request")?;
     const OAUTH: &[&str] = &["saml", "gitlab", "google", "office365", "openid"];
     let email_to_oauth = r.current_service == "email" && OAUTH.contains(&r.new_service.as_str());
@@ -1377,11 +1362,13 @@ async fn switch_account(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes
                 "",
             ));
         }
-        return Err(AppError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "api.user.get_authorization_code.endpoint.app_error",
-            "",
-        ));
+        let (link, cookie) = crate::sso::switch_email_to_oauth(&app, &headers, &r.email, &r.new_service).await?;
+        let mut resp = crate::sso::go_map_json(&BTreeMap::from([("follow_link".to_string(), link)])).into_response();
+        resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Some(c) = cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
+            resp.headers_mut().append(header::SET_COOKIE, c);
+        }
+        return Ok(resp);
     }
     if oauth_to_email {
         let s = s.ok_or_else(crate::app::invalid_token)?;
@@ -1399,9 +1386,10 @@ async fn switch_account(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes
         if !OAUTH.contains(&user.auth_service.as_str()) {
             return Err(AppError::bad_request("api.user.oauth_to_email.not_oauth_user.app_error", ""));
         }
-        app.set_password(&user, &r.password, None).await?;
+        app.set_password(&user, &r.new_password, None).await?;
+        app.revoke_all_sessions(&s.user_id).await?;
         crate::audit::log(&app, Some(&s), "success").await;
-        return Ok(Json(json!({"follow_link": "/login?extra=signin_change"})));
+        return Ok(Json(json!({"follow_link": "/login?extra=signin_change"})).into_response());
     }
     if ldap_to_email {
         email_login_available(&app)?;

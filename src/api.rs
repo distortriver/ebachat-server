@@ -12,11 +12,15 @@ use crate::app::{AppError, State};
 async fn not_found(
     axum::extract::State(app): axum::extract::State<State>,
     method: axum::http::Method,
+    headers: axum::http::HeaderMap,
     uri: Uri,
 ) -> axum::response::Response {
     let api = uri.path().starts_with("/api/");
     if !api && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
-        return crate::web::root(&app).await;
+        return crate::web::root_for(&app, &headers, &uri).await;
+    }
+    if !api {
+        return crate::web::router_not_found();
     }
     route_not_found(uri.path()).into_response()
 }
@@ -43,6 +47,9 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     use axum::http::HeaderValue;
     let get = req.method() == axum::http::Method::GET;
     let mut r = next.run(req).await;
+    if r.extensions().get::<crate::web::Raw>().is_some() {
+        return r;
+    }
     let h = r.headers_mut();
     if !h.contains_key("x-request-id") {
         h.insert("x-request-id", HeaderValue::from_str(&crate::app::new_id()).unwrap());
@@ -51,7 +58,9 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     h.insert("permissions-policy", HeaderValue::from_static(""));
     h.entry("x-content-type-options").or_insert(HeaderValue::from_static("nosniff"));
     h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    if get && !h.contains_key("expires") && !h.contains_key("cache-control") {
+    let static_file = r.extensions().get::<crate::web::NoExpires>().is_some();
+    let h = r.headers_mut();
+    if get && !static_file && !h.contains_key("expires") && !h.contains_key("cache-control") {
         h.insert("expires", HeaderValue::from_static("0"));
     }
     r
@@ -91,6 +100,8 @@ fn routes(app: State) -> Router {
         .merge(crate::tokens::routes())
         .merge(crate::bots::routes())
         .merge(crate::oauth::routes())
+        .merge(crate::oauth_provider::routes())
+        .merge(crate::sso::routes())
         .merge(crate::terms::routes())
         .merge(crate::system::routes())
         .merge(crate::config_api::routes())

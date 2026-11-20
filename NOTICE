@@ -3,3 +3,10 @@ ebachat-server
 Parts of this program are based on the Mattermost server
 (https://github.com/mattermost/mattermost), Copyright (c) 2015-present Mattermost, Inc.,
 used under the GNU Affero General Public License v3.0.
+
+The files in templates/ (unsupported_browser.html, unsupported_browser.js, unsupported_desktop_app.html) are
+copied from the Mattermost server's server/templates/, Copyright (c) 2015-present Mattermost, Inc., used under
+the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+The browser detection in src/unsupported.rs follows github.com/avct/uasurfer, Copyright 2015 Avocet Systems
+Ltd., used under the Apache License, Version 2.0.

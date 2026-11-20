@@ -118,8 +118,17 @@ fn gz_cache() -> &'static GzCache {
     C.get_or_init(GzCache::default)
 }
 
-/// `staticFilesHandler(http.StripPrefix(..., http.FileServer(http.Dir(dir))))` under `gzhttp.GzipHandler`.
+/// `staticFilesHandler(http.StripPrefix(..., http.FileServer(http.Dir(dir))))` under `gzhttp.GzipHandler`: Go's
+/// `http.ServeContent` (conditional requests, ranges), and a full 200 answer gzip-compressed when the client takes it.
 async fn serve(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, head: bool) -> Response {
+    let mut r = serve_static(dir, rel, req_path, headers, head).await;
+    // gzhttp adds it before anything else, whatever the answer.
+    r.headers_mut().append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    r.extensions_mut().insert(NoExpires);
+    r
+}
+
+async fn serve_static(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, head: bool) -> Response {
     if req_path.ends_with('/') {
         return not_found();
     }
@@ -135,45 +144,241 @@ async fn serve(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, hea
     if last == "index.html" {
         return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, "./")]).into_response();
     }
-    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let last_modified = httpdate::fmt_http_date(mtime);
     let cache_control =
         if last == "remote_entry.js" { "no-cache, max-age=31556926, public" } else { "max-age=31556926, public" };
-    let mut base = HeaderMap::new();
-    base.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
-    base.insert(header::LAST_MODIFIED, HeaderValue::from_str(&last_modified).unwrap());
-    let unmodified = headers
-        .get(header::IF_MODIFIED_SINCE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| httpdate::parse_http_date(v).ok())
-        .is_some_and(|since| {
-            let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            secs(mtime) <= secs(since)
-        });
-    if unmodified {
-        return (StatusCode::NOT_MODIFIED, base).into_response();
-    }
-    let Ok(data) = tokio::fs::read(&file).await else { return not_found() };
     let ct = content_type(last);
-    base.insert(header::CONTENT_TYPE, HeaderValue::from_str(&ct).unwrap());
-    base.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    let mut r = serve_file(&file, headers, head, Some(&ct)).await;
+    if r.status() == StatusCode::NOT_FOUND {
+        return not_found();
+    }
+    // `serveError` drops the cache headers of a 416.
+    if r.status() != StatusCode::RANGE_NOT_SATISFIABLE {
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    }
+    if r.status() != StatusCode::OK || head {
+        return r;
+    }
     let gzip_ok = headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.split(',').any(|e| e.trim().split(';').next() == Some("gzip")));
+    let len = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok());
     // `gzhttp.DefaultMinSize`: smaller bodies go out as they are.
-    let body: Vec<u8> = if gzip_ok && data.len() >= 1024 && compressible(&ct) {
-        base.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        gz_cache().get(&file, mtime, &data).as_ref().clone()
+    if !(gzip_ok && len.is_some_and(|l| l >= 1024) && compressible(&ct)) {
+        return r;
+    }
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let (mut parts, body) = r.into_parts();
+    let data = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let gz = gz_cache().get(&file, mtime, &data);
+    parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    parts.headers.remove(header::ACCEPT_RANGES);
+    parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(gz.len()));
+    Response::from_parts(parts, axum::body::Body::from(gz.as_ref().clone()))
+}
+
+/// `http.ServeFile`/`http.ServeContent` for one file: `Last-Modified`, the preconditions of RFC 7232 (no ETag),
+/// and byte ranges (one range as a 206 with `Content-Range`, several as `multipart/byteranges`). `content_type`
+/// is what the handler set before; without one, Go's type for the extension.
+pub async fn serve_file(file: &std::path::Path, headers: &HeaderMap, head: bool, content_type: Option<&str>) -> Response {
+    let Ok(meta) = tokio::fs::metadata(file).await else { return not_found() };
+    if meta.is_dir() {
+        return not_found();
+    }
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut base = HeaderMap::new();
+    let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let zero_time = secs(mtime) == 0;
+    if !zero_time {
+        base.insert(header::LAST_MODIFIED, HeaderValue::from_str(&httpdate::fmt_http_date(mtime)).unwrap());
+    }
+    let hdr = |n: header::HeaderName| headers.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let date = |v: &str| httpdate::parse_http_date(v).ok().map(secs);
+    // checkPreconditions: If-Match / If-Unmodified-Since, If-None-Match / If-Modified-Since, If-Range.
+    let if_match = hdr(header::IF_MATCH);
+    let precondition_failed = if !if_match.is_empty() {
+        !etag_list_has_star(&if_match)
     } else {
-        base.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-        data
+        let ius = hdr(header::IF_UNMODIFIED_SINCE);
+        !ius.is_empty() && !zero_time && date(&ius).is_some_and(|t| secs(mtime) > t)
     };
+    if precondition_failed {
+        return (StatusCode::PRECONDITION_FAILED, base).into_response();
+    }
+    let inm = hdr(header::IF_NONE_MATCH);
+    let not_modified = if !inm.is_empty() {
+        etag_list_has_star(&inm)
+    } else {
+        let ims = hdr(header::IF_MODIFIED_SINCE);
+        !ims.is_empty() && !zero_time && date(&ims).is_some_and(|t| secs(mtime) <= t)
+    };
+    if not_modified {
+        return (StatusCode::NOT_MODIFIED, base).into_response();
+    }
+    let mut range = hdr(header::RANGE);
+    let if_range = hdr(header::IF_RANGE);
+    if !range.is_empty() && !if_range.is_empty() {
+        // No ETag is ever set, so an entity tag never matches; a date must be the modification time.
+        let ok = !scan_etag(&if_range) && !zero_time && date(&if_range) == Some(secs(mtime));
+        if !ok {
+            range.clear();
+        }
+    }
+    let ct = match content_type {
+        Some(c) => c.to_string(),
+        None => content_type_of(file),
+    };
+    let Ok(data) = tokio::fs::read(file).await else { return not_found() };
+    let size = data.len() as u64;
+    let ranges = match parse_range(&range, size) {
+        Ok(r) => r,
+        Err(true) if size == 0 => vec![],
+        Err(no_overlap) => {
+            let mut h = HeaderMap::new();
+            if no_overlap {
+                h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{size}")).unwrap());
+            }
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+            h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            let msg = if no_overlap { "invalid range: failed to overlap\n" } else { "invalid range\n" };
+            return (StatusCode::RANGE_NOT_SATISFIABLE, h, msg).into_response();
+        }
+    };
+    let ranges = if ranges.iter().map(|r| r.1).sum::<u64>() > size { vec![] } else { ranges };
+    base.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    let (status, body): (StatusCode, Vec<u8>) = match ranges.len() {
+        0 => (StatusCode::OK, data),
+        1 => {
+            let (start, len) = ranges[0];
+            let cr = format!("bytes {}-{}/{size}", start, start + len - 1);
+            base.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).unwrap());
+            (StatusCode::PARTIAL_CONTENT, data[start as usize..(start + len) as usize].to_vec())
+        }
+        _ => {
+            let boundary = multipart_boundary();
+            let mut out = Vec::new();
+            for (i, (start, len)) in ranges.iter().enumerate() {
+                let sep = if i == 0 { "" } else { "\r\n" };
+                let end = start + len - 1;
+                let head = format!("{sep}--{boundary}\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Type: {ct}\r\n\r\n");
+                out.extend_from_slice(head.as_bytes());
+                out.extend_from_slice(&data[*start as usize..(*start + *len) as usize]);
+            }
+            out.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            let mp = format!("multipart/byteranges; boundary={boundary}");
+            base.insert(header::CONTENT_TYPE, HeaderValue::from_str(&mp).unwrap());
+            (StatusCode::PARTIAL_CONTENT, out)
+        }
+    };
+    if !base.contains_key(header::CONTENT_TYPE) {
+        base.insert(header::CONTENT_TYPE, HeaderValue::from_str(&ct).unwrap_or(HeaderValue::from_static("text/plain")));
+    }
     base.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
     if head {
-        return (StatusCode::OK, base).into_response();
+        return (status, base).into_response();
     }
-    (StatusCode::OK, base, body).into_response()
+    (status, base, body).into_response()
+}
+
+/// Go's type for a file's extension (`mime.TypeByExtension`), as `serveContent` picks it.
+fn content_type_of(file: &std::path::Path) -> String {
+    content_type(&file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+}
+
+/// `checkIfMatch` / `checkIfNoneMatch` for a file without an ETag: only `*` matches.
+fn etag_list_has_star(v: &str) -> bool {
+    let mut s = v;
+    loop {
+        s = s.trim_matches([' ', '\t']);
+        if s.is_empty() {
+            return false;
+        }
+        if let Some(rest) = s.strip_prefix(',') {
+            s = rest;
+            continue;
+        }
+        if s.starts_with('*') {
+            return true;
+        }
+        match scan_etag_rest(s) {
+            Some(rest) => s = rest,
+            None => return false,
+        }
+    }
+}
+
+/// `scanETag`: whether the value starts with a valid entity tag.
+fn scan_etag(s: &str) -> bool {
+    scan_etag_rest(s.trim_matches([' ', '\t'])).is_some()
+}
+
+fn scan_etag_rest(s: &str) -> Option<&str> {
+    let start = if s.starts_with("W/") { 2 } else { 0 };
+    let b = s.as_bytes();
+    if b.len() < start + 2 || b[start] != b'"' {
+        return None;
+    }
+    for (i, &c) in b.iter().enumerate().skip(start + 1) {
+        match c {
+            b'"' => return Some(&s[i + 1..]),
+            0x21 | 0x23..=0x7e | 0x80..=0xff => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// `parseRange`: (start, length) pairs; `Err(true)` when no range overlaps the content, `Err(false)` when the
+/// header is malformed.
+fn parse_range(s: &str, size: u64) -> Result<Vec<(u64, u64)>, bool> {
+    if s.is_empty() {
+        return Ok(vec![]);
+    }
+    let Some(spec) = s.strip_prefix("bytes=") else { return Err(false) };
+    let mut out = vec![];
+    let mut no_overlap = false;
+    for ra in spec.split(',') {
+        let ra = ra.trim_matches([' ', '\t']);
+        if ra.is_empty() {
+            continue;
+        }
+        let Some((start, end)) = ra.split_once('-') else { return Err(false) };
+        let (start, end) = (start.trim_matches([' ', '\t']), end.trim_matches([' ', '\t']));
+        let int = |v: &str| v.parse::<i64>().ok();
+        if start.is_empty() {
+            if end.is_empty() || end.starts_with('-') {
+                return Err(false);
+            }
+            let i = (int(end).filter(|i| *i >= 0).ok_or(false)? as u64).min(size);
+            out.push((size - i, i));
+        } else {
+            let i = int(start).filter(|i| *i >= 0).ok_or(false)? as u64;
+            if i >= size {
+                no_overlap = true;
+                continue;
+            }
+            let len = if end.is_empty() {
+                size - i
+            } else {
+                let e = int(end).ok_or(false)?;
+                if (i as i64) > e {
+                    return Err(false);
+                }
+                (e as u64).min(size - 1) - i + 1
+            };
+            out.push((i, len));
+        }
+    }
+    if no_overlap && out.is_empty() {
+        return Err(true);
+    }
+    Ok(out)
+}
+
+/// `multipart.Writer`'s random boundary: 30 random bytes in hex.
+fn multipart_boundary() -> String {
+    let b: [u8; 30] = rand::random();
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 async fn static_files(Path(rel): Path<String>, req: Request) -> Response {
@@ -194,14 +399,77 @@ async fn robots(req: Request) -> Response {
     if req.uri().path().ends_with('/') {
         return not_found();
     }
-    "User-agent: *\nDisallow: /\n".into_response()
+    // Served by Go's main router directly: none of `web.Handler`'s headers.
+    let mut r = "User-agent: *\nDisallow: /\n".into_response();
+    r.extensions_mut().insert(Raw);
+    r
+}
+
+/// Marks an answer the Go router writes itself, outside `web.Handler`: none of its headers are added.
+#[derive(Clone, Copy)]
+pub struct Raw;
+
+/// Marks a static file answer: Go's static handler never adds `Expires: 0`, whatever the status.
+#[derive(Clone, Copy)]
+pub struct NoExpires;
+
+/// The Go router's own 404 for a path outside `/api/` that no route takes with this method (only GET and HEAD
+/// reach the client's page): `http.NotFound`.
+pub fn router_not_found() -> Response {
+    let mut r = (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    r.extensions_mut().insert(Raw);
+    r
+}
+
+/// `unsupportedBrowserScriptHandler`: the script of the unsupported-browser page, from the templates directory
+/// (`EBACHAT_TEMPLATES_DIR`, default `templates/`) as `http.ServeFile` serves it, or the built-in copy.
+async fn unsupported_browser_js(req: Request) -> Response {
+    // Go's main router serves it directly: none of `web.Handler`'s headers.
+    let mut r = unsupported_browser_js_file(req).await;
+    r.extensions_mut().insert(Raw);
+    r
+}
+
+async fn unsupported_browser_js_file(req: Request) -> Response {
+    if req.uri().path().ends_with('/') {
+        let mut r = (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
+        r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+        return r;
+    }
+    let dir = PathBuf::from(std::env::var("EBACHAT_TEMPLATES_DIR").unwrap_or_else(|_| "templates".into()));
+    let file = dir.join("unsupported_browser.js");
+    let head = req.method() == Method::HEAD;
+    if tokio::fs::metadata(&file).await.is_ok() {
+        return serve_file(&file, req.headers(), head, None).await;
+    }
+    let body = crate::unsupported::BROWSER_SCRIPT;
+    let mut r = if head { StatusCode::OK.into_response() } else { body.into_response() };
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/javascript; charset=utf-8"));
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+    r
+}
+
+/// `root` for a request: an old browser or desktop app gets its page instead of the client.
+pub async fn root_for(app: &State, headers: &HeaderMap, uri: &axum::http::Uri) -> Response {
+    match crate::unsupported::page_for(app, headers, uri) {
+        Some(r) => static_headers(app, r),
+        None => root(app).await,
+    }
 }
 
 /// `root`: the web client's page with the site's name and description, for every GET or HEAD outside `/api/`,
 /// with the headers of Go's static handler (`NewStaticHandler`): no framing by other origins, and the script
 /// policy root.html also states.
 pub async fn root(app: &State) -> Response {
-    let mut r = root_page(app).await;
+    static_headers(app, root_page(app).await)
+}
+
+fn static_headers(app: &App, mut r: Response) -> Response {
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
     if let Ok(v) = HeaderValue::from_str(&content_security_policy(app)) {
@@ -265,7 +533,7 @@ async fn root_page(app: &State) -> Response {
 }
 
 /// Go's `html.EscapeString` (and `template.HTMLEscapeString`).
-fn html_escape(s: &str) -> String {
+pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('\'', "&#39;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&#34;")
 }
 
@@ -385,9 +653,11 @@ pub fn routes() -> axum::Router<State> {
     use axum::routing::get;
     axum::Router::new()
         .route("/login/sso/saml", get(saml).post(saml))
-        .route("/static/plugins/{*rel}", get(static_plugins))
-        .route("/static/{*rel}", get(static_files))
-        .route("/robots.txt", get(robots))
+        // Go's file servers answer every method as GET.
+        .route("/static/plugins/{*rel}", axum::routing::any(static_plugins))
+        .route("/static/{*rel}", axum::routing::any(static_files))
+        .route("/robots.txt", axum::routing::any(robots))
+        .route("/unsupported_browser.js", axum::routing::any(unsupported_browser_js))
 }
 
 #[cfg(test)]

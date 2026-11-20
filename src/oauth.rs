@@ -54,7 +54,7 @@ pub struct OAuthApp {
     pub is_dynamically_registered: bool,
 }
 
-const SELECT: &str = "SELECT o.Id AS id, COALESCE(o.CreatorId, '') AS creator_id, COALESCE(o.CreateAt, 0) AS create_at,
+pub(crate) const SELECT: &str = "SELECT o.Id AS id, COALESCE(o.CreatorId, '') AS creator_id, COALESCE(o.CreateAt, 0) AS create_at,
     COALESCE(o.UpdateAt, 0) AS update_at, COALESCE(o.ClientSecret, '') AS client_secret, COALESCE(o.Name, '') AS name,
     COALESCE(o.Description, '') AS description, COALESCE(o.IconURL, '') AS icon_url,
     COALESCE(o.CallbackUrls, '') AS callback_urls, COALESCE(o.Homepage, '') AS homepage,
@@ -231,7 +231,7 @@ async fn create(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Res
     .await
     .map_err(|e| AppError::internal("app.oauth.save_app.save.app_error", e.to_string()))?;
     crate::audit::log(&app, Some(&s), &format!("client_id={}", a.id)).await;
-    Ok((StatusCode::CREATED, Json(a)).into_response())
+    Ok(crate::oauth_provider::go_encode(StatusCode::CREATED, &a))
 }
 
 fn require_app_id(id: &str) -> ApiResult<()> {
@@ -248,7 +248,7 @@ async fn managed(app: &App, s: &crate::model::Session, id: &str) -> ApiResult<OA
 }
 
 /// `updateOAuthApp`.
-async fn update(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<OAuthApp>> {
+async fn update(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body: Bytes) -> ApiResult<crate::oauth_provider::GoJson<OAuthApp>> {
     require_app_id(&id)?;
     crate::audit::log(&app, Some(&s), "attempt").await;
     app.require(&s, MANAGE_OAUTH).await?;
@@ -267,7 +267,7 @@ async fn update(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body:
     a.is_dynamically_registered = old.is_dynamically_registered;
     let a = app.store_oauth_app(a).await?;
     crate::audit::log(&app, Some(&s), "success").await;
-    Ok(Json(a))
+    Ok(crate::oauth_provider::GoJson(a))
 }
 
 /// `getOAuthApps`: all of them with `manage_system_wide_oauth`, else one's own.
@@ -296,16 +296,16 @@ async fn list(
 }
 
 /// `getOAuthApp`.
-async fn get_one(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<OAuthApp>> {
+async fn get_one(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<crate::oauth_provider::GoJson<OAuthApp>> {
     require_app_id(&id)?;
     app.require(&s, MANAGE_OAUTH).await?;
-    Ok(Json(managed(&app, &s, &id).await?))
+    Ok(crate::oauth_provider::GoJson(managed(&app, &s, &id).await?))
 }
 
 /// `getOAuthAppInfo`: any user, without the secret.
-async fn info(St(app): St<State>, _: Auth, Path(id): Path<String>) -> ApiResult<Json<OAuthApp>> {
+async fn info(St(app): St<State>, _: Auth, Path(id): Path<String>) -> ApiResult<crate::oauth_provider::GoJson<OAuthApp>> {
     require_app_id(&id)?;
-    Ok(Json(app.oauth_app(&id).await?.sanitize()))
+    Ok(crate::oauth_provider::GoJson(app.oauth_app(&id).await?.sanitize()))
 }
 
 /// `deleteOAuthApp`: the app, the sessions and access data it granted, and its authorizations. Go then
@@ -345,7 +345,7 @@ async fn delete(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> Ap
 }
 
 /// `regenerateOAuthAppSecret`.
-async fn regen_secret(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<OAuthApp>> {
+async fn regen_secret(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<crate::oauth_provider::GoJson<OAuthApp>> {
     require_app_id(&id)?;
     app.require(&s, MANAGE_OAUTH).await?;
     let mut a = managed(&app, &s, &id).await?;
@@ -356,7 +356,7 @@ async fn regen_secret(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>)
     a.client_secret = new_id();
     let a = app.store_oauth_app(a).await?;
     crate::audit::log(&app, Some(&s), "success").await;
-    Ok(Json(a))
+    Ok(crate::oauth_provider::GoJson(a))
 }
 
 /// `getAuthorizedOAuthApps`: the apps of the user's `oauth_app` preferences, without secrets.

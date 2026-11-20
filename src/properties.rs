@@ -1,10 +1,8 @@
 //! Properties (PSAv2): the property fields, field options and values of a property group under
 //! `/api/v4/properties/groups/{group_name}/...`, as an unlicensed server answers them. The `access_control` group
 //! needs an Enterprise license for every field and value it holds (and Enterprise Advanced for its channel
-//! attributes), `session_attributes` Enterprise Advanced; `boards` and `post_attributes` work without one.
-//!
-//! Not ported: the option hierarchy of `graph` fields is read (an option's `parents`), but a write that sets
-//! parents answers 501.
+//! attributes), `session_attributes` Enterprise Advanced; `boards` and `post_attributes` work without one. The option
+//! hierarchy of `graph` fields is in `graph`.
 
 // Based on Mattermost server/channels/api4/properties.go, api4/property_options.go, app/property_field.go,
 // app/property_value.go, app/property_options.go, app/property_group.go, app/property_errors.go,
@@ -33,6 +31,8 @@ use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, new_id, now
 use crate::hub::Broadcast;
 use crate::model::Session;
 use crate::perm::MANAGE_SYSTEM;
+
+mod graph;
 
 const ACCESS_CONTROL: &str = "access_control";
 const SESSION_ATTRIBUTES: &str = "session_attributes";
@@ -261,9 +261,6 @@ fn option_error(index: usize, reason: &str) -> AppError {
     bad("app.property_field.options.invalid_item.app_error")
         .with_params(&[("Index", &index.to_string()), ("Reason", reason)])
         .detail(format!("options[{index}] {reason}"))
-}
-fn graph_not_ported() -> AppError {
-    AppError::not_implemented("Changing the option hierarchy of a graph property field")
 }
 
 // ---------- request plumbing ----------
@@ -1288,46 +1285,20 @@ fn inline_options_lenient(f: &Field) -> Vec<Map<String, Value>> {
     }
 }
 
-/// `EnsureOptionIDs` + `OptionParentLinks` as `validateOptionBlobLinks` asks them: every inline option an object
-/// with an id; a hierarchy only on a graph field (and not ported).
-fn prepare_inline_options(f: &mut Field) -> ApiResult<()> {
+/// `EnsureOptionIDs`: every inline option an object with an id; a list in another shape is a server error under
+/// `fail`.
+fn ensure_option_ids(f: &mut Field, fail: &str) -> ApiResult<()> {
     if f.supports_options()
         && let Some(raw) = f.attrs.as_mut().and_then(|a| a.get_mut("options"))
         && !raw.is_null()
     {
-        let Value::Array(list) = raw else {
-            return Err(AppError::internal(
-                "app.property_field.create.app_error",
-                format!("invalid options format for field ID {}", f.id),
-            ));
-        };
+        let invalid = || AppError::internal(fail, format!("invalid options format for field ID {}", f.id));
+        let Value::Array(list) = raw else { return Err(invalid()) };
         for o in list.iter_mut() {
-            let Value::Object(m) = o else {
-                return Err(AppError::internal(
-                    "app.property_field.create.app_error",
-                    format!("invalid options format for field ID {}", f.id),
-                ));
-            };
+            let Value::Object(m) = o else { return Err(invalid()) };
             if !m.get("id").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
                 m.insert("id".into(), Value::String(new_id()));
             }
-        }
-    }
-    // OptionParentLinks
-    let Some(raw) = f.attr("options").filter(|v| !v.is_null()) else { return Ok(()) };
-    let Value::Array(list) = raw else { return Err(options_refused("the option list is not a list")) };
-    for (i, o) in list.iter().enumerate() {
-        let Value::Object(m) = o else {
-            return Err(options_refused(&format!("the option at index {i} is not an object")));
-        };
-        if m.get("parents").is_some_and(|p| !p.is_null()) {
-            if f.kind != "graph" {
-                return Err(options_refused(&format!(
-                    "the option at index {i} carries parents, and the options of a {} field form no hierarchy",
-                    f.kind
-                )));
-            }
-            return Err(graph_not_ported());
         }
     }
     Ok(())
@@ -1430,6 +1401,8 @@ impl App {
             let own: HashMap<&str, &OptionRow> = existing.iter().filter(|r| r.field_id == f.id).map(|r| (r.id.as_str(), r)).collect();
             let inherited: HashSet<&str> =
                 existing.iter().filter(|r| f.is_linked() && r.field_id == f.link_source()).map(|r| r.id.as_str()).collect();
+            let (add, replacing) = graph::option_parent_links(f)
+                .map_err(|e| graph::invalid_input("PropertyOption", "parents", &f.id, &e))?;
             let mut upserts = vec![];
             let mut keep = HashSet::new();
             for (i, o) in inline_options_lenient(f).iter().enumerate() {
@@ -1478,6 +1451,12 @@ impl App {
                 .bind(&deletes)
                 .execute(&mut **tx)
                 .await?;
+            }
+            if (!add.is_empty() || !replacing.is_empty())
+                && graph::apply_option_parent_links(tx, f, &add, &replacing, now).await?
+                && !changed.contains(&f.id)
+            {
+                changed.push(f.id.clone());
             }
         }
         Ok(changed)
@@ -1577,7 +1556,9 @@ async fn create_field(
     // App.CreatePropertyField
     canonicalize_system(&mut f);
     f.name = f.name.trim().to_string();
-    // PropertyService.CreatePropertyField: the hooks, then createPropertyField.
+    // PropertyService.CreatePropertyField: the hooks, then createPropertyField. Whether the caller sent options of
+    // its own is decided before a link copies the template's in.
+    let supplied_options = f.supplies_options();
     if group.name == ACCESS_CONTROL {
         return Err(license_error());
     }
@@ -1608,14 +1589,14 @@ async fn create_field(
             .with_params(&[("Name", &f.name), ("ConflictLevel", &level)]));
     }
     if f.kind == "graph" && f.is_linked() {
-        if f.supplies_options() {
+        if supplied_options {
             return Err(options_refused(&format!(
                 "a field linking to field {0} serves that field's option hierarchy and cannot own options of its own; add them to field {0} instead",
                 f.link_source()
             )));
         }
     } else {
-        prepare_inline_options(&mut f)?;
+        app.validate_option_blob_links(&mut f, None, "app.property_field.create.app_error").await?;
     }
     // SqlPropertyFieldStore.Create
     if !f.id.is_empty() {
@@ -1625,7 +1606,7 @@ async fn create_field(
     f.create_at = now_ms();
     f.update_at = f.create_at;
     f.delete_at = 0;
-    prepare_inline_options(&mut f)?;
+    ensure_option_ids(&mut f, "app.property_field.create.app_error")?;
     validate_field(&f)?;
     let mut tx = app.db.begin().await?;
     sqlx::query(
@@ -1892,7 +1873,7 @@ async fn update_field(app: &App, group: &Group, existing: &Field, mut f: Field) 
     if f.kind != stored.kind && (f.kind == "graph" || stored.kind == "graph") {
         return Err(bad("app.property_field.update.graph_type_change.app_error").with_param("FieldID", &stored.id));
     }
-    prepare_inline_options(&mut f)?;
+    app.validate_option_blob_links(&mut f, Some(&stored), "app.property_field.update.app_error").await?;
     if stored.kind == "graph" && !f.options_omitted() {
         let keeping: HashSet<String> = inline_options_lenient(&f)
             .iter()
@@ -1971,6 +1952,9 @@ async fn update_field(app: &App, group: &Group, existing: &Field, mut f: Field) 
         return Err(err(StatusCode::CONFLICT, "app.property_field.update.conflict.app_error")
             .detail("concurrent modification detected; please retry"));
     }
+    if stored.is_linked() && !f.is_linked() && f.supports_options() {
+        graph::take_over_link_source(&mut tx, &f, stored.link_source(), now).await?;
+    }
     app.sync_options(&mut tx, std::slice::from_ref(&f), now).await?;
     tx.commit().await?;
     // TypeChangeValueCleanupHook
@@ -2018,7 +2002,12 @@ async fn blocking_child_below(app: &App, f: &Field, ids: &[String]) -> ApiResult
         return Ok(None);
     }
     let edges: Vec<(String, String)> =
-        sqlx::query_as("SELECT ParentOptionID, ChildOptionID FROM PropertyOptionEdges WHERE FieldID = $1 AND ParentOptionID = ANY($2)")
+        // In the order of the (FieldID, ParentOptionID, ChildOptionID) index Go's query is answered from: the last
+        // child of a parent is the one reported.
+        sqlx::query_as(
+            "SELECT ParentOptionID, ChildOptionID FROM PropertyOptionEdges WHERE FieldID = $1 AND ParentOptionID = ANY($2)
+             ORDER BY ParentOptionID, ChildOptionID",
+        )
             .bind(&f.id)
             .bind(ids)
             .fetch_all(&app.db)
@@ -2333,7 +2322,7 @@ struct NewOption {
     name: String,
     color: Option<String>,
     attrs: Option<Map<String, Value>>,
-    parents: bool,
+    parents: Option<Vec<String>>,
 }
 
 /// `prepareOptionPayload`.
@@ -2356,7 +2345,7 @@ fn prepare_options(f: &Field, items: &[Option<Map<String, Value>>], require_id: 
             name: m.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string(),
             color: m.get("color").and_then(Value::as_str).map(str::to_string),
             attrs: m.get("attrs").and_then(Value::as_object).cloned(),
-            parents: m.get("parents").is_some_and(|p| !p.is_null()),
+            parents: m.get("parents").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()),
         };
         if require_id && o.id.is_empty() {
             return Err(option_error(i, "names no option"));
@@ -2367,11 +2356,28 @@ fn prepare_options(f: &Field, items: &[Option<Map<String, Value>>], require_id: 
         if require_id && !seen.insert(o.id.clone()) {
             return Err(option_error(i, &format!("names option {:?}, which is already in the list", o.id)));
         }
-        if o.parents && f.kind != "graph" {
+        if o.parents.is_some() && f.kind != "graph" {
             return Err(option_error(i, &format!("carries parents, and the options of a {} field form no hierarchy", f.kind)));
         }
         if o.name.is_empty() {
             return Err(option_error(i, "is not a valid option: name cannot be empty"));
+        }
+        if let Some(ps) = &o.parents {
+            if ps.len() > graph::MAX_PARENTS {
+                return Err(option_error(
+                    i,
+                    &format!("is not a valid option: no option may have more than {} options directly above it", graph::MAX_PARENTS),
+                ));
+            }
+            let mut seen = HashSet::new();
+            for p in ps {
+                if p.is_empty() {
+                    return Err(option_error(i, "is not a valid option: a parent name cannot be empty"));
+                }
+                if !seen.insert(p) {
+                    return Err(option_error(i, &format!("is not a valid option: parent {p:?} is named more than once")));
+                }
+            }
         }
         if let Some(k) = o.attrs.as_ref().and_then(|a| ["id", "name", "color", "rank"].into_iter().find(|k| a.contains_key(*k))) {
             return Err(option_error(i, &format!("is not a valid option: attrs cannot carry the reserved key {k:?}")));
@@ -2391,18 +2397,18 @@ fn prepare_options(f: &Field, items: &[Option<Map<String, Value>>], require_id: 
             return Err(options_refused(&format!("duplicate option name found at index {i}: {}", o.name)));
         }
     }
-    if out.iter().any(|o| o.parents) {
-        return Err(graph_not_ported());
-    }
     Ok(out)
 }
 
 impl App {
-    /// `MutateOptions` without edges: the options written (appended after the field's last), the field's `UpdateAt`
-    /// moved on so a concurrent field write fails.
-    async fn write_options(&self, f: &Field, options: &[NewOption], append: bool) -> ApiResult<()> {
+    /// `MutateOptions`: the options written (appended after the field's last) and the parent links added and removed,
+    /// the field's `UpdateAt` moved on so a concurrent field write fails.
+    async fn write_options(&self, f: &Field, options: &[NewOption], append: bool, add: &[graph::Edge], remove: &[graph::Edge]) -> ApiResult<()> {
         let now = now_ms();
         let mut tx = self.db.begin().await?;
+        if !add.is_empty() || !remove.is_empty() {
+            graph::require_live_graph_field(&mut tx, &f.id).await?;
+        }
         let n = sqlx::query("UPDATE PropertyFields SET UpdateAt = GREATEST($1, UpdateAt + 1) WHERE ID = $2 AND GroupID = $3 AND UpdateAt = $4")
             .bind(now)
             .bind(&f.id)
@@ -2454,6 +2460,7 @@ impl App {
                 .await?;
             }
         }
+        graph::write_edges(&mut tx, &f.id, add, remove, now).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2504,7 +2511,11 @@ async fn create_options(
         o.id = new_id();
     }
     require_names_free_of_dependents(&app, &f, &names).await?;
-    app.write_options(&f, &options, true).await?;
+    let add = app.resolve_option_parents(&f, &options, None).await?;
+    if !add.is_empty() {
+        app.validate_option_edges(&f, &add, &[], "app.property_field.options.create.app_error").await?;
+    }
+    app.write_options(&f, &options, true, &add, &[]).await?;
     let ids: Vec<String> = options.iter().map(|o| o.id.clone()).collect();
     let created_options = app.read_back(&f, &ids).await?;
     app.options_changed(&group.id, &f.id, &connection_id(&headers)).await;
@@ -2563,7 +2574,13 @@ async fn patch_options(
         }
         require_names_free_of_dependents(&app, &f, &renamed).await?;
     }
-    app.write_options(&f, &options, false).await?;
+    let add = app.resolve_option_parents(&f, &options, Some(&by_id)).await?;
+    let replacing: Vec<String> = options.iter().filter(|o| o.parents.is_some()).map(|o| o.id.clone()).collect();
+    let remove = app.parents_to_detach(&f.id, &replacing, &add).await?;
+    if !add.is_empty() || !remove.is_empty() {
+        app.validate_option_edges(&f, &add, &remove, "app.property_field.options.update.app_error").await?;
+    }
+    app.write_options(&f, &options, false, &add, &remove).await?;
     let updated = app.read_back(&f, &ids).await?;
     app.options_changed(&group.id, &f.id, &connection_id(&headers)).await;
     Ok(axum::Json(updated).into_response())
