@@ -1178,5 +1178,9 @@ pub async fn invite_new_users_gracefully(
             }
         }
     }
+    // The errors inside the list are Go's bare `NewAppError`s: no request id.
+    for e in out.iter_mut().filter_map(|i| i.error.as_mut()) {
+        e.request_id.clear();
+    }
     Ok(out)
 }
