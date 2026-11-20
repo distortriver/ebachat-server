@@ -93,6 +93,37 @@ from the job data: `include_attachments`, `include_archived_channels`, `include_
 memberships synthesized for authors who left). Progress counters (`teams_exported`, `users_exported`, ...) are
 written to the job's data as Go does.
 
+## Bulk import
+
+`import_process` (`bulk_import.rs`, `import_functions.rs`) is Go's `BulkImportWithPathAndOpts`:
+
+- **The file:** `import_file` in `ImportSettings.Directory` (or a local path with `local_mode`), a zip with the
+  JSONL at its root and the attachments, profile images and emoji under `data/`. A zip of the local store is read
+  in place, at offsets; from S3 it is read whole. Removed after a successful import, as Go does.
+- **Uploads:** `POST /uploads` with `type: import` (system admins), then the parts; the file lands as
+  `<upload id>_<name>` in the import directory (`GET /imports` lists it). As `mmctl import upload`.
+- **Job data:** `workers` (default: the CPUs), `extract_content`, `destination_team_name`,
+  `destination_channel_name`, `skip_preflight`, `imported_users`; on failure `line_number`; for JSONL of 100 MB
+  and more, `checkpoint`/`checkpoint_file`/`total_lines` after each segment, and a failed job resumes from its
+  checkpoint (post lines up to it skipped).
+- **The lines:** `version` (first, version 1, with the export scope in `info.additional`), then `role`,
+  `scheme`, `team`, `channel`, `user` (team and channel memberships with their roles, notify props, counts,
+  favorites, theme and the other preferences, custom status, profile image), `bot`, `emoji`, `post` (replies,
+  reactions, attachments, flags, pins, thread followers), `direct_channel` (members or participants, favorites,
+  shown by, header) and `direct_post`. Each type is validated as Go's `imports/import_validators.go`, with its
+  error ids, then written as `import_functions.go` writes it: straight to the stores (no websocket events but where
+  Go calls app functions: team and channel creation and updates, user updates and roles, bots, profile images).
+  Lines already imported are updated, not duplicated (posts are found by channel, time and message).
+- **Segments and workers:** a change of line type waits for the workers of the previous type; posts go in
+  batches of 1000 per worker. The first error that stops the import is the job's error, with its line number (0
+  where Go cannot tell). Errors Go goes on after (large images, direct channels of too few or too many members,
+  and in scoped imports existing usernames and emails and the last-admin refusal) are logged.
+- **Scoped imports** (an export of some teams or channels): users missing here are created, active or
+  inactive as `imported_users` says (required), SSO users are created before the main pass and matched by auth
+  data, the SSO providers they need are checked (`skip_preflight`), and teams and channels can be renamed with
+  `destination_team_name` and `destination_channel_name`.
+- **Dry run** (validation only) is there for callers that ask for it; the job never does, as in Go.
+
 ## Deviations
 
 - **Security bulletins (`runSecurityJob`) are not fetched.** Go sends the server id and counts to
@@ -100,9 +131,14 @@ written to the job's data as Go does.
   apply to this server.
 - **Product notices are fetched but not shown:** they target Mattermost versions; `GET /system/notices` keeps
   answering none (Go answers none on the stand too).
-- **Bulk import is not ported.** `import_process` checks `import_file` and the file as Go does, then fails with
-  `api.not_implemented.app_error` rather than pretending to import. Porting `BulkImportWithPath` (about 4,000
-  lines of Go writing every table) is the remaining work.
+- **Bulk import:**
+  - a line that is not JSON fails with Go's error id and line number, but the decoder's own words are serde's
+    (Go's for a cut or empty line: `unexpected end of JSON input`); JSON keys are matched exactly (Go's decoder
+    ignores their case).
+  - the uploads of import files were stored under `%2E/import/` (the `./import` of the config, uncleaned) and so
+    never found by the job or `/imports`; their path is cleaned as Go's `filepath.Join` cleans it.
+  - a bot's welcome post (`CreateBot`) no longer marks the bot's direct channel viewed: Go's `CreatePostAsUser`
+    skips that for posts `from_bot`.
 - **Resent invitations need the email sender** (the notifications part): until it is wired in, a due resend job
   fails with `api.team.invite_members.unable_to_send_email.app_error`.
 - **Session expiry pushes** are sent by `job_workers.rs` itself (push proxy `send_push`, `REMOVE` handled); to be
@@ -128,3 +164,18 @@ written to the job's data as Go does.
   custom emoji) by Go and by Rust: the same zip entries and methods, the same 126 JSONL lines byte for byte (but
   `created`), the same job data. A full export (direct channels and posts) was not compared: Go takes about
   25 minutes over the stand's 42k posts.
+- **Bulk import:** on a throwaway database (so that no other server claims the jobs), Go 12.1 and Rust took
+  turns importing the same zip under different names: a custom role, a team and a channel scheme, two teams, open,
+  private and archived channels, four users (password, generated password, guest, deactivated with GitLab auth;
+  team and channel roles with a custom one, counts, notify props, favorites, every preference, custom status,
+  profile image), a bot with an avatar, a custom emoji, posts with replies, reactions, attachments, flags, a pin
+  and thread followers, a direct and a group channel and their posts. The rows written to 19 tables (roles,
+  schemes, teams, channels, public channels, users, bots, team and channel members, member history, preferences,
+  posts, threads, thread memberships, reactions, file infos, emoji, sidebar categories, sessions) were the same,
+  126/126, ids and times aside; so were they after importing the same file again (the update paths). 22 broken
+  files (no or wrong version, bad JSON, unknown and null lines, invalid teams, users, guests, schemes, roles,
+  emoji, missing teams, channels and users, dangling reactions, too few direct members): the same job status,
+  error text and `line_number`, 21/22 identical (for the bad JSON line only the decoder's words differ, above).
+  An import file uploaded through `/uploads` and imported: the same answers and `FileInfo` row. Random values
+  (password hashes, invite ids) and a guest deactivated by the other server's startup (`DeactivateGuests`, guest
+  accounts are off on the stand) were left out of the comparison.
