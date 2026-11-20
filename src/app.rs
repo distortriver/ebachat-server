@@ -163,12 +163,13 @@ impl App {
             return;
         }
         let expiry = now + length;
+        // Only a session still in the database goes back into the cache: never a revoked one.
         if sqlx::query("UPDATE Sessions SET ExpiresAt = $1 WHERE Id = $2")
             .bind(expiry)
             .bind(&s.id)
             .execute(&self.db)
             .await
-            .is_ok()
+            .is_ok_and(|r| r.rows_affected() == 1)
         {
             let mut n = s.clone();
             n.expires_at = expiry;
@@ -197,14 +198,18 @@ impl App {
         if now - s.last_activity_at < 5 * 60_000 {
             return;
         }
-        let _ = sqlx::query("UPDATE Sessions SET LastActivityAt = $1 WHERE Id = $2")
+        // Only a session still in the database goes back into the cache: never a revoked one.
+        let updated = sqlx::query("UPDATE Sessions SET LastActivityAt = $1 WHERE Id = $2")
             .bind(now)
             .bind(&s.id)
             .execute(&self.db)
-            .await;
-        let mut n = s.clone();
-        n.last_activity_at = now;
-        self.caches.session.put(n.token.clone(), Arc::new(n));
+            .await
+            .is_ok_and(|r| r.rows_affected() == 1);
+        if updated {
+            let mut n = s.clone();
+            n.last_activity_at = now;
+            self.caches.session.put(n.token.clone(), Arc::new(n));
+        }
     }
 
     /// `UserStore.Get` through the profile cache, with the bot fields.

@@ -171,3 +171,17 @@ stand's database. Throwaway data was removed afterwards (see the end).
 The invite tests left `Tokens` rows and `resend_invitation_email` jobs for the test addresses on both servers;
 they were deleted. The MFA user was deleted permanently through Go. My Go instance ran for about fifteen minutes
 on the shared database, with its job schedulers.
+
+## Websocket frames re-inserted a stale session into the cache (second review, fixed)
+
+- **Was:** the socket loaded its session once at connect and handed that copy to every frame;
+  `user_update_active_status` (`touch_session`) and `user_typing` (`extend_session_if_needed`) put it back into
+  the session cache. A demoted admin kept `system_admin` on REST, and a revoked session could be re-inserted in the
+  moment before its socket closed. Go re-reads the session for every websocket request (`ServeWebSocket`) and never
+  touches the cache from `userUpdateActiveStatus`.
+- **Now:** every frame gets `app.session(token)` (cache or database); a failed lookup answers the frame with the
+  session error, as Go. Activity is recorded once at connect (`NewWebConn`). `touch_session` and
+  `extend_session_if_needed` re-cache a session only when its row was updated (one row), so a revoked session never
+  comes back. The reader stops before dispatching a frame once the writer is gone.
+- **Checked:** a promoted user with an open socket demoted, then frames sent: REST `/config` 403. All sessions
+  revoked, then frames: the socket closes, REST 401.

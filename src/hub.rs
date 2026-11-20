@@ -433,16 +433,23 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
         "server_version": format!("{}.{}.{}.false", crate::SERVER_VERSION_FULL, crate::SERVER_VERSION, "0"),
     });
     app.hub.publish("hello", hello, Broadcast { connection_id: conn.connection_id.clone(), ..Default::default() });
+    // `NewWebConn`: `UpdateLastActivityAtIfNeeded` once, with the session just loaded.
+    app.touch_session(&session).await;
     app.set_status_online(&user_id, false).await;
 
     while let Some(Ok(m)) = stream.next().await {
-        match m {
-            Message::Text(t) => action(&app, &session, &conn, &t).await,
-            Message::Close(_) => break,
-            _ => {}
-        }
         if writer.is_finished() {
             break;
+        }
+        match m {
+            // `ServeWebSocket`: every request gets the session as it is now (cache or database), never the one of
+            // the connect: a revoked session fails, a changed one carries its new roles.
+            Message::Text(t) => match app.session(&conn.token).await {
+                Ok(fresh) => action(&app, &fresh, &conn, &t).await,
+                Err(e) => session_error_reply(&conn, &t, e),
+            },
+            Message::Close(_) => break,
+            _ => {}
         }
     }
     writer.abort();
@@ -466,7 +473,7 @@ struct WsReply {
 /// The `AppError` of a failed socket request, its detail wiped (`WipeDetailed`).
 #[derive(Serialize)]
 struct WsReplyError {
-    id: &'static str,
+    id: String,
     message: String,
     detailed_error: &'static str,
     status_code: u16,
@@ -480,6 +487,14 @@ fn is_zero(n: &i64) -> bool {
 enum WsError {
     Param(&'static str),
     Busy,
+}
+
+/// `ServeWebSocket` when the connection's session is gone or invalid: the error reply, its detail wiped.
+fn session_error_reply(conn: &Conn, text: &str, e: crate::app::AppError) {
+    let seq_reply = serde_json::from_str::<Value>(text).ok().and_then(|v| v["seq"].as_i64()).unwrap_or(0);
+    let error = WsReplyError { id: e.id, message: e.message, detailed_error: "", status_code: e.status_code };
+    let msg = WsReply { status: "FAIL", seq_reply, data: None, error: Some(error) };
+    let _ = conn.tx.send(Out::Reply(serde_json::to_string(&msg).unwrap_or_default()));
 }
 
 /// A client's request on the socket (`wsapi`), answered with `{"status","seq_reply"}`.
@@ -512,7 +527,6 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
                 } else {
                     app.set_status_away_if_needed(&s.user_id, manual).await;
                 }
-                app.touch_session(s).await;
                 Ok(None)
             }
             None => Err(WsError::Param("user_is_active")),
@@ -542,7 +556,7 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
                 WsError::Busy => ("api.websocket_handler.server_busy.app_error", 503, &[]),
             };
             let message = crate::i18n::tr(id, args).unwrap_or_else(|| id.to_string());
-            let error = WsReplyError { id, message, detailed_error: "", status_code };
+            let error = WsReplyError { id: id.to_string(), message, detailed_error: "", status_code };
             WsReply { status: "FAIL", seq_reply, data: None, error: Some(error) }
         }
     };
