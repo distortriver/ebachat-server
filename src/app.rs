@@ -435,6 +435,23 @@ pub struct Auth(pub Arc<Session>);
 impl FromRequestParts<State> for Auth {
     type Rejection = AppError;
     async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<Auth, AppError> {
+        session_required(parts, app, false).await.map(Auth)
+    }
+}
+
+/// `APISessionRequiredTrustRequester`: a valid session without the CSRF check (`client_perf` beacons,
+/// `roles/names`, file downloads by HEAD).
+pub struct AuthTrusted(pub Arc<Session>);
+
+impl FromRequestParts<State> for AuthTrusted {
+    type Rejection = AppError;
+    async fn from_request_parts(parts: &mut Parts, app: &State) -> Result<AuthTrusted, AppError> {
+        session_required(parts, app, true).await.map(AuthTrusted)
+    }
+}
+
+async fn session_required(parts: &Parts, app: &State, trust_requester: bool) -> Result<Arc<Session>, AppError> {
+    {
         let (token, loc) = token_from(parts).ok_or_else(invalid_token)?;
         // web/handlers.go: any session error but a 500 is "session expired" for the client.
         let s = app.session(&token).await.map_err(|e| if e.status_code == 500 { e } else { invalid_token() })?;
@@ -445,7 +462,7 @@ impl FromRequestParts<State> for Auth {
                 "Session is not OAuth but token was provided in the query string",
             ));
         }
-        if loc == TokenLocation::Cookie && parts.method != Method::GET {
+        if loc == TokenLocation::Cookie && !trust_requester && parts.method != Method::GET {
             let csrf = parts.headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).unwrap_or("");
             let xhr = parts.headers.get("x-requested-with").and_then(|v| v.to_str().ok()) == Some("XMLHttpRequest");
             let strict = app.cfg.bool("ServiceSettings.ExperimentalStrictCSRFEnforcement");
@@ -460,7 +477,7 @@ impl FromRequestParts<State> for Auth {
         {
             return Err(invalid_token());
         }
-        Ok(Auth(s))
+        Ok(s)
     }
 }
 

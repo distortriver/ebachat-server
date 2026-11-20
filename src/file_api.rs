@@ -973,7 +973,7 @@ fn truthy(s: &str) -> bool {
 /// `getFile`: the file, read through `GetByIds` from the database (not the cache), deleted ones refused.
 async fn get_file(
     St(app): St<State>,
-    Auth(s): Auth,
+    crate::app::AuthTrusted(s): crate::app::AuthTrusted,
     Path(id): Path<String>,
     Query(q): Query<DownloadQuery>,
     method: Method,
@@ -998,7 +998,7 @@ async fn get_file(
 
 async fn get_thumbnail(
     St(app): St<State>,
-    Auth(s): Auth,
+    crate::app::AuthTrusted(s): crate::app::AuthTrusted,
     Path(id): Path<String>,
     Query(q): Query<DownloadQuery>,
     method: Method,
@@ -1013,7 +1013,7 @@ async fn get_thumbnail(
 
 async fn get_preview(
     St(app): St<State>,
-    Auth(s): Auth,
+    crate::app::AuthTrusted(s): crate::app::AuthTrusted,
     Path(id): Path<String>,
     Query(q): Query<DownloadQuery>,
     method: Method,

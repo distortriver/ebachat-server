@@ -287,7 +287,7 @@ async fn recycle_database(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<V
 }
 
 /// `submitPerformanceReport`: without metrics (an enterprise feature), nothing is recorded or checked.
-async fn client_perf(_: Auth) -> StatusCode {
+async fn client_perf(_: crate::app::AuthTrusted) -> StatusCode {
     StatusCode::OK
 }
 
