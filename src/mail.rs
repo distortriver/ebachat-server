@@ -184,8 +184,8 @@ async fn connect(cfg: &SmtpConfig) -> Result<(Conn, Vec<String>), String> {
     let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
     let tcp = tokio::time::timeout(timeout, TcpStream::connect(&addr))
         .await
-        .map_err(|_| format!("dial tcp {addr}: i/o timeout"))?
-        .map_err(|e| format!("dial tcp {addr}: {}", go_net_error(&e)))?;
+        .map_err(|_| format!("unable to connect to the SMTP server: dial tcp {addr}: i/o timeout"))?
+        .map_err(|e| format!("unable to connect to the SMTP server: dial tcp {addr}: {}", go_net_error(&e)))?;
     let mut stream: Box<dyn Stream> = Box::new(tcp);
     if cfg.connection_security == "TLS" {
         stream = tls_wrap(stream, cfg).await.map_err(|e| format!("unable to connect to the SMTP server through TLS: {e}"))?;

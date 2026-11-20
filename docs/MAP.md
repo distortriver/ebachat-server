@@ -160,8 +160,8 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
   that is ever needed.
+- **Push and email** are sent as Go sends them: see `docs/NOTIFICATIONS.md`.
 - **Open:**
-  - mobile push: `POST /notifications/ack` (7k) and the push proxy. Mobile is 10% of traffic.
   - bots: about 116 Lambdas (`node` UA) do email lookup → `channels/direct` → `posts`, and there are incoming
     webhooks. These are T2, but critical.
 
@@ -213,9 +213,8 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   `status_change` is not broadcast and the websocket `user_typing` action fails until the expiry. One atomic load
   per check.
 - **Properties:** see `docs/PROPERTIES.md`.
+- **Push and email:** `docs/NOTIFICATIONS.md`.
 - **Left:**
-  - mobile push (no push proxy);
-  - email (no SMTP);
   - T3 routes on demand.
 
 Code by area:
@@ -225,6 +224,7 @@ Code by area:
 | Core | `app.rs`, `cache.rs`, `perm.rs`, `config.rs`, `hub.rs`, `status.rs`, `db.rs`, `model/` |
 | Users and teams | `users.rs`, `user_*.rs`, `teams.rs`, `preferences.rs`, `emoji.rs`, `system.rs`, `i18n.rs` |
 | Channels | `channels.rs`, `channels_api.rs`, `sidebar.rs` |
+| Notifications | `notify.rs`, `push.rs`, `email.rs`, `mail.rs`, `email_template.rs`, `markdown.rs` |
 | Posts | `posts.rs`, `notify.rs`, `threads.rs`, `reactions.rs`, `drafts.rs`, `search.rs` |
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |

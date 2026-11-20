@@ -360,6 +360,68 @@ fn follower_desktop(u: &User, mentioned: bool, cm: Option<&StringMap>) -> bool {
     (cdesktop == "default" && user) || channel
 }
 
+/// `sendOutOfChannelMentions`: the poster learns which `@names` are not in the channel (and may add them), and
+/// which are not in the team.
+async fn out_of_channel_mentions(app: &App, sender: &User, post: &Post, c: &Channel, names: Vec<String>) {
+    if post.is_system_message() || post.is_notification_suppressed() || c.team_id.is_empty() || c.r#type == channel::GROUP {
+        return;
+    }
+    let Ok(all) = crate::users::load_users(app, "u.Username = ANY($1) ORDER BY u.Username ASC", &names).await else { return };
+    let viewer = crate::model::Session { user_id: sender.id.clone(), ..Default::default() };
+    let in_team: Vec<String> = sqlx::query_scalar("SELECT UserId FROM TeamMembers WHERE TeamId = $1 AND DeleteAt = 0 AND UserId = ANY($2)")
+        .bind(&c.team_id)
+        .bind(all.iter().map(|u| u.id.clone()).collect::<Vec<_>>())
+        .fetch_all(&app.db)
+        .await
+        .unwrap_or_default();
+    let (mut team_users, mut out_of_team) = (vec![], vec![]);
+    for u in all {
+        if u.delete_at != 0 || u.is_bot || !app.can_see_user(&viewer, &u.id).await.unwrap_or(false) {
+            continue;
+        }
+        if in_team.contains(&u.id) { team_users.push(u) } else { out_of_team.push(u) }
+    }
+    let t = |id: &str, names: &[String]| {
+        if names.len() == 1 {
+            crate::i18n::tl(&sender.locale, &format!("{id}.one"), &[("Username", &names[0])])
+        } else {
+            let (last, first) = names.split_last().unwrap();
+            crate::i18n::tl(&sender.locale, &format!("{id}.multiple"), &[("Usernames", &first.join(", @")), ("LastUsername", last)])
+        }
+    };
+    if !team_users.is_empty() {
+        let id = crate::app::new_id();
+        let usernames: Vec<String> = team_users.iter().map(|u| u.username.clone()).collect();
+        let ids: Vec<String> = team_users.iter().map(|u| u.id.clone()).collect();
+        let mut p = Post {
+            id: id.clone(),
+            root_id: post.root_id.clone(),
+            channel_id: post.channel_id.clone(),
+            message: t("api.post.check_for_out_of_channel_mentions.message", &usernames),
+            create_at: post.create_at + 1,
+            ..Default::default()
+        };
+        p.props.0.insert(
+            "add_channel_member".into(),
+            json!({"post_id": id, "usernames": usernames, "not_in_channel_usernames": usernames, "user_ids": ids,
+                   "not_in_channel_user_ids": ids, "not_in_groups_usernames": [], "not_in_groups_user_ids": []}),
+        );
+        app.send_ephemeral(&post.user_id, p).await;
+    }
+    if !out_of_team.is_empty() {
+        let usernames: Vec<String> = out_of_team.iter().map(|u| u.username.clone()).collect();
+        let p = Post {
+            id: crate::app::new_id(),
+            root_id: post.root_id.clone(),
+            channel_id: post.channel_id.clone(),
+            message: t("api.post.check_for_out_of_team_mentions.message", &usernames),
+            create_at: post.create_at + 1,
+            ..Default::default()
+        };
+        app.send_ephemeral(&post.user_id, p).await;
+    }
+}
+
 /// `addFollowerToNotify` for email and push: `shouldUserNotifyCRT` and `shouldChannelMemberNotifyCRT`.
 fn follower_email_push(u: &User, mentioned: bool, cm: Option<&StringMap>) -> (bool, bool) {
     let up = |k: &str| u.notify_prop(k).to_string();
@@ -540,6 +602,13 @@ pub async fn send_notifications(
     if !suppressed {
         let (m, k) = app.mentions_and_keywords(post, c, &profiles, &props, parent).await;
         mentions = m;
+        if c.r#type != channel::DIRECT
+            && !mentions.other_potential.is_empty()
+            && let Some(state) = app.hub.app()
+        {
+            let (sender, post, c, names) = (sender.clone(), post.clone(), c.clone(), mentions.other_potential.clone());
+            tokio::spawn(async move { out_of_channel_mentions(&state, &sender, &post, &c, names).await });
+        }
         let auto_follow = app.cfg.bool("ServiceSettings.ThreadAutoFollow");
         if auto_follow && !post.root_id.is_empty() {
             let mut participants: HashSet<String> = HashSet::new();
