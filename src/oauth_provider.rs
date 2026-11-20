@@ -902,7 +902,9 @@ async fn authorize_page_inner(app: &State, s: Option<Arc<Session>>, headers: &He
         Ok(a) => a,
         Err(e) => return web_app_error(e).await,
     };
+    let sess = s.clone();
     let Some(s) = s.filter(|s| !s.user_id.is_empty()) else {
+        crate::audit::log(app, sess.as_deref(), "success").await;
         let request_uri = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
         let login = if q.get("login_hint") == "saml" { "/login/sso/saml" } else { "/login" };
         let loc = format!("{}{login}?redirect_to={}", site_url_header(app, headers), gourl::query_escape(request_uri));
@@ -928,10 +930,14 @@ async fn authorize_page_inner(app: &State, s: Option<Arc<Session>>, headers: &He
     let authorized = app.preference(&s.user_id, "oauth_app", &r.client_id).await.ok().flatten().is_some();
     if oauth_app.is_trusted || authorized {
         return match app.allow_oauth_app(&s.user_id, r).await {
-            Ok(loc) => redirect(StatusCode::FOUND, &loc, "application/json"),
+            Ok(loc) => {
+                crate::audit::log(app, Some(&s), "success").await;
+                redirect(StatusCode::FOUND, &loc, "application/json")
+            }
             Err(e) => web_app_error(e).await,
         };
     }
+    crate::audit::log(app, Some(&s), "success").await;
     // The client's page asks the user (`http.ServeFile` of root.html).
     let file = crate::web::client_dir().join("root.html");
     let mut r = crate::web::serve_file(&file, headers, req.method() == axum::http::Method::HEAD, Some("text/html; charset=utf-8")).await;
@@ -954,7 +960,9 @@ async fn authorize_app(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiRes
         e.detailed_error = format!("userId={}, permission=edit_other_users, attempted access by oauth app", s.user_id);
         return Err(e);
     }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let redirect = app.allow_oauth_app(&s.user_id, r).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     let mut m = std::collections::BTreeMap::new();
     m.insert("redirect".to_string(), redirect);
     let mut r = crate::sso::go_map_json(&m).into_response();
@@ -974,6 +982,7 @@ async fn deauthorize(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResul
         return Err(e);
     }
     app.deauthorize_oauth_app(&s.user_id, &client_id).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(ok().into_response())
 }
 
@@ -1019,6 +1028,7 @@ async fn access_token(St(app): St<State>, req: Request) -> ApiResult<Response> {
     if !is_valid_id(client_id) {
         return Err(bad("api.oauth.get_access_token.bad_client_id.app_error"));
     }
+    crate::audit::log(&app, None, "attempt").await;
     let rsp = app
         .access_token_for_code_flow(
             client_id,
@@ -1031,6 +1041,7 @@ async fn access_token(St(app): St<State>, req: Request) -> ApiResult<Response> {
             form.get("resource"),
         )
         .await?;
+    crate::audit::log(&app, None, "success").await;
     let mut body = go_json(&rsp);
     body.push(b'\n');
     let mut r = body.into_response();

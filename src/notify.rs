@@ -752,10 +752,11 @@ pub async fn send_notifications(
     } else {
         format!("@{}", sender.username)
     };
-    let bpost = app.post_for_broadcast(post);
+    let bpost = app.post_for_broadcast(post).await;
+    let post_for = bpost.per_user();
     let mut data = json!({
         "channel_display_name": channel_display_name, "channel_name": c.name, "channel_type": c.r#type,
-        "post": serde_json::to_string(&bpost).unwrap(), "sender_name": sender_name, "set_online": set_online,
+        "post": serde_json::to_string(&bpost.post).unwrap(), "sender_name": sender_name, "set_online": set_online,
         "team_id": team_id,
     });
     if !post.file_ids.0.is_empty() {
@@ -775,6 +776,9 @@ pub async fn send_notifications(
         }
         if f_set.contains(uid) {
             extra.insert("followers".into(), Value::String(format!("[\"{uid}\"]")));
+        }
+        if let Some(p) = post_for.as_ref().and_then(|f| f(uid)) {
+            extra.insert("post".into(), Value::String(p));
         }
         (!extra.is_empty()).then_some(extra)
     });

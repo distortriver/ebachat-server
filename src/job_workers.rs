@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::app::{ApiResult, App, AppError, State, now_ms};
+use crate::db::Table;
 use crate::jobs::{self, Data, Job, SchedKind, Scheduler};
 use crate::model::{Post, Session};
 use crate::posts::CreateFlags;
@@ -436,78 +437,47 @@ async fn notify_expiring_access_tokens(app: &App) -> Result<(), String> {
     Ok(())
 }
 
-/// `NotifySessionsExpired`: a push to each mobile session that expired in the last hour, once.
+/// `NotifySessionsExpired`: a push to each mobile session that expired in the last hour, once, through the push
+/// sender (`sendToPushProxy`: a `REMOVE` answer retires the device; after any failure the session is tried again).
 async fn notify_sessions_expired(app: &App) -> Result<(), String> {
-    // canSendPushNotifications (Mattermost's hosted push service needs a license).
-    let server = app.cfg.str("EmailSettings.PushNotificationServer").trim_end_matches('/').to_string();
-    if !app.cfg.bool("EmailSettings.SendPushNotifications") || is_mhpns(&server) {
+    if !crate::push::can_send(app) {
         return Ok(());
     }
     let now = now_ms();
-    let sessions: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT Id, COALESCE(UserId, ''), COALESCE(DeviceId, ''), COALESCE(Props::text, '{}') FROM Sessions
-         WHERE ExpiresAt <> 0 AND ExpiresAt < $1 AND ExpiresAt > $2 AND DeviceId <> '' AND ExpiredNotify <> true",
-    )
+    // GetSessionsExpired(OneHourMillis, mobileOnly, unnotifiedOnly)
+    let sessions: Vec<Session> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{} WHERE ExpiresAt <> 0 AND ExpiresAt < $1 AND ExpiresAt > $2 AND DeviceId <> '' AND ExpiredNotify <> true",
+        Session::SELECT
+    )))
     .bind(now)
     .bind(now - 3_600_000)
     .fetch_all(&app.db)
     .await
     .map_err(|e| jobs::go_error("NotifySessionsExpired", "app.session.analytics_session_count.app_error", &format!("failed to find Sessions: {e}")))?;
-    for (id, user_id, device, props) in sessions {
-        let (platform, device_id) = device.split_once(':').map(|(p, d)| (p.to_string(), d.to_string())).unwrap_or_default();
-        let site = app.cfg.str("TeamSettings.SiteName");
-        let hours = app.cfg.i64("ServiceSettings.SessionLengthMobileInHours").to_string();
-        let message = crate::i18n::tr("api.push_notifications.session.expired", &[("siteName", site), ("hoursCount", &hours)])
-            .unwrap_or_default();
-        // model.PushNotification, in Go's field order.
-        let msg = json!({
-            "ack_id": crate::app::new_id(), "platform": platform, "server_id": app.cfg.diagnostic_id,
-            "device_id": device_id, "post_id": "", "message": message, "type": "session", "version": "v2",
-            "is_crt_enabled": false, "is_id_loaded": false, "signature": "",
-        });
-        let res = async {
-            let r = reqwest::Client::new()
-                .post(format!("{server}/api/v1/send_push"))
-                .timeout(Duration::from_secs(30))
-                .body(msg.to_string())
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            if r.status() != reqwest::StatusCode::OK {
-                return Err(format!("response returned error code: {}", r.status().as_u16()));
-            }
-            let bytes = r.bytes().await.map_err(|e| e.to_string())?;
-            let body: BTreeMap<String, String> =
-                serde_json::from_slice(&bytes).map_err(|e| format!("failed to decode from JSON: {e}"))?;
-            Ok(body)
+    for s in sessions {
+        let mut msg = crate::push::PushNotification { version: "v2".into(), kind: crate::push::SESSION.into(), ..Default::default() };
+        msg.set_device(&s.device_id);
+        msg.ack_id = crate::app::new_id();
+        msg.message = session_expired_message(app, &s.user_id).await;
+        if let Err(e) = crate::push::send_to_proxy(app, &mut msg, &s).await {
+            eprintln!("Failed to send to push proxy: user_id={} session_id={} err={e}", s.user_id, s.id);
+            continue;
         }
-        .await;
-        let Ok(body) = res else { continue };
-        match body.get("status").map(String::as_str) {
-            Some("REMOVE") => {
-                // The device id is dropped from the session: SetExtraSessionProps(last_removed_device_id).
-                let mut p: BTreeMap<String, String> = serde_json::from_str(&props).unwrap_or_default();
-                p.insert("last_removed_device_id".into(), device.clone());
-                let _ = sqlx::query("UPDATE Sessions SET Props = $1::jsonb WHERE Id = $2")
-                    .bind(serde_json::to_string(&p).unwrap_or_default())
-                    .bind(&id)
-                    .execute(&app.db)
-                    .await;
-                app.clear_sessions_for_user(&user_id);
-                continue;
-            }
-            Some("FAIL") => continue,
-            _ => {}
+        if let Err(e) = sqlx::query("UPDATE Sessions SET ExpiredNotify = true WHERE Id = $1").bind(&s.id).execute(&app.db).await {
+            eprintln!("Failed to update ExpiredNotify flag: sessionid={} err={e}", s.id);
         }
-        let _ = sqlx::query("UPDATE Sessions SET ExpiredNotify = true WHERE Id = $1").bind(&id).execute(&app.db).await;
     }
     Ok(())
 }
 
-/// `model.IsMHPNSEndpoint`.
-fn is_mhpns(server: &str) -> bool {
-    let s = server.trim_end_matches('/');
-    s == "https://push.mattermost.com" || s == "https://hpns-de.mattermost.com" || s == "https://hpns-us.mattermost.com"
+/// `getSessionExpiredPushMessage`: in the user's locale.
+async fn session_expired_message(app: &App, user_id: &str) -> String {
+    let locale = match app.user(user_id).await {
+        Ok(Some(u)) => u.locale.clone(),
+        _ => "en".to_string(),
+    };
+    let hours = app.cfg.i64("ServiceSettings.SessionLengthMobileInHours").to_string();
+    crate::i18n::tl(&locale, "api.push_notifications.session.expired", &[("siteName", app.cfg.str("TeamSettings.SiteName")), ("hoursCount", &hours)])
 }
 
 /// The ETag of the last notices fetch and its body (`noticesCache`, `utils.GetURLWithCache`).
@@ -1062,34 +1032,9 @@ async fn resend_invitation_job(app: &State, mut job: Job) {
     if now_ms() - scheduled <= duration {
         return;
     }
-    let team_id = job.get("teamID").unwrap_or("").to_string();
-    let werr = |e: String| format!("worker: ResendInvitationEmail: job_id: {}, {e}", job.id);
-    let emails: Vec<String> = match serde_json::from_str(job.get("emailList").unwrap_or("")) {
-        Ok(e) => e,
-        Err(e) => {
-            let msg = werr(e.to_string());
-            let _ = jobs::set_error(app, &mut job, Some(msg)).await;
-            return;
-        }
-    };
-    // removeAlreadyJoined
-    let mut pending = vec![];
-    for email in emails {
-        let joined: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM Users u JOIN TeamMembers tm ON tm.UserId = u.Id WHERE u.Email = LOWER($1) AND tm.TeamId = $2)",
-        )
-        .bind(&email)
-        .bind(&team_id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap_or(false);
-        if !joined {
-            pending.push(email);
-        }
-    }
-    if !pending.is_empty()
-        && let Err(e) = crate::job_workers::resend_invitations(app, &job, &pending).await
-    {
+    // An error is recorded as Go's `SetJobError` does, which needs the job in progress: this one never is, so it
+    // stays pending and is tried again at the next poll, as in Go.
+    if let Err(e) = resend_emails(app, &job).await {
         let _ = jobs::set_error(app, &mut job, Some(e)).await;
         return;
     }
@@ -1100,10 +1045,75 @@ async fn resend_invitation_job(app: &State, mut job: Job) {
     }
 }
 
-/// `InviteNewUsersToTeamGracefully` for the resend job: the invitation emails are the notifications' (email)
-/// part of the server; until it sends them, the resend fails as an email failure would.
-async fn resend_invitations(_app: &App, _job: &Job, _emails: &[String]) -> Result<(), String> {
-    Err(jobs::go_error("SendInviteEmails", "api.team.invite_members.unable_to_send_email.app_error", "email sending is not available"))
+/// `ResendEmails`: the emails and channels of the job, less the addresses that joined the team since, invited
+/// again with the "48" hours reminder (`InviteNewUsersToTeamGracefully`). The error is `data.error`'s text.
+async fn resend_emails(app: &App, job: &Job) -> Result<(), String> {
+    let werr = |e: String| format!("job_id: {} — {e}", job.id);
+    let emails: Vec<String> = serde_json::from_str(job.get("emailList").unwrap_or("")).map_err(|e| werr(e.to_string()))?;
+    let mut channels: Vec<String> = vec![];
+    if let Some(c) = job.get("channelList").filter(|c| !c.is_empty()) {
+        channels = serde_json::from_str(c).map_err(|e| werr(e.to_string()))?;
+    }
+    let team_id = job.get("teamID").unwrap_or("");
+    // removeAlreadyJoined: GetUserByEmail, then GetTeamMembersByIds (active memberships).
+    let mut pending = vec![];
+    for email in emails {
+        let joined: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM Users u JOIN TeamMembers tm ON tm.UserId = u.Id
+             WHERE u.Email = LOWER(TRIM($1)) AND tm.TeamId = $2 AND tm.DeleteAt = 0)",
+        )
+        .bind(&email)
+        .bind(team_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap_or(false);
+        if !joined {
+            pending.push(email);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // Profiles kept for the remaining addresses need an Enterprise license (`validateAndNormalizeMemberInviteProfiles`).
+    let mut profiles = false;
+    if let Some(p) = job.get("profilesList").filter(|p| !p.is_empty()) {
+        let list: Vec<Option<Value>> = serde_json::from_str(p).map_err(|e| werr(e.to_string()))?;
+        let remaining: Vec<String> = pending.iter().map(|e| e.trim().to_lowercase()).collect();
+        profiles = list.iter().any(|p| match p {
+            None => true,
+            Some(p) => remaining.contains(&p.get("email").and_then(Value::as_str).unwrap_or("").trim().to_lowercase()),
+        });
+    }
+    let sender = job.get("senderID").unwrap_or("");
+    let res = if profiles {
+        resend_with_profiles(app, &pending, team_id, sender).await
+    } else {
+        crate::teams::invite_new_users_gracefully(app, pending, &channels, String::new(), team_id, sender, "48").await
+    };
+    let invites = res.map_err(|e| update_error_text(&e))?;
+    for i in invites {
+        if let Some(e) = i.error {
+            return Err(update_error_text(&e));
+        }
+    }
+    Ok(())
+}
+
+/// `InviteNewUsersToTeamGracefully` with invitee profiles: its checks, then the license error.
+async fn resend_with_profiles(app: &App, emails: &[String], team_id: &str, sender: &str) -> ApiResult<Vec<crate::teams::EmailInviteWithError>> {
+    if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
+        return Err(AppError::new(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "api.team.invite_members.disabled.app_error",
+            "Email invitations are disabled.",
+        ));
+    }
+    if emails.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.no_one.app_error", ""));
+    }
+    app.team(team_id).await?;
+    app.user(sender).await?.ok_or_else(crate::users::missing_account)?;
+    Err(AppError::bad_request("api.team.invite_members.profiles_license.app_error", ""))
 }
 
 // ---------- recurring tasks outside the job server (server.go) ----------

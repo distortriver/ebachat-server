@@ -135,7 +135,7 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
 - **Web client: served as Go serves it** (`src/web.rs`, from `channels/web/static.go`), so the stock web and
   desktop clients load from the server.
   - **What is served:** `/static/*` from the client directory, with Range and conditional requests, and
-    gzip-compressed as Go's `gzhttp` does; `/static/plugins/*` from `PluginSettings.ClientDirectory`;
+    compressed as Go's `gzhttp` does; `/static/plugins/*` from `PluginSettings.ClientDirectory`;
     `/robots.txt`. Every other GET or HEAD outside `/api/` gets `root.html`, with the site name and description.
     It is byte-identical to Go's. Old browsers and desktop apps get Go's unsupported pages instead. Details in
     `docs/WEB.md`.
@@ -159,6 +159,20 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
   that is ever needed.
 - **Push and email** are sent as Go sends them: see `docs/NOTIFICATIONS.md`.
+- **Compression** (`src/compress.rs`): with `WebserverMode` "gzip" (read at start), every API and web handler Go
+  wraps in `gzhttp` (klauspost/compress 1.19.2) answers as it does: `Vary: Accept-Encoding` always; zstd or gzip
+  by the `Accept-Encoding` q-values, zstd on a tie (browsers offering both get zstd), never for `HEAD`; only bodies
+  of 1 KiB or more (streamed bodies are buffered up to that), without `Content-Encoding`/`Content-Range`, of a
+  type not already compressed (not audio, video, JPEG or an archive); `Content-Length` and `Accept-Ranges` go.
+  Not wrapped, as in Go: the API's 404 for an unknown path, `root.html`, `robots.txt`, `unsupported_browser.js`,
+  and a websocket upgrade (101). Compressed bytes differ from Go's; they decompress to the same body.
+- **Channel mentions** (`props.channel_mentions` of a post, `posts.rs`): stored as Go's `FillInPostProps` writes
+  them (display name, team name, channel id); every answer gives the viewer only the mentions they may resolve,
+  looked up again by team and channel name, with the current display name and without the id
+  (`sanitizeChannelMentionsForUser`, also inside permalink previews); `posted` and `post_edited` events keep the
+  stored form, per recipient (public channels for everyone, a private channel's for its members).
+- **`HEAD` on the API** is Go's 404 (its routes are registered for their methods only), but for the file routes
+  (`/files/{id}`, `/thumbnail`, `/preview`) that take it.
 - **Open:**
   - bots: about 116 Lambdas (`node` UA) do email lookup → `channels/direct` → `posts`, and there are incoming
     webhooks. These are T2, but critical.
@@ -229,7 +243,8 @@ Code by area:
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
 | Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs` |
-| Admin | `admin.rs`, `audit.rs` (Audits rows), `logs.rs` (server log, `/logs`), `license.rs`, `permanent.rs`, `cpa.rs`, `config_order.rs`; see `docs/ADMIN.md` |
+| Admin | `admin.rs`, `audit.rs` (Audits rows), `logs.rs` (server log, `/logs`, startup lines), `license.rs`, `permanent.rs`, `cpa.rs`, `config_order.rs`; see `docs/ADMIN.md` |
+| HTTP | `api.rs` (router, Go's headers, `HEAD`), `compress.rs` (gzhttp), `web.rs` |
 
 ## Running
 

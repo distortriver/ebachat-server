@@ -15,14 +15,25 @@ one given, with `session_user=` appended). The Rust server writes the same rows 
   switch, device attach, sessions (revoke one, all of a user, all), personal access tokens (create, disable, enable,
   revoke, rotate), teams (patch, invite id, icon), channels (create, update, patch, privacy, delete, restore, members,
   move), roles (patch), config (`PUT /config`), incoming and outgoing webhooks, slash commands, OAuth apps, license
-  (add, remove), product notices, onboarding, the first-admin-visit flag.
-- **Not here:** the OAuth/SAML web pages and the guest magic link (the web routes' scope), `sendPasswordReset`'s
-  `sent=` row (written when an email is sent: the notifications' scope), and licensed features (compliance,
-  bookmarks, remote clusters, outgoing OAuth connections, brand image), which never reach their audit point here.
+  (add, remove), product notices, onboarding, the first-admin-visit flag. Then the web routes: the OAuth 2.0
+  provider (authorize page in each of its three outcomes, the "Allow" answer, the token endpoint, deauthorize),
+  GitLab sign-in (`/oauth/{service}/login`, `mobile_login`, `signup`, the callback's `authenticated` for a desktop
+  sign-in and `success` with the new session), `/oauth/intune` (`attempt`), the guest magic link (`attempt`,
+  `failure`, `success` - guest_magic_link), the desktop token login, the account type switch (both directions),
+  `sendPasswordReset`'s `sent=<email>`, and `POST /trial-license`'s `attempt` (an `audit:` step of
+  `unlicensed.rs`).
+- **Not here:** licensed features (compliance, bookmarks, remote clusters, outgoing OAuth connections, brand
+  image, dynamic client registration, `getLoginType`, `loginCWS`), which never reach their audit point here.
+  Permanent deletion, custom profile attributes, jobs, exports and properties write no `Audits` rows in Go (only
+  the audit log's records, `MakeAuditRecord`, which is not the table).
 - **Checked:** the same 70 requests against Go and Rust (users, tokens, sessions, teams, channels, roles, config,
   hooks, commands, OAuth apps, license, notices), the new `Audits` rows of each normalized (ids by first appearance):
   identical, but for the rows of answers that differ on purpose (activating a user past Go's 250-user limit, and the
   missing `token_id`, where Go's row is written too).
+- **Checked, web routes:** an OAuth app authorized (anonymous, admin, "Allow"), its token fetched (also with a bad
+  secret), deauthorized and deleted; a throwaway email user switched to GitLab, signed in from the desktop and
+  the browser through a fake GitLab, switched back to email, sent a password reset; intune and a trial license:
+  the same 30 rows from Go and Rust, normalized.
 
 ## Server log (`src/logs.rs`)
 
@@ -98,6 +109,23 @@ only the `PostStats` days in range (local dates, the start inclusive, the end ex
   (`model.Config`'s field order, four-space indent, `<`, `>`, `&` escaped); the answers of `PUT`/`PATCH /config` are
   in that order too. `GET /config` answers a map, its keys sorted, as Go's `FilterConfig` does.
 - **Not ported:** the advanced logging targets' own checks (`cfg.IsValid(MlvlAll)`); only that the JSON is an object.
+- **Stores** (`MM_CONFIG` a file or a Postgres DSN): as `Store.Load`, the loaded settings (defaults filled, without
+  the environment and the feature flags) are written back at start. The database store (`DatabaseStore.persist`)
+  writes a new active `Configurations` row only when the SHA-256 of the marshalled config differs from the active
+  row's, with Go's errors (`failed to query active configuration`, `could not encode value`, the transaction's);
+  without an active row it starts from the database settings alone. A `null` `AdvancedLoggingJSON` stays `null`
+  (a `json.RawMessage` keeps it). Checked on a scratch config database: Go's start, an unchanged and a changed
+  `PUT /config` by Go, then Rust's start, unchanged and changed saves, and Go's restart on Rust's row: rows are
+  added exactly when Go adds them, with the same SHA.
+
+## Startup log
+
+What Go's `NewServer` and `Server.Start` log that an admin sees in `/logs`, in Go's words and order: the SiteURL
+error when it is not a URL (unless `IS_CI`/`IS_LOCAL_TESTING`), "Printing current working" (`directory`), "Loaded
+config" (`source`: `file://` and the absolute path, or the DSN with `****:****` credentials), "Mail server
+connection test failed" (with email notifications on; the same error text), "Problem with file storage settings",
+the push server over plain HTTP warning, "Starting Server...", then "Server is listening on". Checked against Go
+with an unreachable SMTP port. Go's version and build lines are not written (they describe Go's build).
 
 ## Custom profile attributes (`src/cpa.rs`)
 

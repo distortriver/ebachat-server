@@ -773,7 +773,7 @@ fn with_cookie(mut r: Response, cookie: &str) -> Response {
 }
 
 /// `loginWithOAuth`.
-async fn login(St(app): St<State>, Path(service): Path<String>, req: Request) -> Response {
+async fn login(St(app): St<State>, MaybeAuth(s): MaybeAuth, Path(service): Path<String>, req: Request) -> Response {
     if !valid_service(&service) {
         return no_route(&app, &req).await;
     }
@@ -789,13 +789,16 @@ async fn login(St(app): St<State>, Path(service): Path<String>, req: Request) ->
         .oauth_login_endpoint(&headers, &service, ACTION_LOGIN, redirect_to, q.get("login_hint"), false, q.get("desktop_token"), q.get("t"), q.get("id"))
         .await
     {
-        Ok((url, cookie)) => with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie),
+        Ok((url, cookie)) => {
+            crate::audit::log(&app, s.as_deref(), "success").await;
+            with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie)
+        }
         Err(e) => web_error(&app, &headers, e).await,
     }
 }
 
 /// `mobileLoginWithOAuth`.
-async fn mobile_login(St(app): St<State>, Path(service): Path<String>, req: Request) -> Response {
+async fn mobile_login(St(app): St<State>, MaybeAuth(s): MaybeAuth, Path(service): Path<String>, req: Request) -> Response {
     if !valid_service(&service) {
         return no_route(&app, &req).await;
     }
@@ -810,13 +813,16 @@ async fn mobile_login(St(app): St<State>, Path(service): Path<String>, req: Requ
         .oauth_login_endpoint(&headers, &service, ACTION_MOBILE, &redirect_to, "", true, "", q.get("t"), q.get("id"))
         .await
     {
-        Ok((url, cookie)) => with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie),
+        Ok((url, cookie)) => {
+            crate::audit::log(&app, s.as_deref(), "success").await;
+            with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie)
+        }
         Err(e) => web_error(&app, &headers, e).await,
     }
 }
 
 /// `signupWithOAuth`.
-async fn signup(St(app): St<State>, Path(service): Path<String>, req: Request) -> Response {
+async fn signup(St(app): St<State>, MaybeAuth(s): MaybeAuth, Path(service): Path<String>, req: Request) -> Response {
     if !valid_service(&service) {
         return no_route(&app, &req).await;
     }
@@ -837,7 +843,10 @@ async fn signup(St(app): St<State>, Path(service): Path<String>, req: Request) -
         props.insert("desktop_token".into(), q.get("desktop_token").into());
     }
     match app.authorization_code_url(&headers, &service, props, "").await {
-        Ok((url, cookie)) => with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie),
+        Ok((url, cookie)) => {
+            crate::audit::log(&app, s.as_deref(), "success").await;
+            with_cookie(redirect(StatusCode::FOUND, &url, "application/json"), &cookie)
+        }
         Err(e) => web_error(&app, &headers, e).await,
     }
 }
@@ -1009,6 +1018,11 @@ impl App {
             return Err(if id.contains("email_exists") { AppError::bad_request(id, "") } else { AppError::internal(id, e.to_string()) });
         }
         self.invalidate_user(&user.id);
+        let method = format!("{} SSO", title(service));
+        let (email, locale) = (user.email.clone(), user.locale.clone());
+        crate::email::go(self, "signin change email", move |app| async move {
+            crate::email::send_sign_in_change(&app, &email, &method, &locale).await
+        });
         Ok(user)
     }
 }
@@ -1024,7 +1038,7 @@ fn redact_token_response(body: &str) -> String {
 }
 
 /// `completeOAuth`: the provider's callback.
-async fn complete(St(app): St<State>, Path(service): Path<String>, req: Request) -> Response {
+async fn complete(St(app): St<State>, MaybeAuth(cur): MaybeAuth, Path(service): Path<String>, req: Request) -> Response {
     if !valid_service(&service) {
         return no_route(&app, &req).await;
     }
@@ -1098,6 +1112,7 @@ async fn complete(St(app): St<State>, Path(service): Path<String>, req: Request)
                 params.push(("isDesktopDev", "true"));
             }
             let to = append_query_params(&format!("{site}/login/desktop"), &params);
+            crate::audit::log_user(&app, cur.as_deref(), &user.id, "authenticated").await;
             return finish(redirect(StatusCode::TEMPORARY_REDIRECT, &to, "text/html; charset=utf-8"));
         }
         let mut h = HeaderMap::new();
@@ -1112,6 +1127,7 @@ async fn complete(St(app): St<State>, Path(service): Path<String>, req: Request)
             let mut r = StatusCode::OK.into_response();
             r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             r.headers_mut().extend(h);
+            crate::audit::log(&app, Some(&s), "success").await;
             return finish(r);
         }
         if mobile_with_redirect {
@@ -1122,12 +1138,15 @@ async fn complete(St(app): St<State>, Path(service): Path<String>, req: Request)
             );
             let mut r = mobile_auth_complete(&to);
             r.headers_mut().extend(h);
+            crate::audit::log(&app, Some(&s), "success").await;
             return finish(r);
         }
         let mut r = redirect(StatusCode::TEMPORARY_REDIRECT, &redirect_url, "text/html; charset=utf-8");
         r.headers_mut().extend(h);
+        crate::audit::log(&app, Some(&s), "success").await;
         return finish(r);
     };
+    crate::audit::log(&app, cur.as_deref(), "success").await;
     finish(redirect(StatusCode::TEMPORARY_REDIRECT, &to, "text/html; charset=utf-8"))
 }
 
@@ -1140,7 +1159,7 @@ struct IntuneLogin {
 }
 
 /// `loginByIntune`: Microsoft Intune is an Enterprise feature, never available here.
-async fn intune(St(_app): St<State>, body: Bytes) -> ApiResult<Response> {
+async fn intune(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes) -> ApiResult<Response> {
     let r: IntuneLogin = decode_json(&body, "request_body")?;
     if r.access_token.is_empty() {
         return Err(AppError::invalid_param("access_token"));
@@ -1149,6 +1168,7 @@ async fn intune(St(_app): St<State>, body: Bytes) -> ApiResult<Response> {
         return Err(AppError::invalid_param("voip_device_id"));
     }
     let _ = r.device_id;
+    crate::audit::log(&app, s.as_deref(), "attempt").await;
     Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.user.login_by_intune.not_available.app_error", ""))
 }
 
@@ -1182,6 +1202,7 @@ async fn one_time_link(St(app): St<State>, MaybeAuth(s): MaybeAuth, req: Request
             return redirect(StatusCode::FOUND, &to, "application/json");
         }
     };
+    crate::audit::log_user(&app, None, &user.id, "attempt - guest_magic_link").await;
     let web_app_error = |e: AppError| {
         let app = app.clone();
         async move {
@@ -1190,12 +1211,15 @@ async fn one_time_link(St(app): St<State>, MaybeAuth(s): MaybeAuth, req: Request
         }
     };
     if let Err(e) = app.check_user_all_authentication_criteria(&user).await {
+        crate::audit::log_user(&app, None, &user.id, "failure - guest_magic_link").await;
         return web_app_error(e).await;
     }
     let mut h = HeaderMap::new();
-    if let Err(e) = app.login_session(&headers, &mut h, &user, "", false, false, true, true).await {
-        return web_app_error(e).await;
-    }
+    let session = match app.login_session(&headers, &mut h, &user, "", false, false, true, true).await {
+        Ok(s) => s,
+        Err(e) => return web_app_error(e).await,
+    };
+    crate::audit::log_user(&app, Some(&session), &user.id, "success - guest_magic_link").await;
     let to = if redirect_to.is_empty() { site.clone() } else { fully_qualified_redirect(&site, &redirect_to, &custom_schemes(&app)) };
     let mut r = redirect(StatusCode::FOUND, &to, "application/json");
     r.headers_mut().extend(h);
@@ -1314,7 +1338,8 @@ pub async fn login_with_desktop_token(app: &State, headers: &HeaderMap, body: &[
         ));
     }
     let mut h = HeaderMap::new();
-    app.login_session(headers, &mut h, &user, &device_id, false, is_oauth, is_saml, true).await?;
+    let session = app.login_session(headers, &mut h, &user, &device_id, false, is_oauth, is_saml, true).await?;
+    crate::audit::log_user(app, Some(&session), &user.id, "success").await;
     // Go writes the user as it read it; its secrets never leave this server.
     let mut u = (*app.user(&user_id).await?.unwrap_or(user)).clone();
     u.password.clear();

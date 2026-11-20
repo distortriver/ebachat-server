@@ -1103,25 +1103,51 @@ impl App {
                 post.props.0.remove("previewed_post");
             }
         }
-        if let Some(Value::Object(m)) = post.props.0.get("channel_mentions").cloned() {
-            let mut keep = serde_json::Map::new();
-            for (name, v) in m {
-                let cid = v["id"].as_str().unwrap_or("");
-                let ok = match self.channel(cid).await {
-                    Ok(Some(c)) => self.user_read_channel(user_id, &c).await.0,
-                    _ => cid.is_empty(),
-                };
-                if ok {
-                    keep.insert(name, v);
+        self.sanitize_channel_mentions(&mut post, user_id).await;
+        // sanitizeEmbeddedChannelMentionsForUser: a permalink preview shows its post's mentions too.
+        if let Some(md) = post.metadata.as_mut() {
+            for e in md.embeds.iter_mut().filter(|e| e.r#type == "permalink") {
+                if let Some(EmbedData::Permalink(pp)) = e.data.as_mut()
+                    && let Some(p) = pp.post.as_mut()
+                {
+                    self.sanitize_channel_mentions(p, user_id).await;
                 }
-            }
-            if keep.is_empty() {
-                post.props.0.remove("channel_mentions");
-            } else {
-                post.props.0.insert("channel_mentions".into(), Value::Object(keep));
             }
         }
         post
+    }
+
+    /// `sanitizeChannelMentionsForUser`: each mention looked up again by its team and channel name, kept (with the
+    /// channel's current display name, without its id) when the viewer may resolve it.
+    async fn sanitize_channel_mentions(&self, post: &mut Post, user_id: &str) {
+        let Some(m) = post.props.0.get("channel_mentions") else { return };
+        let Value::Object(m) = m.clone() else { return };
+        let mut keep = serde_json::Map::new();
+        for (name, v) in m {
+            let Some(team_name) = v.as_object().and_then(|o| o.get("team_name")).and_then(Value::as_str).filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            // GetChannelByNameForTeamName(name, team, includeDeleted)
+            let found: Option<(String, String, String, String)> = sqlx::query_as(
+                "SELECT c.Id, c.Type::text, c.DisplayName, c.TeamId FROM Channels c
+                 WHERE c.Name = $1 AND c.TeamId = (SELECT Id FROM Teams WHERE Name = $2 LIMIT 1)",
+            )
+            .bind(&name)
+            .bind(team_name)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+            let Some((id, kind, display, team_id)) = found else { continue };
+            if self.user_resolve_mention(user_id, &id, &kind, &team_id).await {
+                keep.insert(name, json!({"display_name": display, "team_name": team_name}));
+            }
+        }
+        if keep.is_empty() {
+            post.props.0.remove("channel_mentions");
+        } else {
+            post.props.0.insert("channel_mentions".into(), Value::Object(keep));
+        }
     }
 
     pub async fn sanitize_list_for_user(&self, mut list: PostList, user_id: &str) -> PostList {
@@ -1132,22 +1158,71 @@ impl App {
         list
     }
 
-    /// `publishWebsocketEventForPost`: the post without permalink embeds and channel mentions, which the
-    /// broadcast hooks add back per recipient (here: public channels' mentions for everyone).
-    pub fn post_for_broadcast(&self, post: &Post) -> Post {
+    /// `publishWebsocketEventForPost`: the post without permalink embeds; its channel mentions go back in per
+    /// recipient (`channelMentionsBroadcastHook`), as stored (with the channel id), for those who may resolve
+    /// them. The recipients of a post's events are the channel's members, all in its team: a public channel's
+    /// mention is kept for everyone, a private one's for its members. Mentions without an id are dropped.
+    pub async fn post_for_broadcast(&self, post: &Post) -> BroadcastPost {
         let mut p = post.clone();
         if let Some(md) = p.metadata.as_mut() {
             md.embeds.retain(|e| e.r#type != "permalink");
         }
         p.props.0.remove("previewed_post");
+        let mut public = serde_json::Map::new();
+        let mut private = vec![];
         if let Some(Value::Object(m)) = p.props.0.remove("channel_mentions") {
-            let public: serde_json::Map<String, Value> =
-                m.into_iter().filter(|(_, v)| v["type"] == "O" || v["public"] == true).collect();
-            if !public.is_empty() {
-                p.props.0.insert("channel_mentions".into(), Value::Object(public));
+            for (name, v) in m {
+                let Some(id) = v.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()) else { continue };
+                let Ok(Some(c)) = self.channel(id).await else { continue };
+                if c.r#type == channel::OPEN {
+                    public.insert(name, v);
+                } else {
+                    let members: Vec<String> =
+                        sqlx::query_scalar("SELECT UserId FROM ChannelMembers WHERE ChannelId = $1").bind(id).fetch_all(&self.db).await.unwrap_or_default();
+                    private.push((name, v, members.into_iter().collect::<std::collections::HashSet<_>>()));
+                }
             }
         }
-        p
+        let mut with_public = p.clone();
+        if !public.is_empty() {
+            with_public.props.0.insert("channel_mentions".into(), Value::Object(public.clone()));
+        }
+        BroadcastPost { post: with_public, base: p, public, private: Arc::new(private) }
+    }
+}
+
+/// The post's JSON for one recipient, when it is not the shared one.
+pub type PostFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// A post for its websocket events: `post` for every recipient, and for members of privately mentioned channels
+/// their own copy (`post_json_for`).
+pub struct BroadcastPost {
+    pub post: Post,
+    base: Post,
+    public: serde_json::Map<String, Value>,
+    private: Arc<Vec<(String, Value, std::collections::HashSet<String>)>>,
+}
+
+impl BroadcastPost {
+    /// The post's JSON for one recipient, when it differs from `post`'s.
+    pub fn per_user(&self) -> Option<PostFor> {
+        if self.private.is_empty() {
+            return None;
+        }
+        let (base, public, private) = (self.base.clone(), self.public.clone(), self.private.clone());
+        Some(Arc::new(move |uid: &str| {
+            let extra: Vec<&(String, Value, _)> = private.iter().filter(|(_, _, m)| m.contains(uid)).collect();
+            if extra.is_empty() {
+                return None;
+            }
+            let mut m = public.clone();
+            for (name, v, _) in extra {
+                m.insert(name.clone(), v.clone());
+            }
+            let mut p = base.clone();
+            p.props.0.insert("channel_mentions".into(), Value::Object(m));
+            serde_json::to_string(&p).ok()
+        }))
     }
 }
 
@@ -1391,10 +1466,7 @@ impl App {
             .fetch_all(&self.db)
             .await?;
             for (id, name, display, ty, team) in found {
-                // HasPermissionToResolveChannelMention: public channels of the team, or a member.
-                let ok = ty == channel::OPEN && self.user_team_perm(&post.user_id, &team_id, perm::READ_PUBLIC_CHANNEL).await
-                    || self.user_channel_perm(&post.user_id, &id, perm::READ_CHANNEL).await.0;
-                if ok {
+                if self.user_resolve_mention(&post.user_id, &id, &ty, &team_id).await {
                     prop.insert(name, json!({"display_name": display, "team_name": team, "id": id}));
                 }
             }
@@ -1749,11 +1821,14 @@ impl App {
         let mut rpost = self.prepare_post_full(&new, Prep { is_edit: true, include_priority: true, ..Default::default() }).await;
         rpost.is_following = None;
         rpost.reply_count = old.reply_count;
-        let bpost = self.post_for_broadcast(&rpost);
+        let bpost = self.post_for_broadcast(&rpost).await;
+        let per_user: Option<crate::hub::PerUser> = bpost.per_user().map(|f| -> crate::hub::PerUser {
+            Arc::new(move |uid: &str| f(uid).map(|p| serde_json::Map::from_iter([("post".to_string(), Value::String(p))])))
+        });
         self.hub.publish(
             "post_edited",
-            json!({"post": serde_json::to_string(&bpost).unwrap()}),
-            Broadcast { channel_id: rpost.channel_id.clone(), ..Default::default() },
+            json!({"post": serde_json::to_string(&bpost.post).unwrap()}),
+            Broadcast { channel_id: rpost.channel_id.clone(), per_user, ..Default::default() },
         );
         self.invalidate_channel_posts(&rpost.channel_id);
         Ok(self.sanitize_for_user(rpost, &s.user_id).await)

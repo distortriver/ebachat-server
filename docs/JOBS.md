@@ -44,7 +44,7 @@ compliance, access control) answer `model.job.is_valid.type.app_error` as Go.
 | --- | --- | --- |
 | `migrations` | every minute until done | advanced permissions phase 2 (team and channel members' scheme roles), 100 rows a second; nothing once `migration_advanced_permissions_phase_2` is in `Systems` |
 | `plugins` | 24 h | expired plugin KV rows deleted |
-| `expiry_notify` | 10 min, with `ExtendSessionLengthWithActivity` | a `session` push to mobile sessions expired in the last hour, `ExpiredNotify` set |
+| `expiry_notify` | 10 min, with `ExtendSessionLengthWithActivity` | a `session` push (through `push.rs`, in the user's locale) to mobile sessions expired in the last hour, `ExpiredNotify` set once sent; a `REMOVE` answer retires the device |
 | `product_notices` | `NoticesFetchFrequency`, and once at startup | notices fetched (ETag cache), view states of notices no longer listed deleted |
 | `import_delete`, `export_delete` | 24 h, with a directory and retention | files past retention removed (imports: their upload session or FileInfo too) |
 | `active_users`, `mobile_session_metadata` | 10 min / 24 h, with metrics | nothing to report without a license's metrics |
@@ -58,7 +58,7 @@ compliance, access control) answer `model.job.is_valid.type.app_error` as Go.
 | `delete_empty_drafts_migration`, `delete_orphan_drafts_migration`, `delete_dms_preferences_migration` | created at startup unless done | Go's batch migrations, a batch a second; key in `Systems` when done |
 | `export_process` | (created by `POST /jobs`) | bulk export, below |
 | `import_process` | (created by `POST /jobs`) | checks only, see below |
-| `resend_invitation_email` | (created by team invites) | after 48 h, invitations of emails that have not joined resent; `Systems` row of the job removed |
+| `resend_invitation_email` | (created by team invites) | after 48 h (`MM_RESEND_INVITATION_EMAIL_JOB_DURATION`), the invitations (with their channels) of emails that have not joined resent with the "Reminder:" title (`InviteNewUsersToTeamGracefully`, `teams.rs`); `Systems` row of the job removed. Never claimed, as Go: every server's worker may send it until one sets it to success |
 | `hosted_purchase_screening` | never (Enterprise builds) | screening flag dropped after 3 days |
 | licensed types | never | registered, never enabled: their jobs stay pending |
 
@@ -103,10 +103,6 @@ written to the job's data as Go does.
 - **Bulk import is not ported.** `import_process` checks `import_file` and the file as Go does, then fails with
   `api.not_implemented.app_error` rather than pretending to import. Porting `BulkImportWithPath` (about 4,000
   lines of Go writing every table) is the remaining work.
-- **Resent invitations need the email sender** (the notifications part): until it is wired in, a due resend job
-  fails with `api.team.invite_members.unable_to_send_email.app_error`.
-- **Session expiry pushes** are sent by `job_workers.rs` itself (push proxy `send_push`, `REMOVE` handled); to be
-  folded into the push sender of the notifications part.
 - **Extraction:** `.doc`, `.rtf` and `.html` documents fall through to plain text (Go needs `wvText`/`unrtf`,
   which it does not ship; `html` goes through `docconv`'s readability, not ported); a pdf without `pdftotext`
   gives no text (Go falls back to a Go PDF reader). Text cut at 1 MB stays valid UTF-8 (Go may cut inside a
@@ -126,5 +122,14 @@ written to the job's data as Go does.
   data, error text) and the effects (rows deleted, the system bot's DM) were the same: 13/13.
 - **Bulk export:** a team-scoped export (`compat`, with roles and schemes, attachments, profile pictures and
   custom emoji) by Go and by Rust: the same zip entries and methods, the same 126 JSONL lines byte for byte (but
-  `created`), the same job data. A full export (direct channels and posts) was not compared: Go takes about
-  25 minutes over the stand's 42k posts.
+  `created`), the same job data.
+- **Full bulk export** (all teams, direct and group channels and posts, custom emoji): Go's `mattermost export
+  bulk --all-teams --archive` (the same `BulkExport` without the job server, a few minutes on the stand) against
+  `tests/bulk_export_full.rs` (Rust's export worker run directly, not as a job a shared server could claim):
+  42,436 lines, line types in the same order, every line identical but `created` and the order of a user's team
+  and channel memberships, which Go reads without `ORDER BY` (equal once sorted).
+- **Resend invitations:** graceful invites (with a channel and a message) by Go and by Rust, the resend delay cut
+  to a second: each server resent the other's job, the emails identical (initial and reminder), both jobs
+  `success` with progress 0.
+- **Session expiry pushes:** two expired mobile sessions (one device answered `REMOVE`): the same push payloads
+  from Go and Rust, `ExpiredNotify` set for the delivered one, `last_removed_device_id` for the removed one.

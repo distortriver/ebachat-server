@@ -39,10 +39,18 @@ fn leak(v: Value) -> *mut Value {
 
 impl Config {
     /// `MM_CONFIG`: a file (default `config/config.json`) or a Postgres DSN for the `Configurations` table.
+    /// As `Store.Load` at start, the loaded settings (with defaults, without the environment and the feature flags)
+    /// are written back to the source.
     pub async fn load() -> anyhow::Result<Config> {
         let src = std::env::var("MM_CONFIG").unwrap_or_else(|_| "config/config.json".into());
         let raw = read_source(&src).await?;
-        Ok(Config::from_raw(raw, src))
+        let cfg = Config::from_raw(raw, src);
+        let mut persisted = cfg.raw.lock().unwrap().clone();
+        if let Some(m) = persisted.as_object_mut() {
+            m.remove("FeatureFlags");
+        }
+        write_source(&cfg.source, &persisted).await.map_err(|e| anyhow::anyhow!("failed to persist: {e}"))?;
+        Ok(cfg)
     }
 
     /// Settings from what a source holds (tests, and `load`): Go's defaults where it has none, as `Store.Load`.
@@ -71,6 +79,16 @@ impl Config {
             saving: tokio::sync::Mutex::new(()),
             diagnostic_id: String::new(),
         }
+    }
+
+    /// `DescribeConfig`: `file://` and the file's absolute path, or the database DSN with its credentials masked.
+    pub fn describe(&self) -> String {
+        if self.source.starts_with("postgres") {
+            return sanitize_dsn(&self.source);
+        }
+        let p = std::path::Path::new(&self.source);
+        let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(p) };
+        format!("file://{}", abs.display())
     }
 
     /// The settings in effect.
@@ -274,37 +292,59 @@ fn set_path(v: &mut Value, key: &str, val: &str) -> Option<String> {
     None
 }
 
+/// `DatabaseStore.Load` (without an active row: a config holding only the database settings) or `FileStore.Load`.
 async fn read_source(src: &str) -> anyhow::Result<Value> {
     if src.starts_with("postgres") {
         let db = sqlx::PgPool::connect(&crate::db_url(src)).await?;
-        let (s,): (String,) = sqlx::query_as("SELECT Value FROM Configurations WHERE Active").fetch_one(&db).await?;
-        Ok(serde_json::from_str(&s)?)
+        let row: Option<(String,)> = sqlx::query_as("SELECT Value FROM Configurations WHERE Active")
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to query active configuration: {e}"))?;
+        match row {
+            Some((s,)) if !s.is_empty() => Ok(serde_json::from_str(&s)?),
+            _ => Ok(serde_json::json!({"SqlSettings": {"DriverName": "postgres", "DataSource": src}})),
+        }
     } else {
         Ok(serde_json::from_slice(&std::fs::read(src).map_err(|e| anyhow::anyhow!("{src}: {e}"))?)?)
     }
 }
 
-/// `FileStore.persist` (4-space JSON, as Go writes it) or `DatabaseStore.persist` (a new active row).
+/// `FileStore.persist` (4-space JSON, as Go writes it) or `DatabaseStore.persist`: a new active row, unless the
+/// active one has the same SHA-256 (a config saved unchanged, or the one loaded at start, writes nothing).
 async fn write_source(src: &str, v: &Value) -> anyhow::Result<()> {
     if src.starts_with("postgres") {
         let db = sqlx::PgPool::connect(&crate::db_url(src)).await?;
         // marshalConfig: MarshalIndent, as for the file.
         let s = crate::config_order::to_go_json(v, true);
-        let sha = {
+        let sum: Vec<u8> = {
             use sha2::Digest;
-            let d = sha2::Sha256::digest(s.as_bytes());
-            d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            sha2::Sha256::digest(s.as_bytes()).to_vec()
         };
-        let mut tx = db.begin().await?;
-        sqlx::query("UPDATE Configurations SET Active = NULL WHERE Active").execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO Configurations (Id, Value, CreateAt, Active, SHA) VALUES ($1, $2, $3, true, $4)")
+        let old: Option<(Option<String>,)> = sqlx::query_as("SELECT SHA FROM Configurations WHERE Active")
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to query active configuration: {e}"))?;
+        // Postgres returns the char column blank-padded.
+        let old = old.and_then(|o| o.0).unwrap_or_default();
+        let old_sum = hex_decode(old.trim()).map_err(|e| anyhow::anyhow!("could not encode value: {e}"))?;
+        if old_sum == sum {
+            return Ok(());
+        }
+        let sha: String = sum.iter().map(|b| format!("{b:02x}")).collect();
+        let mut tx = db.begin().await.map_err(|e| anyhow::anyhow!("failed to begin transaction: {e}"))?;
+        sqlx::query("UPDATE Configurations SET Active = NULL WHERE Active")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to deactivate current configuration: {e}"))?;
+        sqlx::query("INSERT INTO Configurations (Id, Value, CreateAt, Active, SHA) VALUES ($1, $2, $3, TRUE, $4)")
             .bind(crate::app::new_id())
             .bind(&s)
             .bind(crate::app::now_ms())
             .bind(sha)
             .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to record new configuration: {e}"))?;
+        tx.commit().await.map_err(|e| anyhow::anyhow!("failed to commit transaction: {e}"))?;
         return Ok(());
     }
     // Go's MarshalIndent of model.Config: the struct's field order.
@@ -313,6 +353,62 @@ async fn write_source(src: &str, v: &Value) -> anyhow::Result<()> {
     std::fs::write(&tmp, buf.as_bytes())?;
     std::fs::rename(&tmp, src)?;
     Ok(())
+}
+
+/// `model.SanitizeDataSource` for Postgres: `****:****` for the credentials, `user` and `password` dropped from
+/// the query (the rest sorted), the result unescaped.
+fn sanitize_dsn(dsn: &str) -> String {
+    let Ok(mut u) = reqwest::Url::parse(dsn) else { return String::new() };
+    let _ = u.set_username("****");
+    let _ = u.set_password(Some("****"));
+    let mut q: Vec<(String, String)> = u.query_pairs().filter(|(k, _)| k != "user" && k != "password").map(|(k, v)| (k.into(), v.into())).collect();
+    q.sort();
+    if q.is_empty() {
+        u.set_query(None);
+    } else {
+        u.query_pairs_mut().clear().extend_pairs(q);
+    }
+    let s = u.to_string();
+    percent_decode(&s.replace('+', " "))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `hex.DecodeString`, with its errors.
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    let b = s.as_bytes();
+    let digit = |i: usize| -> Result<u8, String> {
+        let c = b[i];
+        (c as char).to_digit(16).map(|d| d as u8).ok_or_else(|| format!("encoding/hex: invalid byte: U+{:04X} {:?}", c, c as char))
+    };
+    let mut out = Vec::with_capacity(b.len() / 2);
+    let mut i = 0;
+    while i + 1 < b.len() {
+        out.push(digit(i)? << 4 | digit(i + 1)?);
+        i += 2;
+    }
+    if b.len() % 2 == 1 {
+        digit(b.len() - 1)?;
+        return Err("encoding/hex: odd length hex string".into());
+    }
+    Ok(out)
 }
 
 fn lookup<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -523,6 +619,9 @@ pub fn fill_defaults(schema: &Value, v: &mut Value) {
     let (Some(sm), Some(vm)) = (schema.as_object(), v.as_object_mut()) else { return };
     for (k, s) in sm {
         match vm.get_mut(k) {
+            // A `json.RawMessage` (`AdvancedLoggingJSON`) unmarshals `null` as the four bytes "null", which
+            // `IsEmptyJSON` does not take for empty: it stays `null`.
+            Some(Value::Null) if k == "AdvancedLoggingJSON" => {}
             None | Some(Value::Null) => {
                 vm.insert(k.clone(), s.clone());
             }
