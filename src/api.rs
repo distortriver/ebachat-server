@@ -16,7 +16,7 @@ async fn not_found(
     uri: Uri,
 ) -> axum::response::Response {
     let api = uri.path().starts_with("/api/");
-    if !api && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
+    if !api && crate::web::static_enabled() && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
         return crate::web::root_for(&app, &headers, &uri).await;
     }
     if !api {
@@ -65,6 +65,14 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     if r.extensions().get::<crate::web::Raw>().is_some() {
         return r;
     }
+    // Static, plugin and docs files: only `setStaticSecurityHeaders`' headers, no request or version id.
+    if r.extensions().get::<crate::web::NoExpires>().is_some() {
+        let h = r.headers_mut();
+        h.insert("permissions-policy", HeaderValue::from_static(""));
+        h.entry("x-content-type-options").or_insert(HeaderValue::from_static("nosniff"));
+        h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        return r;
+    }
     let h = r.headers_mut();
     if !h.contains_key("x-request-id") {
         h.insert("x-request-id", HeaderValue::from_str(&crate::app::new_id()).unwrap());
@@ -105,7 +113,7 @@ async fn cache_stats(
 fn routes(app: State) -> Router {
     let gzip = app.cfg.str("ServiceSettings.WebserverMode") == "gzip";
     let r = Router::new()
-        .merge(crate::web::routes())
+        .merge(crate::web::routes(app.cfg.str("ServiceSettings.WebserverMode")))
         .route("/api/v4/ebachat/caches", get(cache_stats))
         .route("/api/v4/websocket", get(crate::hub::connect))
         .merge(crate::users::routes())

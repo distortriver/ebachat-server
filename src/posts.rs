@@ -1440,21 +1440,30 @@ impl App {
         let names = crate::notify::channel_mentions(post);
         let mut prop = serde_json::Map::new();
         if !names.is_empty() {
-            let team_id = match c {
-                Some(c) if !c.team_id.is_empty() => c.team_id.clone(),
-                _ => post.prop_str("current_team_id").to_string(),
+            // Without the channel, the post's own (`GetForPost`); a DM or GM takes the client's current team, and
+            // without one every team is searched (`GetByNames` with no team).
+            let own;
+            let c = match c {
+                Some(c) => c,
+                None => {
+                    own = self.channel(&post.channel_id).await?.ok_or_else(|| {
+                        AppError::bad_request("api.context.invalid_param.app_error", "").with_param("Name", "post.channel_id")
+                    })?;
+                    &*own
+                }
             };
+            let team_id = if c.team_id.is_empty() { post.prop_str("current_team_id").to_string() } else { c.team_id.clone() };
             post.props.0.remove("current_team_id");
-            let found: Vec<(String, String, String, String, String)> = sqlx::query_as(
-                "SELECT c.Id, c.Name, c.DisplayName, c.Type::text, t.Name FROM Channels c JOIN Teams t ON t.Id = c.TeamId
-                 WHERE c.TeamId = $1 AND c.Name = ANY($2) AND c.DeleteAt = 0",
+            let found: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+                "SELECT c.Id, c.Name, c.DisplayName, c.Type::text, c.TeamId, t.Name FROM Channels c JOIN Teams t ON t.Id = c.TeamId
+                 WHERE ($1 = '' OR c.TeamId = $1) AND c.Name = ANY($2) AND c.DeleteAt = 0",
             )
             .bind(&team_id)
             .bind(&names)
             .fetch_all(&self.db)
             .await?;
-            for (id, name, display, ty, team) in found {
-                if self.user_resolve_mention(&post.user_id, &id, &ty, &team_id).await {
+            for (id, name, display, ty, channel_team, team) in found {
+                if self.user_resolve_mention(&post.user_id, &id, &ty, &channel_team).await {
                     prop.insert(name, json!({"display_name": display, "team_name": team, "id": id}));
                 }
             }

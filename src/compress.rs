@@ -142,7 +142,7 @@ impl Encoder {
 
 /// Paths whose Go handlers are not wrapped, or that compress on their own.
 fn unwrapped(path: &str) -> bool {
-    path.starts_with("/static/") || path == "/robots.txt" || path == "/unsupported_browser.js"
+    path.starts_with("/static/") || path == "/_documentation" || path == "/robots.txt" || path == "/unsupported_browser.js"
 }
 
 /// The middleware for the wrapped routes (`from_fn`), installed only in "gzip" mode.

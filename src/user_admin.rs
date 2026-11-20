@@ -260,21 +260,15 @@ async fn update_user(
     if s.is_oauth && old.email != user.email {
         return Err(oauth_denied(AppError::forbidden_perm(EDIT_OTHER_USERS)));
     }
-    // CheckProviderAttributes: SSO-managed fields stay as the provider set them.
-    let provider_field = if old.auth_service == "ldap" || old.auth_service == "saml" {
-        None
-    } else if !old.auth_service.is_empty() && user.username != old.username {
-        Some("username")
-    } else {
-        None
-    };
-    if let Some(f) = provider_field {
+    // CheckProviderAttributes: a user of any login provider keeps its username (LDAP and SAML have no further
+    // checks without a license).
+    if !old.auth_service.is_empty() && user.username != old.username {
         return Err(AppError::new(
             StatusCode::CONFLICT,
             "api.user.update_user.login_provider_attribute_set.app_error",
             "",
         )
-        .with_param("Field", f));
+        .with_param("Field", "username"));
     }
     if !user.email.is_empty() && old.email != user.email && s.user_id == user_id {
         app.double_check_password(&old, &user.password).await.map_err(|_| AppError::invalid_param("password"))?;
