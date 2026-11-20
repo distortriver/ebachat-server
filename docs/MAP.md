@@ -134,6 +134,11 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   `GET /api/v4/plugins/webapp` answer as a server with no plugins.
 - **Web client: not served.** The server does not serve the webapp bundle, `/static/*` or the web routes. The web
   client is a separate deployment that talks to the API.
+  - **One exception:** `/static/emoji/{code}.png`, the system emoji images. EBAChat loads them from the server, and
+    production serves them.
+  - **Where they come from:** the web client's images (Apache-2.0), from `client/emoji/`, as Go's static handler
+    does, or from the directory in `EBACHAT_CLIENT_DIR`.
+  - **Deploying:** copy `webapp/channels/src/images/emoji` there.
 - **No user limit.** An unlicensed 12.1 server refuses to create users past 250 (`maxUsersHardLimit`,
   `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
