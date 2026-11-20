@@ -613,7 +613,7 @@ pub async fn raw_send(app: &App, msg: &PushNotification) -> Result<HashMap<Strin
 }
 
 /// `sendToPushProxy`: a `REMOVE` answer retires the device on the session.
-async fn send_to_proxy(app: &App, msg: &mut PushNotification, s: &Session) -> Result<(), String> {
+pub async fn send_to_proxy(app: &App, msg: &mut PushNotification, s: &Session) -> Result<(), String> {
     msg.server_id = app.cfg.diagnostic_id.clone();
     let r = raw_send(app, msg).await?;
     match r.get("status").map(String::as_str) {

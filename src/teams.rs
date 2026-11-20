@@ -926,9 +926,9 @@ enum MemberInvite {
 }
 
 #[derive(Serialize)]
-struct EmailInviteWithError {
-    email: String,
-    error: Option<AppError>,
+pub struct EmailInviteWithError {
+    pub email: String,
+    pub error: Option<AppError>,
 }
 
 /// `UserIsFirstAdmin`: the oldest active system admin.
@@ -1048,14 +1048,63 @@ async fn invite_by_email(
     if !channel_ids.is_empty() {
         channel_ids = channels_user_may_invite_to(&app, &s.user_id, &channel_ids).await;
     }
+    if !graceful {
+        invite_new_users_to_team(&app, emails, &team_id, &s.user_id).await?;
+        return Ok(crate::users::ok().into_response());
+    }
+    // InviteNewUsersToTeamGracefully: profiles need an Enterprise license.
+    if !profiles.is_empty() {
+        if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
+            return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.team.invite_members.disabled.app_error", "Email invitations are disabled."));
+        }
+        return Err(AppError::bad_request("api.team.invite_members.profiles_license.app_error", ""));
+    }
+    let out = invite_new_users_gracefully(&app, emails.clone(), &channel_ids, message, &team_id, &s.user_id, "").await?;
+    // The reminder job Go schedules (`resend_invitation_email`), for the job server to pick up.
+    let mut data = serde_json::Map::new();
+    data.insert("emailList".into(), serde_json::Value::String(serde_json::to_string(&emails).unwrap_or_default()));
+    data.insert("teamID".into(), serde_json::Value::String(team_id.clone()));
+    data.insert("senderID".into(), serde_json::Value::String(s.user_id.clone()));
+    data.insert("scheduledAt".into(), serde_json::Value::String(crate::app::now_ms().to_string()));
+    if !channel_ids.is_empty() {
+        data.insert("channelList".into(), serde_json::Value::String(serde_json::to_string(&channel_ids).unwrap_or_default()));
+    }
+    sqlx::query(
+        "INSERT INTO Jobs (Id, Type, Priority, CreateAt, StartAt, LastActivityAt, Status, Progress, Data)
+         VALUES ($1, 'resend_invitation_email', 0, $2, 0, 0, 'pending', 0, $3::jsonb)",
+    )
+    .bind(crate::app::new_id())
+    .bind(crate::app::now_ms())
+    .bind(serde_json::Value::Object(data).to_string())
+    .execute(&app.db)
+    .await
+    .map_err(|e| AppError::internal("app.job.save.app_error", e.to_string()))?;
+    let body = if out.is_empty() { "null".to_string() } else { serde_json::to_string(&out).unwrap_or_default() };
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+/// `InviteNewUsersToTeamGracefully` (the invite route with `graceful`, and the `resend_invitation_email` job with
+/// a reminder interval): each address with its error, the valid ones invited by email.
+pub async fn invite_new_users_gracefully(
+    app: &App,
+    emails: Vec<String>,
+    channel_ids: &[String],
+    message: String,
+    team_id: &str,
+    sender_id: &str,
+    reminder_interval: &str,
+) -> ApiResult<Vec<EmailInviteWithError>> {
     if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
         return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.team.invite_members.disabled.app_error", "Email invitations are disabled."));
     }
+    if emails.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.no_one.app_error", ""));
+    }
     // prepareInviteNewUsersToTeam
-    let team = app.team(&team_id).await?;
-    let sender = app.user(&s.user_id).await?.ok_or_else(crate::users::missing_account)?;
+    let team = app.team(team_id).await?;
+    let sender = app.user(sender_id).await?.ok_or_else(crate::users::missing_account)?;
     let mut channels = vec![];
-    for id in &channel_ids {
+    for id in channel_ids {
         if let Ok(c) = app.channel_or_404(id).await {
             if c.team_id != team_id {
                 return Err(AppError::bad_request("api.team.invite_guests.channel_in_invalid_team.app_error", ""));
@@ -1069,26 +1118,16 @@ async fn invite_by_email(
     } else {
         vec![&team.allowed_domains, &restrict]
     };
-    let deactivated = |email: String| {
-        let app = app.clone();
-        async move {
-            let d: Option<i64> = sqlx::query_scalar("SELECT DeleteAt FROM Users WHERE Email = $1").bind(&email).fetch_optional(&app.db).await?;
-            ApiResult::Ok(d.is_some_and(|d| d != 0))
-        }
+    let deactivated = |email: String| async move {
+        let d: Option<i64> = sqlx::query_scalar("SELECT DeleteAt FROM Users WHERE Email = $1").bind(&email).fetch_optional(&app.db).await?;
+        ApiResult::Ok(d.is_some_and(|d| d != 0))
     };
     let sender_name = sender.display_name(app.cfg.str("TeamSettings.TeammateNameDisplay"));
-    let first_admin = is_first_admin(&app, &sender).await;
-    if !graceful {
-        invite_new_users_to_team(&app, emails, &team_id, &s.user_id).await?;
-        return Ok(crate::users::ok().into_response());
-    }
-    // InviteNewUsersToTeamGracefully: profiles need an Enterprise license.
-    if !profiles.is_empty() {
-        return Err(AppError::bad_request("api.team.invite_members.profiles_license.app_error", ""));
-    }
+    let first_admin = is_first_admin(app, &sender).await;
     let mut out: Vec<EmailInviteWithError> = vec![];
     let mut good = vec![];
-    for email in emails.clone() {
+    for email in emails {
+        let email = email.trim().to_lowercase();
         let error = if !email_allowed(&email, &allowed) {
             Some(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &email))
         } else if deactivated(email.clone()).await? {
@@ -1111,12 +1150,12 @@ async fn invite_by_email(
             invites: good,
             profiles: Default::default(),
             message,
-            reminder_interval: None,
+            reminder_interval: (!reminder_interval.is_empty()).then(|| reminder_interval.to_string()),
             error_when_not_sent: true,
             is_system_admin: sender.is_system_admin(),
             is_first_admin: first_admin,
         };
-        match crate::email::send_invites(&app, d).await {
+        match crate::email::send_invites(app, d).await {
             Ok(failed) => {
                 for (email, e) in failed {
                     let mut err = AppError::new(StatusCode::OK, "", "");
@@ -1139,25 +1178,5 @@ async fn invite_by_email(
             }
         }
     }
-    // The reminder job Go schedules (`resend_invitation_email`), for the job server to pick up.
-    let mut data = serde_json::Map::new();
-    data.insert("emailList".into(), serde_json::Value::String(serde_json::to_string(&emails).unwrap_or_default()));
-    data.insert("teamID".into(), serde_json::Value::String(team_id.clone()));
-    data.insert("senderID".into(), serde_json::Value::String(s.user_id.clone()));
-    data.insert("scheduledAt".into(), serde_json::Value::String(crate::app::now_ms().to_string()));
-    if !channel_ids.is_empty() {
-        data.insert("channelList".into(), serde_json::Value::String(serde_json::to_string(&channel_ids).unwrap_or_default()));
-    }
-    sqlx::query(
-        "INSERT INTO Jobs (Id, Type, Priority, CreateAt, StartAt, LastActivityAt, Status, Progress, Data)
-         VALUES ($1, 'resend_invitation_email', 0, $2, 0, 0, 'pending', 0, $3::jsonb)",
-    )
-    .bind(crate::app::new_id())
-    .bind(crate::app::now_ms())
-    .bind(serde_json::Value::Object(data).to_string())
-    .execute(&app.db)
-    .await
-    .map_err(|e| AppError::internal("app.job.save.app_error", e.to_string()))?;
-    let body = if out.is_empty() { "null".to_string() } else { serde_json::to_string(&out).unwrap_or_default() };
-    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+    Ok(out)
 }

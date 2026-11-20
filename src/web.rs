@@ -13,7 +13,6 @@
 // server/channels/utils/api.go, subpath.go, Copyright (c) 2015-present Mattermost, Inc. Licensed under AGPL-3.0.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -23,6 +22,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::app::{App, AppError, State};
+use crate::compress::Enc;
 
 pub fn client_dir() -> PathBuf {
     PathBuf::from(std::env::var("EBACHAT_CLIENT_DIR").unwrap_or_else(|_| "client".into()))
@@ -82,33 +82,22 @@ fn content_type(name: &str) -> String {
     }
 }
 
-/// `gzhttp`'s default filter: everything but formats that are compressed already.
-fn compressible(ct: &str) -> bool {
-    !(ct.starts_with("image/") && ct != "image/svg+xml"
-        || ct.starts_with("video/")
-        || ct.starts_with("audio/")
-        || ct.starts_with("font/woff")
-        || ct.contains("zip")
-        || ct.contains("compressed"))
-}
-
 /// A file's compressed bytes, with the modification time they were made from.
 type Gz = (SystemTime, Arc<Vec<u8>>);
 
 #[derive(Default)]
-pub struct GzCache(Mutex<HashMap<PathBuf, Gz>>);
+pub struct GzCache(Mutex<HashMap<(PathBuf, Enc), Gz>>);
 
 impl GzCache {
-    fn get(&self, path: &PathBuf, mtime: SystemTime, data: &[u8]) -> Arc<Vec<u8>> {
-        if let Some((t, gz)) = self.0.lock().unwrap().get(path)
+    fn get(&self, path: &PathBuf, enc: Enc, mtime: SystemTime, data: &[u8]) -> Arc<Vec<u8>> {
+        let key = (path.clone(), enc);
+        if let Some((t, gz)) = self.0.lock().unwrap().get(&key)
             && *t == mtime
         {
             return gz.clone();
         }
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let _ = enc.write_all(data);
-        let gz = Arc::new(enc.finish().unwrap_or_default());
-        self.0.lock().unwrap().insert(path.clone(), (mtime, gz.clone()));
+        let gz = Arc::new(crate::compress::encode(enc, data));
+        self.0.lock().unwrap().insert(key, (mtime, gz.clone()));
         gz
     }
 }
@@ -158,20 +147,18 @@ async fn serve_static(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderM
     if r.status() != StatusCode::OK || head {
         return r;
     }
-    let gzip_ok = headers
-        .get(header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|e| e.trim().split(';').next() == Some("gzip")));
+    // Go's file server answers every method as GET, so only HEAD stays plain.
+    let enc = crate::compress::select(&Method::GET, headers);
     let len = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok());
     // `gzhttp.DefaultMinSize`: smaller bodies go out as they are.
-    if !(gzip_ok && len.is_some_and(|l| l >= 1024) && compressible(&ct)) {
+    if !(enc != Enc::None && len.is_some_and(|l| l >= crate::compress::MIN_SIZE) && crate::compress::content_type_ok(&ct)) {
         return r;
     }
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let (mut parts, body) = r.into_parts();
     let data = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
-    let gz = gz_cache().get(&file, mtime, &data);
-    parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let gz = gz_cache().get(&file, enc, mtime, &data);
+    parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc.name()));
     parts.headers.remove(header::ACCEPT_RANGES);
     parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(gz.len()));
     Response::from_parts(parts, axum::body::Body::from(gz.as_ref().clone()))

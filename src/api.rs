@@ -34,6 +34,21 @@ pub fn route_not_found(path: &str) -> AppError {
     e
 }
 
+/// Go registers each API route for its own methods: a `HEAD` falls through to the 404 handler, but for the file
+/// routes (`/files/{id}`, `/thumbnail`, `/preview`) that take it. Axum answers `HEAD` on every `GET` route.
+async fn head_as_go(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    if req.method() == axum::http::Method::HEAD {
+        let p = req.uri().path();
+        let file = p.strip_prefix("/api/v4/files/").is_some_and(|rest| {
+            matches!(rest.split('/').collect::<Vec<_>>().as_slice(), [_] | [_, "thumbnail"] | [_, "preview"])
+        });
+        if p.starts_with("/api/v4/") && !file {
+            return route_not_found(p).into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// `LOG_REQUESTS=1`: one line per request on stderr (method, path, status, ms), to watch a real client.
 async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let (method, uri, t) = (req.method().clone(), req.uri().clone(), std::time::Instant::now());
@@ -88,7 +103,8 @@ async fn cache_stats(
 }
 
 fn routes(app: State) -> Router {
-    Router::new()
+    let gzip = app.cfg.str("ServiceSettings.WebserverMode") == "gzip";
+    let r = Router::new()
         .merge(crate::web::routes())
         .route("/api/v4/ebachat/caches", get(cache_stats))
         .route("/api/v4/websocket", get(crate::hub::connect))
@@ -128,8 +144,10 @@ fn routes(app: State) -> Router {
         .merge(crate::teams::routes())
         .merge(crate::team_admin::routes())
         .merge(crate::schemes::routes())
-        .merge(crate::roles::routes())
-        .fallback(not_found)
+        .merge(crate::roles::routes());
+    // Go wraps each handler in gzhttp (not its 404 for unknown paths): a layer over the routes, not the fallback.
+    let r = if gzip { r.layer(axum::middleware::from_fn(crate::compress::layer)) } else { r };
+    r.layer(axum::middleware::from_fn(head_as_go)).fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(app)
 }
