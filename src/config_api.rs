@@ -148,6 +148,7 @@ async fn get_config(St(app): St<State>, Auth(s): Auth, Query(q): Query<GetQuery>
     if masked || defaults_too {
         remove_empty(&mut m);
     }
+    // FilterConfig answers a map: its keys sorted.
     Ok(([NO_CACHE], Json(m)).into_response())
 }
 
@@ -244,7 +245,14 @@ fn message_export(cfg: &mut Value, app_cfg: &Value) {
 /// The saved config as the session may read it, and the listener told.
 async fn saved(app: &App, access: &Access, old: &Value, new: &Value) -> Response {
     app.config_changed(old, new).await;
-    ([NO_CACHE], Json(access.read_filtered(sanitize(new.clone())))).into_response()
+    ([NO_CACHE], go_config_json(&access.read_filtered(sanitize(new.clone())))).into_response()
+}
+
+/// A config answered as Go's `json.Encoder` encodes its struct: in the struct's field order, with a newline.
+fn go_config_json(v: &Value) -> Response {
+    let mut s = crate::config_order::to_go_json(v, false);
+    s.push('\n');
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], s).into_response()
 }
 
 /// `updateConfig`: the whole config replaced (defaults where the request has none), as far as the session may

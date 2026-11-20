@@ -288,7 +288,8 @@ async fn read_source(src: &str) -> anyhow::Result<Value> {
 async fn write_source(src: &str, v: &Value) -> anyhow::Result<()> {
     if src.starts_with("postgres") {
         let db = sqlx::PgPool::connect(&crate::db_url(src)).await?;
-        let s = serde_json::to_string(v)?;
+        // marshalConfig: MarshalIndent, as for the file.
+        let s = crate::config_order::to_go_json(v, true);
         let sha = {
             use sha2::Digest;
             let d = sha2::Sha256::digest(s.as_bytes());
@@ -306,12 +307,10 @@ async fn write_source(src: &str, v: &Value) -> anyhow::Result<()> {
         tx.commit().await?;
         return Ok(());
     }
-    let mut buf = Vec::new();
-    let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
-    let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
-    serde::Serialize::serialize(v, &mut ser)?;
+    // Go's MarshalIndent of model.Config: the struct's field order.
+    let buf = crate::config_order::to_go_json(v, true);
     let tmp = format!("{src}.tmp");
-    std::fs::write(&tmp, &buf)?;
+    std::fs::write(&tmp, buf.as_bytes())?;
     std::fs::rename(&tmp, src)?;
     Ok(())
 }

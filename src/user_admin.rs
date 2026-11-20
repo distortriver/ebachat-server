@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State, decode_json, is_valid_id, map_from_json, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State, decode_json, map_from_json, now_ms};
 use crate::channels_api::paging;
 use crate::hub::Broadcast;
 use crate::model::{Session, User};
@@ -57,7 +57,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/users/{user_id}/data_retention/channel_policies", get(data_retention))
         .route("/api/v4/users/{user_id}/data_retention/team_policies", get(data_retention))
         .route("/api/v4/users/{user_id}/groups", get(groups))
-        .route("/api/v4/users/{user_id}/custom_profile_attributes", axum::routing::patch(patch_cpa))
         .route("/api/v4/users/group_channels", post(group_channels))
         .route("/api/v4/users/invalid_emails", get(invalid_emails))
         .route("/api/v4/users/auth_data", get(by_auth_data))
@@ -1176,66 +1175,6 @@ async fn data_retention(Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult
 async fn groups(Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Value>> {
     user_param(&s, &user_id)?;
     Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.license_error", "api endpoint requires a license"))
-}
-
-/// `patchCPAValuesForUser`: the checks of `cpaPatchValues` up to the fields; this server has no custom profile
-/// attribute fields to set values of.
-async fn patch_cpa(
-    St(app): St<State>,
-    Auth(s): Auth,
-    Path(user_id): Path<String>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
-    let user_id = user_param(&s, &user_id)?;
-    let updates: BTreeMap<String, Value> = decode_json(&body, "value")?;
-    let group: Option<(String,)> =
-        sqlx::query_as("SELECT Id FROM PropertyGroups WHERE Name = 'access_control'").fetch_optional(&app.db).await?;
-    let Some((group,)) = group else {
-        return Err(AppError::not_found("app.property_group.get.app_error", ""));
-    };
-    if user_id != s.user_id {
-        let bot_manager = user_or_bot_perm(&app, &s, &user_id).await?
-            && app.users(std::slice::from_ref(&user_id)).await?.iter().any(|u| u.is_bot);
-        if !app.has_perm(&s, EDIT_OTHER_USERS).await && !bot_manager {
-            return Err(AppError::forbidden_perm(EDIT_OTHER_USERS));
-        }
-        if !app.has_perm(&s, MANAGE_SYSTEM).await {
-            let target = get_user(&app, &user_id).await?;
-            if target.is_system_admin() {
-                return Err(AppError::forbidden_perm(MANAGE_SYSTEM));
-            }
-        }
-    }
-    if updates.is_empty() {
-        return Err(AppError::bad_request("api.property_value.patch.empty_body.app_error", ""));
-    }
-    if updates.len() > 100 {
-        return Err(
-            AppError::bad_request("api.property_value.patch.too_many_items.request_error", "").with_param("Max", "100")
-        );
-    }
-    let ids: Vec<String> = updates.keys().cloned().collect();
-    if ids.iter().any(|id| !is_valid_id(id)) {
-        return Err(AppError::bad_request("api.property_value.patch.invalid_field_id.app_error", ""));
-    }
-    let fields: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ID, COALESCE(ObjectType, '') FROM PropertyFields WHERE GroupID = $1 AND ID = ANY($2) AND DeleteAt = 0",
-    )
-    .bind(&group)
-    .bind(&ids)
-    .fetch_all(&app.db)
-    .await?;
-    for id in &ids {
-        match fields.iter().find(|f| f.0 == *id) {
-            // PropertyService.GetPropertyFields: every id must be a field of the group.
-            None => return Err(AppError::not_found("app.property_field.not_found.app_error", "")),
-            Some((_, t)) if t != "user" => {
-                return Err(AppError::not_found("api.property_field.object_type_mismatch.app_error", ""));
-            }
-            Some(_) => {}
-        }
-    }
-    Err(AppError::not_implemented("Setting custom profile attribute values"))
 }
 
 /// `getUsersByGroupChannelIds`: the other members of the caller's group channels (at most 50 channels).

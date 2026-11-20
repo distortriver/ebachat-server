@@ -27,7 +27,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/roles/names", post(roles_by_names))
         .route("/api/v4/brand/image", get(|| async { StatusCode::NOT_FOUND }))
         .route("/api/v4/system/onboarding/complete", get(onboarding))
-        .route("/api/v4/users/{user_id}/custom_profile_attributes", get(|_: Auth| async { Json(json!({})) }))
         .route("/api/v4/notifications/ack", post(push_ack))
 }
 

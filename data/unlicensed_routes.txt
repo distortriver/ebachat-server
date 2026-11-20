@@ -54,12 +54,7 @@ PUT    /api/v4/content_flagging/post/{post_id}/remove |  | 501 api.data_spillage
 POST   /api/v4/content_flagging/post/{post_id}/report |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
 GET    /api/v4/content_flagging/team/{team_id}/reviewers/search |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
 GET    /api/v4/content_flagging/team/{team_id}/status |  | 501 api.data_spillage.error.license | Your license does not support Data Spillage Handling.
-GET    /api/v4/custom_profile_attributes/fields |  | json []
-POST   /api/v4/custom_profile_attributes/fields | perm:manage_system | 403 app.property.license_error | Your license does not support this property group.
-DELETE /api/v4/custom_profile_attributes/fields/{field_id} | id:field_id | 404 app.property.not_found.app_error | The specified property does not exist.
-PATCH  /api/v4/custom_profile_attributes/fields/{field_id} | id:field_id | 404 app.property.not_found.app_error | The specified property does not exist.
 GET    /api/v4/custom_profile_attributes/group |  | 403 app.property.license_error | Your license does not support this property group.
-PATCH  /api/v4/custom_profile_attributes/values |  | 400 api.property_value.patch.empty_body.app_error | Request body must contain at least one property value update.
 GET    /api/v4/data_retention/policies | perm:sysconsole_read_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
 POST   /api/v4/data_retention/policies | perm:sysconsole_write_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
 DELETE /api/v4/data_retention/policies/{policy_id} | perm:sysconsole_write_compliance_data_retention_policy | 501 ent.data_retention.generic.license.error | Your license does not support Data Retention.
