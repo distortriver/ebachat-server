@@ -15,9 +15,8 @@ use axum::extract::{Request, State as St};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::app::{ApiResult, App, AppError, Auth, MaybeAuth, State, decode_json, is_valid_id, map_from_json, new_id, now_ms};
 use crate::db::Table;
@@ -832,6 +831,35 @@ fn hex_escape_non_ascii(s: &str) -> String {
     out
 }
 
+/// Go's `json.Marshal`: `<`, `>`, `&` and the line separators escaped.
+pub fn go_json<T: Serialize>(v: &T) -> Vec<u8> {
+    let s = serde_json::to_string(v).unwrap_or_default();
+    s.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+        .into_bytes()
+}
+
+/// `json.NewEncoder(w).Encode(v)`: Go's JSON and a newline.
+pub fn go_encode<T: Serialize>(status: StatusCode, v: &T) -> Response {
+    let mut body = go_json(v);
+    body.push(b'\n');
+    let mut r = (status, body).into_response();
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    r
+}
+
+/// A 200 answer written with `json.NewEncoder(w).Encode`.
+pub struct GoJson<T>(pub T);
+
+impl<T: Serialize> IntoResponse for GoJson<T> {
+    fn into_response(self) -> Response {
+        go_encode(StatusCode::OK, &self.0)
+    }
+}
+
 /// `Expires: 0` as Go's API handlers send on every GET.
 fn expires0(mut r: Response) -> Response {
     r.headers_mut().insert(header::EXPIRES, HeaderValue::from_static("0"));
@@ -909,7 +937,7 @@ async fn authorize_page_inner(app: &State, s: Option<Arc<Session>>, headers: &He
     let mut r = crate::web::serve_file(&file, headers, req.method() == axum::http::Method::HEAD, Some("text/html; charset=utf-8")).await;
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
-    if let Ok(v) = HeaderValue::from_str(&format!("frame-ancestors 'self' {}", app.cfg.str("ServiceSettings.FrameAncestors"))) {
+    if let Ok(v) = HeaderValue::from_str(&format!("frame-ancestors 'self' {}", app.cfg.str("ServiceSettings.FrameAncestors")).trim_end()) {
         h.insert(header::CONTENT_SECURITY_POLICY, v);
     }
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache, max-age=31556926"));
@@ -927,7 +955,11 @@ async fn authorize_app(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiRes
         return Err(e);
     }
     let redirect = app.allow_oauth_app(&s.user_id, r).await?;
-    Ok(Json(json!({ "redirect": redirect })).into_response())
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("redirect".to_string(), redirect);
+    let mut r = crate::sso::go_map_json(&m).into_response();
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(r)
 }
 
 /// `deauthorizeOAuthApp`.
@@ -999,7 +1031,7 @@ async fn access_token(St(app): St<State>, req: Request) -> ApiResult<Response> {
             form.get("resource"),
         )
         .await?;
-    let mut body = serde_json::to_vec(&rsp).unwrap_or_default();
+    let mut body = go_json(&rsp);
     body.push(b'\n');
     let mut r = body.into_response();
     let h = r.headers_mut();
@@ -1013,7 +1045,7 @@ async fn access_token(St(app): St<State>, req: Request) -> ApiResult<Response> {
 async fn metadata(St(app): St<State>, headers: HeaderMap) -> Response {
     match server_metadata(&app) {
         Ok(m) => {
-            let mut body = serde_json::to_vec(&m).unwrap_or_default();
+            let mut body = go_json(&m);
             body.push(b'\n');
             let mut r = body.into_response();
             r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
