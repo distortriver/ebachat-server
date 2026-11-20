@@ -458,6 +458,11 @@ fn multipart_boundary() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// `/static/` itself: `staticFilesHandler`'s 404 for a path ending in a slash.
+async fn static_dir(req: Request) -> Response {
+    serve(client_dir(), "", req.uri().path(), req.headers(), req.method() == Method::HEAD).await
+}
+
 async fn static_files(Path(rel): Path<String>, req: Request) -> Response {
     let head = req.method() == Method::HEAD;
     serve(client_dir(), &rel, req.uri().path(), req.headers(), head).await
@@ -737,6 +742,8 @@ pub fn routes(webserver_mode: &str) -> axum::Router<State> {
     r
         // Go's file servers answer every method as GET.
         .route("/static/plugins/{*rel}", axum::routing::any(static_plugins))
+        .route("/static/", axum::routing::any(static_dir))
+        .route("/static/plugins/", axum::routing::any(static_dir))
         .route("/_documentation", axum::routing::any(docs_redirect))
         .route("/_documentation/", axum::routing::any(docs))
         .route("/_documentation/{*rel}", axum::routing::any(docs))
