@@ -69,10 +69,25 @@ pub struct Broadcast {
     /// Broadcast hooks (`add_mentions`, `add_followers`): fields added to the data for one recipient.
     #[serde(skip)]
     pub per_user: Option<PerUser>,
+    /// A hook that needs the app (`channelMentionsBroadcastHook`): the event's `post` for the user of a connection,
+    /// when it is not the shared one.
+    #[serde(skip)]
+    pub post_hook: Option<PostHook>,
 }
 
 /// Fields to add to an event's data for the user of a connection, if any.
 pub type PerUser = Arc<dyn Fn(&str) -> Option<serde_json::Map<String, Value>> + Send + Sync>;
+
+/// The `post` of an event for one recipient (by user id), when it differs from the shared one.
+pub type PostHook = Arc<dyn Fn(State, String) -> futures_util::future::BoxFuture<'static, Option<String>> + Send + Sync>;
+
+/// The post hook's answer for the user of a connection.
+async fn post_for(hook: &Option<PostHook>, app: &State, c: &Conn) -> Option<String> {
+    match hook {
+        Some(h) => h(app.clone(), c.user_id.clone()).await,
+        None => None,
+    }
+}
 
 /// The event as JSON without its closing `"seq":N}`: `{"event":..,"data":..,"broadcast":..,"seq":`.
 fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
@@ -167,10 +182,15 @@ impl Hub {
         let event = event.to_string();
         let channel_id = b.channel_id.clone();
         let required = b.required_permissions.clone();
+        let hook = b.post_hook.clone();
         // The event for one connection: admin or sanitized data, and the hooks' fields.
-        let render = move |c: &Conn| -> Arc<str> {
+        let render = move |c: &Conn, post: Option<String>| -> Arc<str> {
             let base = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
-            let Some(extra) = b.per_user.as_ref().and_then(|f| f(&c.user_id)) else { return base.clone() };
+            let mut extra = b.per_user.as_ref().and_then(|f| f(&c.user_id));
+            if let Some(p) = post {
+                extra.get_or_insert_with(serde_json::Map::new).insert("post".into(), Value::String(p));
+            }
+            let Some(extra) = extra else { return base.clone() };
             let mut d = if c.admin { data.clone() } else { b.sanitized.clone().unwrap_or_else(|| data.clone()) };
             if let Value::Object(m) = &mut d {
                 m.extend(extra);
@@ -188,28 +208,32 @@ impl Hub {
                         ok = ok && app.has_perm(&s, p).await;
                     }
                     if ok {
-                        let _ = c.tx.send(Out::Event(render(&c)));
+                        let post = post_for(&hook, &app, &c).await;
+                        let _ = c.tx.send(Out::Event(render(&c, post)));
                     }
                 }
             });
             return;
         }
-        if channel_id.is_empty() {
+        if channel_id.is_empty() && hook.is_none() {
             for c in targets {
-                let _ = c.tx.send(Out::Event(render(&c)));
+                let _ = c.tx.send(Out::Event(render(&c, None)));
             }
             return;
         }
-        // Membership needs the (cached) channel members of each user: done off the caller's path.
+        // Membership needs the (cached) channel members of each user, a post hook the app: done off the caller's
+        // path.
         let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
         tokio::spawn(async move {
             for c in targets {
-                let member = match app.member_roles(&c.user_id, false).await {
-                    Ok(m) => m.contains_key(&channel_id),
-                    Err(_) => false,
-                };
+                let member = channel_id.is_empty()
+                    || match app.member_roles(&c.user_id, false).await {
+                        Ok(m) => m.contains_key(&channel_id),
+                        Err(_) => false,
+                    };
                 if member {
-                    let _ = c.tx.send(Out::Event(render(&c)));
+                    let post = post_for(&hook, &app, &c).await;
+                    let _ = c.tx.send(Out::Event(render(&c, post)));
                 }
             }
         });

@@ -8,7 +8,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
@@ -1158,70 +1159,57 @@ impl App {
         list
     }
 
-    /// `publishWebsocketEventForPost`: the post without permalink embeds; its channel mentions go back in per
-    /// recipient (`channelMentionsBroadcastHook`), as stored (with the channel id), for those who may resolve
-    /// them. The recipients of a post's events are the channel's members, all in its team: a public channel's
-    /// mention is kept for everyone, a private one's for its members. Mentions without an id are dropped.
+    /// `publishWebsocketEventForPost`: the post without permalink embeds and without its channel mentions for
+    /// everyone; the mentions go back in per recipient (`channelMentionsBroadcastHook`), as stored (with the
+    /// channel id), those of the channels the recipient may resolve (`HasPermissionToResolveChannelMention`).
+    /// Mentions without a channel id, or whose channel is gone, are dropped.
     pub async fn post_for_broadcast(&self, post: &Post) -> BroadcastPost {
         let mut p = post.clone();
         if let Some(md) = p.metadata.as_mut() {
             md.embeds.retain(|e| e.r#type != "permalink");
         }
         p.props.0.remove("previewed_post");
-        let mut public = serde_json::Map::new();
-        let mut private = vec![];
+        let mut mentions = vec![];
         if let Some(Value::Object(m)) = p.props.0.remove("channel_mentions") {
             for (name, v) in m {
                 let Some(id) = v.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()) else { continue };
                 let Ok(Some(c)) = self.channel(id).await else { continue };
-                if c.r#type == channel::OPEN {
-                    public.insert(name, v);
-                } else {
-                    let members: Vec<String> =
-                        sqlx::query_scalar("SELECT UserId FROM ChannelMembers WHERE ChannelId = $1").bind(id).fetch_all(&self.db).await.unwrap_or_default();
-                    private.push((name, v, members.into_iter().collect::<std::collections::HashSet<_>>()));
-                }
+                mentions.push((name, v, c));
             }
         }
-        let mut with_public = p.clone();
-        if !public.is_empty() {
-            with_public.props.0.insert("channel_mentions".into(), Value::Object(public.clone()));
-        }
-        BroadcastPost { post: with_public, base: p, public, private: Arc::new(private) }
+        BroadcastPost { post: p, mentions: Arc::new(mentions) }
     }
 }
 
-/// The post's JSON for one recipient, when it is not the shared one.
-pub type PostFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
-/// A post for its websocket events: `post` for every recipient, and for members of privately mentioned channels
-/// their own copy (`post_json_for`).
+/// A post for its websocket events: `post` for every recipient, and with the channel mentions each recipient may
+/// resolve (`hook`).
 pub struct BroadcastPost {
     pub post: Post,
-    base: Post,
-    public: serde_json::Map<String, Value>,
-    private: Arc<Vec<(String, Value, std::collections::HashSet<String>)>>,
+    mentions: Arc<Vec<(String, Value, Arc<Channel>)>>,
 }
 
 impl BroadcastPost {
-    /// The post's JSON for one recipient, when it differs from `post`'s.
-    pub fn per_user(&self) -> Option<PostFor> {
-        if self.private.is_empty() {
+    /// `channelMentionsBroadcastHook`: the post's JSON for one recipient, when some mention is theirs to see.
+    pub fn hook(&self) -> Option<crate::hub::PostHook> {
+        if self.mentions.is_empty() {
             return None;
         }
-        let (base, public, private) = (self.base.clone(), self.public.clone(), self.private.clone());
-        Some(Arc::new(move |uid: &str| {
-            let extra: Vec<&(String, Value, _)> = private.iter().filter(|(_, _, m)| m.contains(uid)).collect();
-            if extra.is_empty() {
-                return None;
-            }
-            let mut m = public.clone();
-            for (name, v, _) in extra {
-                m.insert(name.clone(), v.clone());
-            }
-            let mut p = base.clone();
-            p.props.0.insert("channel_mentions".into(), Value::Object(m));
-            serde_json::to_string(&p).ok()
+        let (base, mentions) = (self.post.clone(), self.mentions.clone());
+        Some(Arc::new(move |app: State, uid: String| {
+            let (mut p, mentions) = (base.clone(), mentions.clone());
+            Box::pin(async move {
+                let mut m = serde_json::Map::new();
+                for (name, v, c) in mentions.iter() {
+                    if app.user_resolve_mention(&uid, &c.id, &c.r#type, &c.team_id).await {
+                        m.insert(name.clone(), v.clone());
+                    }
+                }
+                if m.is_empty() {
+                    return None;
+                }
+                p.props.0.insert("channel_mentions".into(), Value::Object(m));
+                serde_json::to_string(&p).ok()
+            })
         }))
     }
 }
@@ -1822,13 +1810,10 @@ impl App {
         rpost.is_following = None;
         rpost.reply_count = old.reply_count;
         let bpost = self.post_for_broadcast(&rpost).await;
-        let per_user: Option<crate::hub::PerUser> = bpost.per_user().map(|f| -> crate::hub::PerUser {
-            Arc::new(move |uid: &str| f(uid).map(|p| serde_json::Map::from_iter([("post".to_string(), Value::String(p))])))
-        });
         self.hub.publish(
             "post_edited",
             json!({"post": serde_json::to_string(&bpost.post).unwrap()}),
-            Broadcast { channel_id: rpost.channel_id.clone(), per_user, ..Default::default() },
+            Broadcast { channel_id: rpost.channel_id.clone(), post_hook: bpost.hook(), ..Default::default() },
         );
         self.invalidate_channel_posts(&rpost.channel_id);
         Ok(self.sanitize_for_user(rpost, &s.user_id).await)

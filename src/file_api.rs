@@ -10,7 +10,8 @@ use std::sync::{Arc, LazyLock, OnceLock};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};

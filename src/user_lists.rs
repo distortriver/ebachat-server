@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State as St};
+use axum::extract::State as St;
+use crate::app::Query;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};

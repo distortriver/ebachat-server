@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};

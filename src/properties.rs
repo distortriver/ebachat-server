@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};

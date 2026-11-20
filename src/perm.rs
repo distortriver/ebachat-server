@@ -511,7 +511,7 @@ impl App {
     /// `HasPermissionToResolveChannelMention`: read content, or a public channel of a team the user may read.
     pub async fn user_resolve_mention(&self, user_id: &str, channel_id: &str, kind: &str, team_id: &str) -> bool {
         self.user_channel_perm(user_id, channel_id, READ_CHANNEL_CONTENT).await.0
-            || kind == crate::model::channel::OPEN && self.user_team_perm(user_id, team_id, READ_PUBLIC_CHANNEL).await
+            || (kind == crate::model::channel::OPEN || kind == "BO") && self.user_team_perm(user_id, team_id, READ_PUBLIC_CHANNEL).await
     }
 
     /// `HasPermissionToReadChannel`: read content, or a public channel of a team the user may read.

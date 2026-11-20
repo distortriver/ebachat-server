@@ -8,7 +8,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State as St};
+use axum::extract::{Path, State as St};
+use crate::app::Query;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -709,7 +710,14 @@ async fn members_by_ids(
         return Err(AppError::invalid_param("user_ids"));
     }
     app.require_team(&s, &team_id, perm::VIEW_TEAM).await?;
-    let sql = format!("{} WHERE tm.teamid = $1 AND tm.userid = ANY($2) AND tm.deleteat = 0", perm::team_members_select());
+    // `GetTeamMembersByIds` with the session's `GetViewUsersRestrictions` (`applyTeamMemberViewRestrictionsFilter`).
+    let sql = match app.restriction_cond(&s).await? {
+        Some(r) => format!(
+            "{} JOIN Users u ON tm.UserId = u.Id WHERE tm.teamid = $1 AND tm.userid = ANY($2) AND tm.deleteat = 0 AND {r}",
+            perm::team_members_select()
+        ),
+        None => format!("{} WHERE tm.teamid = $1 AND tm.userid = ANY($2) AND tm.deleteat = 0", perm::team_members_select()),
+    };
     let rows: Vec<perm::WithScheme<TeamMember>> =
         sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&team_id).bind(&ids).fetch_all(&app.db).await?;
     let manage = app.has_team_perm(&s, &team_id, "manage_team_roles").await;
