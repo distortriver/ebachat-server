@@ -27,5 +27,7 @@ because the `ClassificationMarkings`, `SessionAttributes` and `ChannelAttributes
   sets parents (an inline option list or the options routes) answers 501 `api.not_implemented.app_error`. Nothing
   uses graph fields yet.
 - **Audit records:** Go writes property audit events to its audit log; the Rust server writes none.
+- **Event order:** when a type change clears a channel-scoped field's values, Go sends `property_field_updated`
+  before `property_values_updated`; the Rust hub may deliver the channel broadcast after the global one.
 - **Hooks of licensed groups** (access control masking, attribute validation, the value audit, the session
   attributes guard): their groups are refused before any of them would run.
