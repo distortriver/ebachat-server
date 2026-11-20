@@ -937,7 +937,7 @@ async fn authorize_page_inner(app: &State, s: Option<Arc<Session>>, headers: &He
     let mut r = crate::web::serve_file(&file, headers, req.method() == axum::http::Method::HEAD, Some("text/html; charset=utf-8")).await;
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
-    if let Ok(v) = HeaderValue::from_str(&format!("frame-ancestors 'self' {}", app.cfg.str("ServiceSettings.FrameAncestors")).trim_end()) {
+    if let Ok(v) = HeaderValue::from_str(format!("frame-ancestors 'self' {}", app.cfg.str("ServiceSettings.FrameAncestors")).trim_end()) {
         h.insert(header::CONTENT_SECURITY_POLICY, v);
     }
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache, max-age=31556926"));

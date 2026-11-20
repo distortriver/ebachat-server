@@ -124,6 +124,7 @@ async fn serve(dir: PathBuf, rel: &str, req_path: &str, headers: &HeaderMap, hea
     let mut r = serve_static(dir, rel, req_path, headers, head).await;
     // gzhttp adds it before anything else, whatever the answer.
     r.headers_mut().append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    r.extensions_mut().insert(NoExpires);
     r
 }
 
@@ -398,12 +399,19 @@ async fn robots(req: Request) -> Response {
     if req.uri().path().ends_with('/') {
         return not_found();
     }
-    "User-agent: *\nDisallow: /\n".into_response()
+    // Served by Go's main router directly: none of `web.Handler`'s headers.
+    let mut r = "User-agent: *\nDisallow: /\n".into_response();
+    r.extensions_mut().insert(Raw);
+    r
 }
 
 /// Marks an answer the Go router writes itself, outside `web.Handler`: none of its headers are added.
 #[derive(Clone, Copy)]
 pub struct Raw;
+
+/// Marks a static file answer: Go's static handler never adds `Expires: 0`, whatever the status.
+#[derive(Clone, Copy)]
+pub struct NoExpires;
 
 /// The Go router's own 404 for a path outside `/api/` that no route takes with this method (only GET and HEAD
 /// reach the client's page): `http.NotFound`.
@@ -419,6 +427,13 @@ pub fn router_not_found() -> Response {
 /// `unsupportedBrowserScriptHandler`: the script of the unsupported-browser page, from the templates directory
 /// (`EBACHAT_TEMPLATES_DIR`, default `templates/`) as `http.ServeFile` serves it, or the built-in copy.
 async fn unsupported_browser_js(req: Request) -> Response {
+    // Go's main router serves it directly: none of `web.Handler`'s headers.
+    let mut r = unsupported_browser_js_file(req).await;
+    r.extensions_mut().insert(Raw);
+    r
+}
+
+async fn unsupported_browser_js_file(req: Request) -> Response {
     if req.uri().path().ends_with('/') {
         let mut r = (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
         r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
@@ -638,10 +653,11 @@ pub fn routes() -> axum::Router<State> {
     use axum::routing::get;
     axum::Router::new()
         .route("/login/sso/saml", get(saml).post(saml))
-        .route("/static/plugins/{*rel}", get(static_plugins))
-        .route("/static/{*rel}", get(static_files))
+        // Go's file servers answer every method as GET.
+        .route("/static/plugins/{*rel}", axum::routing::any(static_plugins))
+        .route("/static/{*rel}", axum::routing::any(static_files))
         .route("/robots.txt", axum::routing::any(robots))
-        .route("/unsupported_browser.js", get(unsupported_browser_js))
+        .route("/unsupported_browser.js", axum::routing::any(unsupported_browser_js))
 }
 
 #[cfg(test)]

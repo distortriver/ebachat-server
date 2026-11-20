@@ -58,7 +58,9 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     h.insert("permissions-policy", HeaderValue::from_static(""));
     h.entry("x-content-type-options").or_insert(HeaderValue::from_static("nosniff"));
     h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    if get && !h.contains_key("expires") && !h.contains_key("cache-control") {
+    let static_file = r.extensions().get::<crate::web::NoExpires>().is_some();
+    let h = r.headers_mut();
+    if get && !static_file && !h.contains_key("expires") && !h.contains_key("cache-control") {
         h.insert("expires", HeaderValue::from_static("0"));
     }
     r

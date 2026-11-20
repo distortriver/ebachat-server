@@ -878,13 +878,13 @@ impl App {
         code: &str,
         state: &str,
         redirect_uri: &str,
-    ) -> Result<Authorized, (AppError, Option<BTreeMap<String, String>>)> {
+    ) -> Result<Authorized, Box<(AppError, Option<BTreeMap<String, String>>)>> {
         use base64::Engine;
-        let sso = self.sso_provider(service).map_err(|e| (e, None))?;
+        let sso = self.sso_provider(service).map_err(|e| Box::new((e, None)))?;
         let invalid = || AppError::bad_request("api.user.authorize_oauth_user.invalid_state.app_error", "");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(state).map_err(|e| (invalid().detail(e.to_string()), None))?;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(state).map_err(|e| Box::new((invalid().detail(e.to_string()), None)))?;
         let props: BTreeMap<String, String> = crate::app::map_from_json(&decoded).into_iter().collect();
-        let fail = |e: AppError| (e, Some(props.clone()));
+        let fail = |e: AppError| Box::new((e, Some(props.clone())));
         let token = props.get("token").map(String::as_str).unwrap_or("");
         let t = token_row(self, token)
             .await
@@ -1065,7 +1065,10 @@ async fn complete(St(app): St<State>, Path(service): Path<String>, req: Request)
     let result = app.authorize_oauth_user(&headers, &mut cleared, &service, code, q.get("state"), &uri).await;
     let (info, props, err) = match result {
         Ok((info, props)) => (info, props, None),
-        Err((e, props)) => (vec![], props.unwrap_or_default(), Some(e)),
+        Err(b) => {
+            let (e, props) = *b;
+            (vec![], props.unwrap_or_default(), Some(e))
+        }
     };
     let g = |k: &str| props.get(k).cloned().unwrap_or_default();
     let action = g("action");

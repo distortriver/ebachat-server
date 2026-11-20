@@ -134,28 +134,26 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   `GET /api/v4/plugins/webapp` answer as a server with no plugins.
 - **Web client: served as Go serves it** (`src/web.rs`, from `channels/web/static.go`), so the stock web and
   desktop clients load from the server.
-  - **What is served:** `/static/*` from the client directory, gzip-compressed as Go's `gzhttp` does;
-    `/static/plugins/*` from `PluginSettings.ClientDirectory`; `/robots.txt`. Every other GET or HEAD outside
-    `/api/` gets `root.html`, with the site name and description. It is byte-identical to Go's.
+  - **What is served:** `/static/*` from the client directory, with Range and conditional requests, and
+    gzip-compressed as Go's `gzhttp` does; `/static/plugins/*` from `PluginSettings.ClientDirectory`;
+    `/robots.txt`. Every other GET or HEAD outside `/api/` gets `root.html`, with the site name and description.
+    It is byte-identical to Go's. Old browsers and desktop apps get Go's unsupported pages instead. Details in
+    `docs/WEB.md`.
   - **The client directory:** `EBACHAT_CLIENT_DIR`, default `client/`. Use the released web client of the same
     version (Apache-2.0); `dev/get-webapp.sh` fetches 12.1.0 into `dev/webapp`, linked as `dev/client`. Go finds
     the same `dev/client` next to its binary's directory.
   - **EBAChat needs only `/static/emoji/{code}.png`,** the system emoji images. Without a full client, point
     `EBACHAT_CLIENT_DIR` at `webapp/channels/src/images`, which holds `emoji/`.
-  - **Not ported:** Go's unsupported-browser and old-desktop-app pages (templates) and Range requests on static
-    files.
   - **Checked with Mattermost Desktop 6.2.2** on the Rust server: as a user, login, channels, posting, threads,
     reactions, search, DMs, file paste with thumbnail and preview, and the theme. As admin, System Console pages.
 - **Web routes outside `/api/`** (`src/web.rs`): their errors are Go's web error page, an HTML page or a 3xx
   redirect to the client's signed `/error?message=...&s=...` (`RenderWebAppError`); JSON only with `X-Mobile-App`.
   - **Served:** `GET|HEAD /files/{id}/public`, `GET|POST /login/sso/saml` (always "SAML not available", 302),
-    `/manualtest` (the client's page unless `EnableTesting`).
+    `/manualtest` (the client's page unless `EnableTesting`). Also the OAuth 2.0 provider, GitLab SSO sign-in,
+    `/oauth/intune` and `/login/one_time_link`: see `docs/WEB.md`. A path no route takes gets the client's page
+    for GET and HEAD, and Go's plain-text 404 for any other method.
   - **Go bug fixed:** for a public link with a missing or wrong `h`, Go renders the page in the handler and again
     in `handleContextError`, so the 400 body holds two pages. Rust sends one.
-  - **Not ported:** the OAuth 2.0 provider pages (`/oauth/authorize`, `/oauth/access_token`,
-    `/oauth/deauthorize`, `/.well-known/oauth-authorization-server`), OAuth SSO login (`/oauth/{service}/login`,
-    `mobile_login`, `signup`, `complete`, `/signup|login/{service}/complete`), `/oauth/intune` and
-    `/login/one_time_link`. A GET there gets the client's page, any other method the API 404.
 - **No user limit.** An unlicensed 12.1 server refuses to create users past 250 (`maxUsersHardLimit`,
   `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
