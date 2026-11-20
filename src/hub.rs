@@ -86,6 +86,11 @@ impl Hub {
         let _ = self.app.set(Arc::downgrade(app));
     }
 
+    /// The server state, for work that outlives a request.
+    pub fn app(&self) -> Option<State> {
+        self.app.get().and_then(std::sync::Weak::upgrade)
+    }
+
     fn add(&self, c: Arc<Conn>) {
         self.conns.write().unwrap().push(c);
     }
