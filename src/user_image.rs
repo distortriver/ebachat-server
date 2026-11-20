@@ -163,9 +163,24 @@ async fn get_default(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<Stri
 }
 
 /// `setProfileImage`: multipart `image`, made upright and filled into 128×128 PNG.
-async fn set_image(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<String>, mut form: Multipart) -> ApiResult<Json<Value>> {
+async fn set_image(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(user_id): Path<String>,
+    req: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    use axum::extract::FromRequest;
     let user_id = user_param(&s, &user_id)?;
-    app.require_user(&s, &user_id).await?;
+    if !crate::user_edit::user_or_bot_perm(&app, &s, &user_id).await? {
+        return Err(AppError::forbidden_perm(crate::perm::EDIT_OTHER_USERS));
+    }
+    let length = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<i64>().ok());
+    if length.is_some_and(|l| l > app.cfg.i64("FileSettings.MaxFileSize")) {
+        return Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "api.user.upload_profile_user.too_large.app_error", ""));
+    }
+    let mut form = Multipart::from_request(req, &app)
+        .await
+        .map_err(|e| AppError::internal("api.user.upload_profile_user.parse.app_error", e.to_string()))?;
     let mut data = None;
     while let Some(field) = form
         .next_field()

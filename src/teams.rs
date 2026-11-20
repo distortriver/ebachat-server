@@ -240,7 +240,7 @@ impl App {
 
     /// `JoinDefaultChannels`: town-square and off-topic (or the configured ones), the join message only with
     /// `ExperimentalEnableDefaultChannelLeaveJoinMessages`.
-    async fn join_default_channels(&self, team_id: &str, user: &User, admin: bool, requestor: &str) -> ApiResult<()> {
+    pub async fn join_default_channels(&self, team_id: &str, user: &User, admin: bool, requestor: &str) -> ApiResult<()> {
         let requestor = if requestor.is_empty() { None } else { self.user(requestor).await? };
         let mut err = None;
         for name in self.default_channel_names() {

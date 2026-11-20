@@ -34,7 +34,6 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/system/notices/{team_id}", get(product_notices))
         .route("/api/v4/system/onboarding/complete", get(onboarding))
         .route("/api/v4/users/{user_id}/custom_profile_attributes", get(|_: Auth| async { Json(json!({})) }))
-        .route("/api/v4/users/{user_id}/oauth/apps/authorized", get(|_: Auth| async { Json(json!([])) }))
         .route("/api/v4/properties/groups/{group}/system/values", get(property_group))
         .route("/api/v4/notifications/ack", post(push_ack))
 }
