@@ -214,6 +214,8 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   per check.
 - **Properties:** see `docs/PROPERTIES.md`.
 - **Push and email:** `docs/NOTIFICATIONS.md`.
+- **Background jobs:** Go's job server, the Team Edition workers and schedulers, the recurring cleanups, content
+  extraction and bulk export; see `docs/JOBS.md` (bulk import is not ported).
 - **Left:**
   - T3 routes on demand.
 
@@ -228,6 +230,7 @@ Code by area:
 | Posts | `posts.rs`, `notify.rs`, `threads.rs`, `reactions.rs`, `drafts.rs`, `search.rs` |
 | Files | `files.rs`, `file_api.rs`, `images.rs`, `opengraph.rs`, `search_params.rs` |
 | Integrations | `commands.rs`, `commands_builtin.rs`, `integrations.rs` (actions, dialogs), `webhooks.rs`, `reminders.rs` |
+| Jobs | `jobs.rs`, `job_workers.rs`, `extract.rs`, `bulk_export.rs`, `bulk_import.rs` |
 
 ## Running
 

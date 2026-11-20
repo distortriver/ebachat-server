@@ -359,7 +359,7 @@ impl App {
 
     /// `userDeactivated`: offline, admins told about the user's bots (and the bots disabled with
     /// `DisableBotsWhenOwnerIsDeactivated`), OAuth grants removed.
-    async fn user_deactivated(&self, user_id: &str) -> ApiResult<()> {
+    pub(crate) async fn user_deactivated(&self, user_id: &str) -> ApiResult<()> {
         self.set_status_offline(user_id, false, true).await;
         let user = get_user(self, user_id).await?;
         if !user.is_bot

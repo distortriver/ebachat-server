@@ -85,6 +85,27 @@ impl FileStore {
         Ok(Reading { stream: r.into_stream(), size })
     }
 
+    /// `ListDirectory`: the entries right under `dir` (files and directories), as paths from the root, with
+    /// their modification times in milliseconds (0 for directories).
+    pub async fn list(&self, dir: &str) -> anyhow::Result<Vec<(String, i64)>> {
+        let dir = clean(dir);
+        let prefix = if dir.is_empty() { None } else { Some(self.path(&dir)) };
+        let r = self.store.list_with_delimiter(prefix.as_ref()).await?;
+        let root = format!("{}/", self.prefix.trim_end_matches('/'));
+        let strip = |p: &Path| {
+            let s = p.to_string();
+            if self.prefix.is_empty() { s } else { s.trim_start_matches(&root).to_string() }
+        };
+        let mut out: Vec<(String, i64)> = r.common_prefixes.iter().map(|p| (strip(p), 0)).collect();
+        out.extend(r.objects.iter().map(|o| (strip(&o.location), o.last_modified.timestamp_millis())));
+        Ok(out)
+    }
+
+    /// `FileModTime`, in milliseconds.
+    pub async fn modified(&self, p: &str) -> anyhow::Result<i64> {
+        Ok(self.store.head(&self.path(&clean(p))).await?.last_modified.timestamp_millis())
+    }
+
     /// A file written in parts as they come, so that an upload never sits whole in memory.
     pub async fn writer(&self, p: &str) -> anyhow::Result<Writer> {
         let upload = self.store.put_multipart(&self.path(p)).await?;
@@ -113,4 +134,19 @@ impl Writer {
     pub async fn abort(self) {
         let _ = self.0.abort().await;
     }
+}
+
+/// A path as Go's `filepath.Join` cleans it: no `.` segments, no leading `./` or trailing `/`.
+pub fn clean(p: &str) -> String {
+    let mut parts: Vec<&str> = vec![];
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
 }

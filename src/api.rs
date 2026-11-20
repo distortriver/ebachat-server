@@ -93,6 +93,8 @@ fn routes(app: State) -> Router {
         .merge(crate::system::routes())
         .merge(crate::config_api::routes())
         .merge(crate::admin::routes())
+        .merge(crate::jobs::routes())
+        .merge(crate::bulk_export::routes())
         .merge(crate::unlicensed::routes())
         .merge(crate::properties::routes())
         .merge(crate::commands::routes())

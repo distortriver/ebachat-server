@@ -57,6 +57,7 @@ impl App {
 
     /// The config listener: when the settings changed, every client gets the new client config.
     pub async fn config_changed(&self, old: &Value, new: &Value) {
+        crate::job_workers::config_changed(self, old, new).await;
         let strip = |v: &Value| {
             let mut v = v.clone();
             if let Some(m) = v.as_object_mut() {

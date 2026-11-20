@@ -782,21 +782,7 @@ async fn ancillary_permissions(_: Auth, body: Bytes) -> ApiResult<Response> {
 
 // ---------- jobs ----------
 
-/// `IsValidJobType`.
-const JOB_TYPES: &[&str] = &[
-    "data_retention", "message_export", "cli_message_export", "elasticsearch_post_indexing",
-    "elasticsearch_post_aggregation", "ldap_sync", "migrations", "plugins", "expiry_notify", "product_notices",
-    "active_users", "import_process", "import_delete", "export_process", "export_delete", "cloud",
-    "resend_invitation_email", "extract_content", "last_accessible_post", "last_accessible_file",
-    "upgrade_notify_admin", "trial_notify_admin", "post_persistent_notifications", "install_plugin_notify_admin",
-    "hosted_purchase_screening", "cleanup_desktop_tokens", "delete_empty_drafts_migration",
-    "refresh_materialized_views", "delete_orphan_drafts_migration", "export_users_to_csv",
-    "delete_dms_preferences_migration", "mobile_session_metadata", "access_control_sync", "access_control_team_sync",
-    "push_proxy_auth", "recap", "scheduled_recap", "delete_expired_posts", "autotranslation_recovery",
-    "cleanup_expired_access_tokens", "notify_expiring_access_tokens",
-];
-
-/// `AllJobTypes`: what a listing without a type covers.
+/// `AllJobTypes`: what a listing without a type covers, and the types `IsValidJobType` accepts.
 const ALL_JOB_TYPES: &[&str] = &[
     "data_retention", "message_export", "elasticsearch_post_indexing", "elasticsearch_post_aggregation", "ldap_sync",
     "migrations", "plugins", "expiry_notify", "product_notices", "active_users", "import_process", "import_delete",
@@ -859,7 +845,7 @@ async fn jobs(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<Respo
     let job_type = query(&q, "job_type");
     let mut types = vec![];
     if !job_type.is_empty() {
-        let Some(&t) = JOB_TYPES.iter().find(|t| **t == job_type) else {
+        let Some(&t) = ALL_JOB_TYPES.iter().find(|t| **t == job_type) else {
             return Err(AppError::invalid_url_param("job_type"));
         };
         match read_job_permission(&app, &s, t).await {
@@ -892,14 +878,49 @@ async fn jobs_by_type(St(app): St<State>, Auth(s): Auth, Path(job_type): Path<St
     if job_type.is_empty() || job_type.len() > 32 {
         return Err(AppError::invalid_url_param("job_type"));
     }
-    match read_job_permission(&app, &s, &job_type).await {
-        None => Err(AppError::bad_request("api.job.retrieve.nopermissions", "")),
-        Some((false, p)) => Err(AppError::forbidden_perm(p)),
-        Some((true, _)) => {
-            let (page, per_page) = page(&q);
-            job_page(&app, &[job_type.as_str()], "", page, per_page).await
-        }
+    let Some((has, p)) = read_job_permission(&app, &s, &job_type).await else {
+        return Err(AppError::bad_request("api.job.retrieve.nopermissions", ""));
+    };
+    let team_id = query(&q, "team_id");
+    if !team_id.is_empty() && !is_valid_id(team_id) {
+        return Err(AppError::invalid_url_param("team_id"));
     }
+    let policy_id = query(&q, "policy_id");
+    let access = job_type == "access_control_sync" || job_type == "access_control_team_sync";
+    // Team-scoped access control sync requests: a team admin's own team, or a policy of it.
+    let team_scoped = !has
+        && job_type == "access_control_sync"
+        && !team_id.is_empty()
+        && app.has_team_perm(&s, team_id, "manage_team_access_rules").await;
+    let policy_scoped = !has
+        && job_type == "access_control_team_sync"
+        && team_id.is_empty()
+        && is_valid_id(policy_id)
+        && app.has_team_perm(&s, policy_id, "manage_team_access_rules").await;
+    if !has && !team_scoped && !policy_scoped {
+        return Err(AppError::forbidden_perm(p));
+    }
+    let (page, per_page) = page(&q);
+    let filter = if !team_id.is_empty() {
+        Some(("team_id", team_id))
+    } else if !policy_id.is_empty() && access {
+        if !policy_scoped && !app.has_perm(&s, crate::perm::MANAGE_SYSTEM).await {
+            return Err(AppError::forbidden_perm(crate::perm::MANAGE_SYSTEM));
+        }
+        Some(("policy_id", policy_id))
+    } else {
+        None
+    };
+    let Some(filter) = filter else {
+        return job_page(&app, &[job_type.as_str()], "", page, per_page).await;
+    };
+    // GetJobsByTypeAndData, newest first, the page cut from them.
+    let mut jobs = crate::jobs::get_by_type_and_data(&app, &job_type, &[filter])
+        .await
+        .map_err(|e| AppError::internal("app.job.get_all.app_error", e.detailed_error))?;
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.create_at));
+    let page: Vec<_> = jobs.into_iter().skip((page * per_page) as usize).take(per_page as usize).collect();
+    Ok(json_raw(&serde_json::to_value(page).unwrap_or_default()))
 }
 
 /// `getJob`.
