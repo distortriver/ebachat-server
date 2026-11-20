@@ -22,7 +22,13 @@ answers them.
   - compressed as Go's `gzhttp` (klauspost/compress 1.19) does it: zstd or gzip by the `Accept-Encoding`
     q-values (zstd when equal), only a full 200 of at least 1 KiB of a type its default filter takes, and `Vary:
     Accept-Encoding` on every answer;
-  - no `Expires: 0`, whatever the status.
+  - no `Expires: 0`, whatever the status, and only `setStaticSecurityHeaders`' headers (no `X-Request-Id` or
+    `X-Version-Id`);
+  - `/static/` and `/static/plugins/` themselves are the file server's 404;
+  - compressed only with `WebserverMode` "gzip"; none of these routes with "disabled".
+- **Offline docs:** `/_documentation/*` from `<client>/_documentation` as Go's docs handler serves it (clean URLs
+  tried as `<path>.html`, then `<path>/index.html`; HTML pages `no-cache`; Go's 404 otherwise), and
+  `/_documentation` redirected (302) to `/_documentation/`.
 - **The client's page:** every other GET or HEAD outside `/api/` gets `root.html`, with the site name and
   description. It is byte-identical to Go's.
 - **Go's main router** serves `/robots.txt` (any method) and `/unsupported_browser.js` (any method) without the
@@ -78,7 +84,17 @@ answers them.
 - **API answers** are compressed as Go's (`src/compress.rs`, see `docs/MAP.md`); the `Audits` rows of these
   routes are written as Go's (`docs/ADMIN.md`).
 
+## Sessions on web routes
+
+A failed CSRF check, a query-string token of a non-OAuth session or a 500 from the session lookup stops the request
+before the handler, as Go's `ServeHTTP`: JSON under `/api/`, for webhooks and the OAuth API, the web error page
+elsewhere (`app::MaybeAuth`, `app::error_response`).
+
 ## Checks
+
+- **`WebserverMode`:** 13 paths (the client's page, static files, `/static/`, robots, the unsupported-browser
+  script, the docs, plugins, the API) by GET and POST, against my Go with "gzip", "uncompressed" and "disabled":
+  the same status, encoding, `Vary` and type, 26/26 each.
 
 - **Scripts:** the flows were run against a Go server and the Rust server on one database:
   - the OAuth provider: register an app, then the code, PKCE, implicit and refresh grants, a resource mismatch,

@@ -294,7 +294,7 @@ pub struct AppError {
     pub status_code: u16,
     /// `Context.RemoveSessionCookie` before the error is written: the `Set-Cookie` header that clears the session.
     #[serde(skip)]
-    pub set_cookie: Option<String>,
+    pub set_cookie: Option<Box<str>>,
 }
 
 impl AppError {
@@ -310,7 +310,7 @@ impl AppError {
     }
     /// The error with `Context.RemoveSessionCookie`'s header: `MMAUTHTOKEN` cleared under the site's subpath.
     pub fn clearing_session_cookie(mut self, app: &App) -> AppError {
-        self.set_cookie = Some(remove_session_cookie(app));
+        self.set_cookie = Some(remove_session_cookie(app).into());
         self
     }
     pub fn detail(mut self, d: impl Into<String>) -> AppError {

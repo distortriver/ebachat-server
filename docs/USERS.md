@@ -40,8 +40,34 @@ These answer with Go's license or "not available" error:
   is on.
 - **Audits:** written as Go writes them, see `docs/ADMIN.md`.
 
+## Sessions, tokens and updates as Go
+
+- **The request's token** (`src/app.rs`, `ParseAuthTokenFromRequest`): the `MMAUTHTOKEN` cookie first (a quoted value
+  unquoted, a malformed cookie skipped, an empty one meaning no token even with an `Authorization` header), then
+  `Authorization: Bearer <t>` or `Token <t>` (the rest after the first space, untrimmed), then `?access_token=`;
+  cut to 50 bytes.
+- **Before the handler** (`web.Handler.ServeHTTP`): an unknown token is "session expired" with `MMAUTHTOKEN`
+  removed (`Max-Age=0; HttpOnly`) where a session is required, no session elsewhere; a failed CSRF check of a
+  cookie session is "session expired" with the cookie removed on every route that does not trust the requester
+  (`APIHandler` ones included, so `POST /users/logout` answers 401 and keeps the session); the check passes when
+  `X-CSRF-Token` equals the session's CSRF token, both possibly empty, as Go compares them.
+- **`POST /users/logout`** removes `MMAUTHTOKEN` only, as `RemoveSessionCookie` does.
+- **`PUT /users/{id}` and `PUT /users/{id}/patch`** answer the updated user as `UpdateUser` returns it to anyone
+  allowed to edit it: `Sanitize({})`, no privacy settings applied (the patch route applied them before). A user of
+  any login provider (LDAP and SAML included) cannot change its username on either route (409, `Field`
+  `username`).
+- **`POST /teams/{id}/members/ids`** applies the viewer's `GetViewUsersRestrictions`.
+- **Switching an email account to GitLab:** the state keeps the email as typed, and the callback finds the user by
+  `Email = lower(...)` and stores the provider's email in lower case, as `GetByEmail` and `UpdateAuthData` do.
+- **Checked** against Go: an unknown cookie and header token, an empty cookie with a good bearer token, a quoted
+  cookie, `bearer` with two spaces, a non-OAuth token in the query (API and web route), logout and a PUT with a
+  failed CSRF check, with `X-Requested-With`, logout without a session; PUT and PATCH of another user by an admin.
+
 ## Go bugs fixed, not reproduced
 
+- **View restrictions in team member lists** combine the teams and channels the viewer may see with OR, as
+  `UserCanSeeOtherUser` does; Go's SQL filter joins both, which needs a user to be in a permitted team and a
+  shared channel at once.
 - **Missing `token_id` on revoke, disable or enable of a token:** Go carries on without a `return`. It then answers
   with a later error (a 404 for the token `""`). Rust answers the missing parameter (400).
 - **A bot converted from a user owns itself.** With `DisableBotsWhenOwnerIsDeactivated`, deactivating it makes Go

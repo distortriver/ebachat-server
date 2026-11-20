@@ -159,6 +159,11 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
   that is ever needed.
 - **Push and email** are sent as Go sends them: see `docs/NOTIFICATIONS.md`.
+- **Query strings** are read as Go's `r.URL.Query()` by every handler (`app::Query`): a pair with a raw `;` or a bad
+  escape is dropped, a repeated key gives its first value.
+- **`WebserverMode`** (read at start): "gzip" compresses the static, plugin and docs files and the handlers below;
+  "uncompressed" serves them plain (no `Vary`); "disabled" serves no web client route at all (`/static`, `/robots.txt`,
+  `/unsupported_browser.js`, `/_documentation`, the client's page): Go's plain-text 404 for any path outside `/api/`.
 - **Compression** (`src/compress.rs`): with `WebserverMode` "gzip" (read at start), every API and web handler Go
   wraps in `gzhttp` (klauspost/compress 1.19.2) answers as it does: `Vary: Accept-Encoding` always; zstd or gzip
   by the `Accept-Encoding` q-values, zstd on a tie (browsers offering both get zstd), never for `HEAD`; only bodies
@@ -169,8 +174,10 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
 - **Channel mentions** (`props.channel_mentions` of a post, `posts.rs`): stored as Go's `FillInPostProps` writes
   them (display name, team name, channel id); every answer gives the viewer only the mentions they may resolve,
   looked up again by team and channel name, with the current display name and without the id
-  (`sanitizeChannelMentionsForUser`, also inside permalink previews); `posted` and `post_edited` events keep the
-  stored form, per recipient (public channels for everyone, a private channel's for its members).
+  (`sanitizeChannelMentionsForUser`, also inside permalink previews); `posted` and `post_edited` events carry the
+  post without them and add, per recipient, the stored form of the mentions whose channel the recipient may
+  resolve (`channelMentionsBroadcastHook` with `HasPermissionToResolveChannelMention`: read content, or a public
+  channel of a team where they may read public channels). Edits look the mentions up in the post's own team.
 - **`HEAD` on the API** is Go's 404 (its routes are registered for their methods only), but for the file routes
   (`/files/{id}`, `/thumbnail`, `/preview`) that take it.
 - **Open:**
