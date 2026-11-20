@@ -908,7 +908,7 @@ async fn invite_info(St(app): St<State>, _: MaybeAuth, Path(invite_id): Path<Str
     Ok(([(header::CONTENT_TYPE, "application/json")], v).into_response())
 }
 
-/// `MemberInvite`: a bare list of emails, or `{"emails", "channelIds", "message"}`.
+/// `MemberInvite`: a bare list of emails, or `{"emails", "channelIds", "message", "profiles"}`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum MemberInvite {
@@ -916,6 +916,12 @@ enum MemberInvite {
     Full {
         #[serde(default)]
         emails: Vec<String>,
+        #[serde(default, rename = "channelIds")]
+        channel_ids: Option<Vec<String>>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        profiles: Option<Vec<serde_json::Value>>,
     },
 }
 
@@ -925,14 +931,51 @@ struct EmailInviteWithError {
     error: Option<AppError>,
 }
 
-/// `inviteUsersToTeam`: addresses checked as Go does; sending needs email, which this server does not do, so
-/// every good address gets Go's "unable to send" error.
+/// `UserIsFirstAdmin`: the oldest active system admin.
+pub async fn is_first_admin(app: &App, u: &User) -> bool {
+    if !u.is_system_admin() {
+        return false;
+    }
+    let first: Option<String> = sqlx::query_scalar(
+        "SELECT Id FROM Users WHERE DeleteAt = 0 AND Roles LIKE '%system_admin%' ORDER BY CreateAt ASC LIMIT 1",
+    )
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten();
+    first.as_deref() == Some(&u.id)
+}
+
+/// `ValidateUserPermissionsOnChannels`: the channels whose members the user may manage.
+pub async fn channels_user_may_invite_to(app: &App, user_id: &str, ids: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    for id in ids {
+        let Ok(c) = app.channel_or_404(id).await else { continue };
+        let need = match c.r#type.as_str() {
+            crate::model::channel::PRIVATE => perm::MANAGE_PRIVATE_CHANNEL_MEMBERS,
+            crate::model::channel::OPEN => perm::MANAGE_PUBLIC_CHANNEL_MEMBERS,
+            _ => continue,
+        };
+        if app.user_channel_perm(user_id, id, need).await.0 {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+fn rate_limited(user_id: &str, team_id: &str) -> AppError {
+    AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "app.email.rate_limit_exceeded.app_error", "")
+        .detail(format!("user_id={user_id}, team_id={team_id}, error=rate limit exceeded"))
+}
+
+/// `inviteUsersToTeam`: `InviteNewUsersToTeam`, or with `graceful` `InviteNewUsersToTeamGracefully` and the
+/// `resend_invitation_email` job.
 async fn invite_by_email(
     St(app): St<State>,
     Auth(s): Auth,
     Path(team_id): Path<String>,
     Query(q): Query<GracefulQuery>,
-    Body(invite): Body<MemberInvite>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Response> {
     let graceful = !q.graceful.is_empty();
     if !is_valid_id(&team_id) {
@@ -942,46 +985,163 @@ async fn invite_by_email(
     if !app.has_team_perm(&s, &team_id, perm::ADD_USER_TO_TEAM).await {
         return Err(AppError::forbidden_perm(perm::INVITE_USER));
     }
-    let emails: Vec<String> = match invite {
-        MemberInvite::List(l) => l,
-        MemberInvite::Full { emails } => emails,
-    }
-    .into_iter()
-    .map(|e| e.trim().to_lowercase())
-    .collect();
+    let invalid_body = |e: String| AppError::bad_request("api.team.invite_members_to_team_and_channels.invalid_body.app_error", "").detail(e);
+    let invite: MemberInvite = serde_json::from_slice(&body).map_err(|e| invalid_body(e.to_string()))?;
+    let (emails, mut channel_ids, message, profiles) = match invite {
+        MemberInvite::List(l) => (l, vec![], String::new(), vec![]),
+        MemberInvite::Full { emails, channel_ids, message, profiles } => {
+            (emails, channel_ids.unwrap_or_default(), message.unwrap_or_default(), profiles.unwrap_or_default())
+        }
+    };
+    let emails: Vec<String> = emails.into_iter().map(|e| e.trim().to_lowercase()).collect();
     if emails.is_empty() {
         return Err(AppError::invalid_param("user_email"));
+    }
+    if !graceful && !profiles.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.profiles_graceful.app_error", ""));
+    }
+    if !channel_ids.is_empty() {
+        channel_ids = channels_user_may_invite_to(&app, &s.user_id, &channel_ids).await;
     }
     if !app.cfg.bool("ServiceSettings.EnableEmailInvitations") {
         return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.team.invite_members.disabled.app_error", "Email invitations are disabled."));
     }
+    // prepareInviteNewUsersToTeam
     let team = app.team(&team_id).await?;
     let sender = app.user(&s.user_id).await?.ok_or_else(crate::users::missing_account)?;
+    let mut channels = vec![];
+    for id in &channel_ids {
+        if let Ok(c) = app.channel_or_404(id).await {
+            if c.team_id != team_id {
+                return Err(AppError::bad_request("api.team.invite_guests.channel_in_invalid_team.app_error", ""));
+            }
+            channels.push((c.id.clone(), c.display_name.clone()));
+        }
+    }
     let restrict = app.cfg.str("TeamSettings.RestrictCreationToDomains").to_string();
     let allowed: Vec<&str> = if sender.is_guest() {
         vec![app.cfg.str("GuestAccountsSettings.RestrictCreationToDomains")]
     } else {
         vec![&team.allowed_domains, &restrict]
     };
-    let mut out = vec![];
-    for email in emails {
-        let deactivated: Option<(i64,)> = sqlx::query_as("SELECT DeleteAt FROM Users WHERE Email = $1 AND DeleteAt > 0")
-            .bind(&email)
-            .fetch_optional(&app.db)
-            .await?;
-        let error = if !email_allowed(&email, &allowed) {
-            AppError::bad_request("api.team.invite_members.invalid_email.app_error", "The following email addresses do not belong to an accepted domain.")
-        } else if deactivated.is_some() {
-            AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "This account is deactivated.")
-        } else if app.cfg.str("EmailSettings.SMTPServer") == "localhost" && app.cfg.str("EmailSettings.SMTPPort") == "10025" {
-            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email_with_defaults.app_error", "")
-        } else {
-            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email.app_error", "Error while sending the email")
-        };
-        if !graceful {
-            return Err(error);
+    let deactivated = |email: String| {
+        let app = app.clone();
+        async move {
+            let d: Option<i64> = sqlx::query_scalar("SELECT DeleteAt FROM Users WHERE Email = $1").bind(&email).fetch_optional(&app.db).await?;
+            ApiResult::Ok(d.is_some_and(|d| d != 0))
         }
-        out.push(EmailInviteWithError { email, error: Some(error) });
+    };
+    let sender_name = sender.display_name(app.cfg.str("TeamSettings.TeammateNameDisplay"));
+    let first_admin = is_first_admin(&app, &sender).await;
+    if !graceful {
+        let bad: Vec<String> = emails.iter().filter(|e| !email_allowed(e, &allowed)).cloned().collect();
+        if !bad.is_empty() {
+            return Err(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &bad.join(", ")));
+        }
+        let mut gone = vec![];
+        for e in &emails {
+            if deactivated(e.clone()).await? {
+                gone.push(e.clone());
+            }
+        }
+        if !gone.is_empty() {
+            return Err(AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "").with_param("Addresses", &gone.join(", ")));
+        }
+        let d = crate::email::InviteData {
+            team: &team,
+            channels: vec![],
+            sender_name,
+            sender_id: sender.id.clone(),
+            sender_image: None,
+            invites: emails,
+            profiles: Default::default(),
+            message: String::new(),
+            reminder_interval: None,
+            error_when_not_sent: false,
+            is_system_admin: sender.is_system_admin(),
+            is_first_admin: first_admin,
+        };
+        if crate::email::send_invites(&app, d).await == Err(crate::email::InviteError::RateLimited) {
+            return Err(rate_limited(&sender.id, &team.id));
+        }
+        return Ok(crate::users::ok().into_response());
     }
-    Ok(Json(out).into_response())
+    // InviteNewUsersToTeamGracefully: profiles need an Enterprise license.
+    if !profiles.is_empty() {
+        return Err(AppError::bad_request("api.team.invite_members.profiles_license.app_error", ""));
+    }
+    let mut out: Vec<EmailInviteWithError> = vec![];
+    let mut good = vec![];
+    for email in emails.iter().cloned() {
+        let error = if !email_allowed(&email, &allowed) {
+            Some(AppError::bad_request("api.team.invite_members.invalid_email.app_error", "").with_param("Addresses", &email))
+        } else if deactivated(email.clone()).await? {
+            Some(AppError::bad_request("api.team.invite_members.account_deactivated.app_error", "").with_param("Addresses", &email))
+        } else {
+            good.push(email.clone());
+            None
+        };
+        out.push(EmailInviteWithError { email: email.clone(), error });
+    }
+    if !good.is_empty() {
+        let with_channels = !channels.is_empty();
+        let image = if with_channels { Some(app.profile_image(&sender).await.0) } else { None };
+        let d = crate::email::InviteData {
+            team: &team,
+            channels,
+            sender_name,
+            sender_id: sender.id.clone(),
+            sender_image: image,
+            invites: good,
+            profiles: Default::default(),
+            message,
+            reminder_interval: None,
+            error_when_not_sent: true,
+            is_system_admin: sender.is_system_admin(),
+            is_first_admin: first_admin,
+        };
+        match crate::email::send_invites(&app, d).await {
+            Ok(failed) => {
+                for (email, e) in failed {
+                    let mut err = AppError::new(StatusCode::OK, "", "");
+                    err.message = e;
+                    err.id.clear();
+                    err.status_code = 0;
+                    out.push(EmailInviteWithError { email, error: Some(err) });
+                }
+            }
+            Err(crate::email::InviteError::RateLimited) => return Err(rate_limited(&sender.id, &team.id)),
+            Err(crate::email::InviteError::SendFailed) => {
+                let defaults = app.cfg.str("EmailSettings.SMTPServer") == "localhost" && app.cfg.str("EmailSettings.SMTPPort") == "10025";
+                for i in out.iter_mut().filter(|i| i.error.is_none()) {
+                    i.error = Some(if defaults {
+                        AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email_with_defaults.app_error", "")
+                    } else {
+                        AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "api.team.invite_members.unable_to_send_email.app_error", "Error while sending the email")
+                    });
+                }
+            }
+        }
+    }
+    // The reminder job Go schedules (`resend_invitation_email`), for the job server to pick up.
+    let mut data = serde_json::Map::new();
+    data.insert("emailList".into(), serde_json::Value::String(serde_json::to_string(&emails).unwrap_or_default()));
+    data.insert("teamID".into(), serde_json::Value::String(team_id.clone()));
+    data.insert("senderID".into(), serde_json::Value::String(s.user_id.clone()));
+    data.insert("scheduledAt".into(), serde_json::Value::String(crate::app::now_ms().to_string()));
+    if !channel_ids.is_empty() {
+        data.insert("channelList".into(), serde_json::Value::String(serde_json::to_string(&channel_ids).unwrap_or_default()));
+    }
+    sqlx::query(
+        "INSERT INTO Jobs (Id, Type, Priority, CreateAt, StartAt, LastActivityAt, Status, Progress, Data)
+         VALUES ($1, 'resend_invitation_email', 0, $2, 0, 0, 'pending', 0, $3::jsonb)",
+    )
+    .bind(crate::app::new_id())
+    .bind(crate::app::now_ms())
+    .bind(serde_json::Value::Object(data).to_string())
+    .execute(&app.db)
+    .await
+    .map_err(|e| AppError::internal("app.job.save.app_error", e.to_string()))?;
+    let body = if out.is_empty() { "null".to_string() } else { serde_json::to_string(&out).unwrap_or_default() };
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }

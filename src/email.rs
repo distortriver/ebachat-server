@@ -26,6 +26,21 @@ pub const TOKEN_GUEST_INVITATION: &str = "guest_invitation";
 pub const TOKEN_GUEST_MAGIC_LINK_INVITATION: &str = "guest_magic_link_invitation";
 pub const TOKEN_GUEST_MAGIC_LINK: &str = "guest_magic_link";
 
+/// `a.Srv().Go`: email work after the answer, logged when it fails.
+pub fn go<F, Fut>(app: &App, what: &'static str, f: F)
+where
+    F: FnOnce(State) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    if let Some(state) = app.hub.app() {
+        tokio::spawn(async move {
+            if let Err(e) = f(state).await {
+                eprintln!("Failed to send {what}: {e}");
+            }
+        });
+    }
+}
+
 /// `GetSiteURL`.
 pub fn site_url(app: &App) -> String {
     app.cfg.str("ServiceSettings.SiteURL").to_string()

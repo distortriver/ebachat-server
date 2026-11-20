@@ -224,6 +224,18 @@ impl App {
                 return Err(AppError::bad_request("api.user.update_user.accepted_domain.app_error", "Email is not from an accepted domain."));
             }
         }
+        // With verification required the new address waits for the user to verify it.
+        let mut new_email = String::new();
+        if user.email != old.email && self.cfg.bool("EmailSettings.RequireEmailVerification") {
+            new_email = user.email.clone();
+            let taken: Option<i32> = sqlx::query_scalar("SELECT 1 FROM Users WHERE Email = lower($1)").bind(&new_email).fetch_optional(&self.db).await?;
+            if taken.is_some() {
+                return Err(AppError::bad_request("app.user.save.email_exists.app_error", "An account with that email already exists."));
+            }
+            if !user.is_bot {
+                user.email = old.email.clone();
+            }
+        }
         user.auth_data = old.auth_data.clone();
         user.auth_service = old.auth_service.clone();
         user.password = old.password.clone();
@@ -306,6 +318,24 @@ impl App {
         }
         let mut fresh = self.user(&user.id).await?.map(|u| (*u).clone()).unwrap_or(user);
         if notify {
+            if fresh.email != old.email || !new_email.is_empty() {
+                let (u, old_email) = (fresh.clone(), old.email.clone());
+                if self.cfg.bool("EmailSettings.RequireEmailVerification") {
+                    crate::email::go(self, "email verification", move |app| async move {
+                        crate::email::send_email_verification(&app, &u, &new_email, "").await.map_err(|e| e.message)
+                    });
+                } else {
+                    crate::email::go(self, "email change email", move |app| async move {
+                        crate::email::send_email_change(&app, &old_email, &u.email, &u.locale).await
+                    });
+                }
+            }
+            if fresh.username != old.username {
+                let u = fresh.clone();
+                crate::email::go(self, "change username email", move |app| async move {
+                    crate::email::send_change_username(&app, &u.username, &u.email, &u.locale).await
+                });
+            }
             self.send_updated_user_event(&fresh);
         }
         fresh.sanitize_own();
@@ -538,6 +568,7 @@ async fn update_password(
         }
         let u = user.ok_or_else(missing_account)?;
         app.store_password(&u.id, &b.new_password).await?;
+        password_change_email(&app, &u, "api.user.reset_password.method");
         return Ok(ok());
     }
     if user_id == s.user_id {
@@ -557,13 +588,22 @@ async fn update_password(
         }
         let u = app.user(&user_id).await?.ok_or_else(missing_account)?;
         app.set_password(&u, &b.new_password, Some(&s)).await?;
+        password_change_email(&app, &u, "api.user.update_password.menu");
     } else if can {
         let u = user.ok_or_else(missing_account)?;
         app.set_password(&u, &b.new_password, Some(&s)).await?;
+        password_change_email(&app, &u, "api.user.reset_password.method");
     } else {
         return Err(context_err());
     }
     Ok(ok())
+}
+
+/// `SendPasswordChangeEmail` after the change, the method in the user's words.
+pub fn password_change_email(app: &App, u: &User, method_id: &str) {
+    let method = crate::i18n::tl(&u.locale, method_id, &[]);
+    let (email, locale) = (u.email.clone(), u.locale.clone());
+    crate::email::go(app, "password change email", move |app| async move { crate::email::send_password_change(&app, &email, &method, &locale).await });
 }
 
 // ---------- custom status ----------
@@ -789,6 +829,7 @@ struct NewUser {
 struct SignupQuery {
     t: String,
     iid: String,
+    r: String,
 }
 
 /// `createUser`: with an invite id, as an admin, or by open sign-up.
@@ -831,7 +872,7 @@ async fn create_user(
     }
     let mut team = None;
     if !q.t.is_empty() {
-        return Err(AppError::bad_request("api.user.create_user.signup_link_invalid.app_error", ""));
+        return create_user_with_token(&app, u, &q.t, &q.r).await;
     } else if !q.iid.is_empty() {
         signup_allowed()?;
         let t = crate::teams::team_by_invite(&app, &q.iid).await?;
@@ -858,8 +899,113 @@ async fn create_user(
     let ruser = app.create_user(u).await?;
     if let Some(t) = team {
         app.join_user_to_team(&t, &ruser, "").await?;
+        app.add_direct_channels(&t.id, &ruser.id).await?;
     }
+    welcome_email(&app, &ruser, &q.r);
     Ok((StatusCode::CREATED, Json(ruser)).into_response())
+}
+
+/// `SendWelcomeEmail` after the answer.
+fn welcome_email(app: &App, u: &User, redirect: &str) {
+    let (u, redirect) = (u.clone(), redirect.to_string());
+    crate::email::go(app, "welcome email", move |app| async move { crate::email::send_welcome(&app, &u, &redirect).await });
+}
+
+/// `CreateUserWithToken`: a team invitation from an email; guest invitations need a license.
+async fn create_user_with_token(app: &App, mut u: User, token: &str, _redirect: &str) -> ApiResult<Response> {
+    let invalid = |status: StatusCode| AppError::new(status, "api.user.create_user.signup_link_invalid.app_error", "");
+    let row: Option<(String, i64, String, String)> =
+        sqlx::query_as("SELECT Token, COALESCE(CreateAt, 0), COALESCE(Type, ''), COALESCE(Extra, '') FROM Tokens WHERE Token = $1")
+            .bind(token)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|_| invalid(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let (token, create_at, kind, extra) = row.ok_or_else(|| invalid(StatusCode::NOT_FOUND))?;
+    if kind == crate::email::TOKEN_GUEST_INVITATION {
+        return Err(AppError::bad_request("api.user.create_user.guest_accounts.license.app_error", ""));
+    }
+    if !app.cfg.bool("EmailSettings.EnableSignUpWithEmail") || !app.cfg.bool("TeamSettings.EnableUserCreation") {
+        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.user.create_user.signup_email_disabled.app_error", ""));
+    }
+    if kind != crate::email::TOKEN_TEAM_INVITATION && kind != crate::email::TOKEN_GUEST_MAGIC_LINK_INVITATION {
+        return Err(invalid(StatusCode::BAD_REQUEST));
+    }
+    // Token.IsExpired: 48 hours.
+    if now_ms() > create_at + 48 * 3_600_000 {
+        let _ = sqlx::query("DELETE FROM Tokens WHERE Token = $1").bind(&token).execute(&app.db).await;
+        return Err(AppError::bad_request("api.user.create_user.signup_link_expired.app_error", ""));
+    }
+    let data = crate::app::map_from_json(extra.as_bytes());
+    let get = |k: &str| data.get(k).cloned().unwrap_or_default();
+    let team = crate::db::get::<crate::model::Team>(&app.db, &get("teamId"))
+        .await?
+        .ok_or_else(|| AppError::not_found("app.team.get.find.app_error", ""))?;
+    let sender = get("senderId");
+    let mut channels = vec![];
+    for id in get("channels").split(' ').filter(|c| !c.is_empty()) {
+        let Ok(c) = app.channel_or_404(id).await else { continue };
+        let need = match c.r#type.as_str() {
+            crate::model::channel::PRIVATE => perm::MANAGE_PRIVATE_CHANNEL_MEMBERS,
+            crate::model::channel::OPEN => perm::MANAGE_PUBLIC_CHANNEL_MEMBERS,
+            _ => continue,
+        };
+        if app.user_channel_perm(&sender, id, need).await.0 && c.delete_at == 0 {
+            channels.push(c);
+        }
+    }
+    if get("email") != u.email {
+        return Err(AppError::bad_request("api.user.create_user.bad_token_email_data.app_error", ""));
+    }
+    u.email_verified = true;
+    if !get("username").is_empty() {
+        u.username = get("username").to_lowercase();
+    }
+    if !get("first_name").is_empty() {
+        u.first_name = get("first_name");
+    }
+    if !get("last_name").is_empty() {
+        u.last_name = get("last_name");
+    }
+    if kind != crate::email::TOKEN_TEAM_INVITATION {
+        return Err(AppError::bad_request("api.user.create_user.guest_accounts.license.app_error", ""));
+    }
+    let ruser = app.create_user(u).await?;
+    app.join_user_to_team(&team, &ruser, "").await?;
+    app.add_direct_channels(&team.id, &ruser.id).await?;
+    for c in &channels {
+        if let Err(e) = app.add_channel_member(c, &ruser.id, "", "").await {
+            eprintln!("Failed to add channel member: {}", e.detailed_error);
+        }
+    }
+    let _ = sqlx::query("DELETE FROM Tokens WHERE Token = $1").bind(&token).execute(&app.db).await;
+    Ok((StatusCode::CREATED, Json(ruser)).into_response())
+}
+
+impl App {
+    /// `AddDirectChannels`: up to ten of the team's members shown in the new user's direct messages.
+    pub async fn add_direct_channels(&self, team_id: &str, user_id: &str) -> ApiResult<()> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT u.Id FROM Users u JOIN TeamMembers tm ON tm.UserId = u.Id AND tm.TeamId = $1 AND tm.DeleteAt = 0
+             ORDER BY u.Username ASC LIMIT 100",
+        )
+        .bind(team_id)
+        .fetch_all(&self.db)
+        .await?;
+        let others: Vec<String> = ids.into_iter().filter(|i| i != user_id).take(10).collect();
+        if others.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO Preferences (UserId, Category, Name, Value) SELECT $1, 'direct_channel_show', n, 'true' FROM unnest($2::text[]) n
+             ON CONFLICT (UserId, Category, Name) DO UPDATE SET Value = EXCLUDED.Value",
+        )
+        .bind(user_id)
+        .bind(&others)
+        .execute(&self.db)
+        .await
+        .map_err(|e| AppError::internal("api.user.add_direct_channels_and_forget.failed.error", e.to_string()))?;
+        Ok(())
+    }
 }
 
 impl App {
@@ -972,8 +1118,8 @@ struct EmailBody {
     email: String,
 }
 
-/// `sendPasswordReset`: this server sends no email, so an existing account gets Go's sending error (hardened
-/// mode answers OK, as Go does for every error).
+/// `sendPasswordReset` (`SendPasswordReset`): a recovery token and its email; an unknown address is OK, every error
+/// is OK in hardened mode.
 async fn send_password_reset(St(app): St<State>, Body(b): Body<EmailBody>) -> ApiResult<Json<Value>> {
     let email = b.email.to_lowercase();
     if email.is_empty() {
@@ -981,20 +1127,41 @@ async fn send_password_reset(St(app): St<State>, Body(b): Body<EmailBody>) -> Ap
     }
     let hardened = app.cfg.bool("ServiceSettings.EnableHardenedMode");
     let user: Option<User> = crate::db::one(&app.db, "email = $1", &email).await?;
-    let err = match user {
-        None => return Ok(ok()),
-        Some(u) if u.auth_data.as_deref().is_some_and(|a| !a.is_empty()) => {
-            AppError::bad_request("api.user.send_password_reset.sso.app_error", "")
+    let Some(u) = user else { return Ok(ok()) };
+    let r = async {
+        if u.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
+            return Err(AppError::bad_request("api.user.send_password_reset.send.app_error", ""));
         }
-        Some(_) => AppError::internal("api.user.send_password_reset.send.app_error", "email is not sent by this server"),
-    };
-    if hardened { Ok(ok()) } else { Err(err) }
+        if u.auth_data.as_deref().is_some_and(|a| !a.is_empty()) {
+            return Err(AppError::bad_request("api.user.send_password_reset.sso.app_error", ""));
+        }
+        if u.auth_service == "magic_link" && u.is_guest() {
+            return Err(AppError::bad_request("api.user.send_password_reset.guest_magic_link.app_error", ""));
+        }
+        let token = crate::email::create_password_recovery_token(&app, &u.id, &u.email).await?;
+        crate::email::send_password_reset(&app, &u.email, &token, &u.locale)
+            .await
+            .map_err(|e| AppError::internal("api.user.send_password_reset.send.app_error", e))
+    }
+    .await;
+    match r {
+        Err(e) if !hardened => Err(e),
+        _ => Ok(ok()),
+    }
 }
 
-/// `sendVerificationEmail`: always OK.
-async fn send_verification(Body(b): Body<EmailBody>) -> ApiResult<Json<Value>> {
-    if b.email.is_empty() {
+/// `sendVerificationEmail`: always OK, whether or not the address is known and the email went out.
+async fn send_verification(St(app): St<State>, Query(q): Query<std::collections::HashMap<String, String>>, Body(b): Body<EmailBody>) -> ApiResult<Json<Value>> {
+    let email = b.email.to_lowercase();
+    if email.is_empty() {
         return Err(AppError::invalid_param("email"));
+    }
+    let redirect = q.get("r").cloned().unwrap_or_default();
+    let user: Option<User> = crate::db::one(&app.db, "email = $1", &email).await?;
+    if let Some(u) = user
+        && let Err(e) = crate::email::send_email_verification(&app, &u, &u.email, &redirect).await
+    {
+        eprintln!("send verification email: {}", e.detailed_error);
     }
     Ok(ok())
 }

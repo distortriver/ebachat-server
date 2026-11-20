@@ -566,7 +566,11 @@ async fn update_active(
             "",
         ));
     }
+    let (email, locale) = (user.email.clone(), user.locale.clone());
     app.update_active(user, active).await?;
+    if self_deactivate {
+        crate::email::go(&app, "deactivate email", move |app| async move { crate::email::send_deactivate(&app, &email, &locale).await });
+    }
     app.hub.publish("user_activation_status_change", json!({}), Broadcast::default());
     Ok(ok())
 }
@@ -695,6 +699,10 @@ async fn update_mfa(
             .map_err(|e| AppError::internal("mfa.deactivate.app_error", e.to_string()))?;
     }
     app.invalidate_user(&user_id);
+    if let Some(u) = app.user(&user_id).await? {
+        let (email, locale) = (u.email.clone(), u.locale.clone());
+        crate::email::go(&app, "mfa change email", move |app| async move { crate::email::send_mfa_change(&app, &email, activate, &locale).await });
+    }
     Ok(ok())
 }
 
@@ -838,6 +846,7 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
         return Err(AppError::bad_request("api.user.reset_password.broken_token.app_error", ""));
     }
     app.set_password(&user, &new_password, None).await?;
+    crate::user_edit::password_change_email(&app, &user, "api.user.reset_password.method");
     delete_token(&app, &t.token).await;
     Ok(ok())
 }
@@ -855,8 +864,13 @@ async fn verify_email(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value>>
         return Err(bad());
     }
     let extra: TokenExtra = serde_json::from_str(&t.extra).map_err(|_| bad())?;
-    get_user(&app, &extra.user_id).await.map_err(|_| bad())?;
-    app.verify_user_email(&extra.user_id, &extra.email.to_lowercase()).await.map_err(|_| bad())?;
+    let user = get_user(&app, &extra.user_id).await.map_err(|_| bad())?;
+    let new_email = extra.email.to_lowercase();
+    app.verify_user_email(&extra.user_id, &new_email).await.map_err(|_| bad())?;
+    if user.email != new_email {
+        let (old, locale) = (user.email.clone(), user.locale.clone());
+        crate::email::go(&app, "email change email", move |app| async move { crate::email::send_email_change(&app, &old, &new_email, &locale).await });
+    }
     delete_token(&app, &t.token).await;
     Ok(ok())
 }

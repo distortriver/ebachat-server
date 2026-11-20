@@ -147,6 +147,11 @@ impl App {
         .execute(&self.db)
         .await
         .map_err(|e| AppError::internal("app.user_access_token.save.app_error", e.to_string()))?;
+        if !user.is_bot
+            && let Err(e) = crate::email::send_access_token_added(self, &user.email, &user.locale).await
+        {
+            eprintln!("Unable to send user access token added email: {e}");
+        }
         Ok(t)
     }
 
@@ -460,6 +465,11 @@ async fn rotate(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Jso
     app.forget_token_session(&t);
     t.token = secret;
     t.expires_at = b.expires_at;
+    if !user.is_bot
+        && let Err(e) = crate::email::send_access_token_rotated(&app, &user.email, &user.locale).await
+    {
+        eprintln!("Unable to send user access token rotated email: {e}");
+    }
     Ok(Json(t))
 }
 
