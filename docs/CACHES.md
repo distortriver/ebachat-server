@@ -139,6 +139,22 @@ license:
 Every one of them is a licensed feature or not on EBAChat's paths at all. The Rust server answers these features as
 an unlicensed Go server does, so there is nothing for these caches to serve.
 
+**Checked on a running Go server as well.**
+
+- A cold cache's first read always goes to the database. So I logged every SQL statement of a fresh Go 12.1 server
+  (`log_statement = all`) through all of EBAChat's work:
+  - `tools/diff/diff.py --writes`;
+  - `tools/diff/caches.py`;
+  - the real EBAChat client starting up.
+- Of 1,298 statements, none read these caches' tables on their own:
+  - `ReadReceipts`, `TemporaryPosts`, `ContentFlagging*`, `PostDeliveryTrackingChannels`, `Translations`, and
+    `SUM(FileInfo.Size)`: none at all.
+  - `ReadReceipts` and `AccessControlPolicies` appear only inside post and team queries, as filters.
+  - `PropertyFields`, `PropertyOptions`, `PropertyGroups` and `COUNT(*) FROM Posts`: only at server start, before
+    the first request.
+  - `AccessControlPolicies WHERE ID = ...`: once, a store read Go does not cache.
+- So these caches are never read for EBAChat on an unlicensed server.
+
 **`RolePermission` was missing from the Rust server, and is ported now.**
 
 - `mergeChannelHigherScopedPermissions` runs on every role read, and so on every permission check: it limits a
