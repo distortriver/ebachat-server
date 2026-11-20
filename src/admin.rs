@@ -940,17 +940,15 @@ async fn user_report_count(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> Ap
 }
 
 /// What sorts a report. Go puts the requested column into its query as it comes; only these are taken here.
+/// `model.UserReportSortColumns`, exactly: any other `sort_column` is refused, as `UserReportOptions.IsValid` does.
 const REPORT_SORT: &[(&str, &str)] = &[
-    ("username", "u.Username"),
-    ("email", "u.Email"),
-    ("createat", "u.CreateAt"),
-    ("firstname", "u.FirstName"),
-    ("lastname", "u.LastName"),
-    ("nickname", "u.Nickname"),
-    ("laststatusat", "LastStatusAt"),
-    ("lastpostdate", "LastPostDate"),
-    ("daysactive", "DaysActive"),
-    ("totalposts", "TotalPosts"),
+    ("CreateAt", "u.CreateAt"),
+    ("Username", "u.Username"),
+    ("FirstName", "u.FirstName"),
+    ("LastName", "u.LastName"),
+    ("Nickname", "u.Nickname"),
+    ("Email", "u.Email"),
+    ("Roles", "u.Roles"),
 ];
 
 /// `GetReportDateRange` for `date_range` (`last_30_days`, `previous_month`, `last_6_months`, else all time) as the
@@ -990,7 +988,7 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
         "" => "Username",
         c => c,
     };
-    let col = REPORT_SORT.iter().find(|(k, _)| k.eq_ignore_ascii_case(col)).map_or("u.Username", |(_, v)| v);
+    let col = REPORT_SORT.iter().find(|(k, _)| *k == col).map(|(_, v)| *v);
     let prev = query(&q, "direction") == "prev";
     let desc = query(&q, "sort_direction") == "desc";
     let page_size = query(&q, "page_size").parse::<i64>().unwrap_or(50);
@@ -998,6 +996,9 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
     if page_size <= 0 || page_size > 100 {
         return Err(AppError::bad_request("api.getUsersForReporting.invalid_page_size", ""));
     }
+    let col = col.ok_or_else(|| {
+        AppError::bad_request("model.user_report_options.is_valid.invalid_sort_column", "Provided sort column is not valid.")
+    })?;
     let mut having = String::new();
     let mut dir = if desc { "DESC" } else { "ASC" };
     let (from_value, from_id) = (query(&q, "from_column_value"), query(&q, "from_id"));
