@@ -579,6 +579,11 @@ async fn delete_team(
     require_team_id(&team_id)?;
     app.require_team(&s, &team_id, perm::MANAGE_TEAM).await?;
     if parse_bool(q.get("permanent")) {
+        if app.cfg.bool("ServiceSettings.EnableAPITeamDeletion") {
+            let team = (*app.team(&team_id).await?).clone();
+            app.permanent_delete_team(team).await?;
+            return Ok(status_ok());
+        }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {
             "api.user.delete_team.not_enabled.for_admin.app_error"

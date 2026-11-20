@@ -1082,6 +1082,8 @@ async fn device_props(St(app): St<State>, Auth(s): Auth, Body(props): Body<BTree
             .bind(&s.id)
             .execute(&app.db)
             .await?;
+        // attachDeviceIds
+        crate::audit::log(&app, Some(&s), "").await;
     }
     let mut changed = false;
     for (k, v) in new_props {
@@ -1094,7 +1096,6 @@ async fn device_props(St(app): St<State>, Auth(s): Auth, Body(props): Body<BTree
         sqlx::query("UPDATE Sessions SET Props = $1 WHERE Id = $2").bind(&session.props).bind(&s.id).execute(&app.db).await?;
     }
     app.clear_sessions_for_user(&s.user_id);
-    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 

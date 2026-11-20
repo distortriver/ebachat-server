@@ -31,6 +31,7 @@ pub mod opengraph;
 pub mod outgoing;
 pub mod password;
 pub mod perm;
+pub mod permanent;
 pub mod posts;
 pub mod posts_more;
 pub mod reminders;

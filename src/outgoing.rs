@@ -353,7 +353,9 @@ async fn list_hooks(St(app): St<State>, Auth(s): Auth, Query(q): Query<HashMap<S
 
 async fn get_hook(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<OutgoingWebhook>> {
     require_hook_id(&id)?;
-    Ok(Json(app.own_hook(&s, &id).await?))
+    let h = app.own_hook(&s, &id).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
+    Ok(Json(h))
 }
 
 /// `updateOutgoingHook`: the body over the hook; its creator, team and times kept.

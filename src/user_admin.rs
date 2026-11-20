@@ -314,8 +314,8 @@ async fn delete_user(
     }
     if permanent {
         if app.cfg.bool("ServiceSettings.EnableAPIUserDeletion") {
-            // PermanentDeleteUser removes the user's rows from every table; not ported.
-            return Err(AppError::not_implemented("Permanent user deletion"));
+            app.permanent_delete_user(user).await?;
+            return Ok(ok());
         }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {

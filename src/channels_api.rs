@@ -435,7 +435,11 @@ async fn delete_channel(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
         app.require_channel(&s, &id, perm::DELETE_PRIVATE_CHANNEL).await?;
     }
     if parse_bool(q.get("permanent")) {
-        // EnableAPIChannelDeletion is off on the servers this replaces.
+        if app.cfg.bool("ServiceSettings.EnableAPIChannelDeletion") {
+            app.permanent_delete_channel(&c).await?;
+            crate::audit::log(&app, Some(&s), &format!("name={}", c.name)).await;
+            return Ok(status_ok());
+        }
         let admin = app.user(&s.user_id).await?.is_some_and(|u| u.is_system_admin());
         let id = if admin {
             "api.user.delete_channel.not_enabled.for_admin.app_error"
