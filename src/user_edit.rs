@@ -736,17 +736,20 @@ async fn remove_recent_custom_status(
     St(app): St<State>,
     Auth(s): Auth,
     Path(user_id): Path<String>,
-    Body(cs): Body<CustomStatus>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
     let user_id = user_param(&s, &user_id)?;
     custom_status_disabled(&app)?;
+    // Go decodes after the id and config checks; `null` is the zero status, which matches nothing.
+    let cs: Option<CustomStatus> = crate::app::decode_json(&body, "recent_custom_status")?;
     app.require_user(&s, &user_id).await?;
     let fail = || AppError::bad_request("api.custom_status.recent_custom_statuses.delete.app_error", "");
     let mut pref = app
         .preference(&user_id, crate::preferences::CUSTOM_STATUS, "recent_custom_statuses")
         .await?
         .ok_or_else(|| AppError::bad_request("app.preference.get.app_error", ""))?;
-    if pref.value.is_empty() || cs.emoji.is_empty() && cs.text.is_empty() {
+    let Some(cs) = cs.filter(|c| !(c.emoji.is_empty() && c.text.is_empty())) else { return Err(fail()) };
+    if pref.value.is_empty() {
         return Err(fail());
     }
     let mut recent: Vec<CustomStatus> = serde_json::from_str(&pref.value).map_err(|_| fail())?;
