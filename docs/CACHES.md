@@ -171,6 +171,7 @@ an unlicensed Go server does, so there is nothing for these caches to serve.
 - So after a DM's header changes, `POST /channels/direct` answers with the old channel for up to 15 minutes.
 - The Rust server caches DMs by name the same way, and the repeated read hits, but it drops both keys. This is the
   one place where its caching deliberately differs from Go's, and only in being fresh.
+- Decision: bugs found in Go are fixed in the Rust server, not reproduced.
 
 **Rules to know:**
 
