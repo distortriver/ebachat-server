@@ -31,7 +31,7 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/plugins/webapp", get(plugins_none))
         .route("/api/v4/plugins/statuses", get(plugins_none))
         .route("/api/v4/plugins", get(plugins_none))
-        .route("/api/v4/system/notices/{team_id}", get(|_: Auth| async { Json(json!([])) }))
+        .route("/api/v4/system/notices/{team_id}", get(product_notices))
         .route("/api/v4/system/onboarding/complete", get(onboarding))
         .route("/api/v4/users/{user_id}/custom_profile_attributes", get(|_: Auth| async { Json(json!({})) }))
         .route("/api/v4/users/{user_id}/oauth/apps/authorized", get(|_: Auth| async { Json(json!([])) }))
@@ -217,9 +217,29 @@ async fn onboarding(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Value>>
     Ok(Json(json!({"name": "FirstAdminSetupComplete", "value": v.map(|v| v.0).unwrap_or_else(|| "false".into())})))
 }
 
+/// `getProductNotices`: the parameters checked; no notices (Go fetches them from Mattermost's servers).
+async fn product_notices(
+    _: Auth,
+    Path(team_id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    if !crate::app::is_valid_id(&team_id) {
+        return Err(AppError::invalid_url_param("team_id"));
+    }
+    if !matches!(q.get("client").map(String::as_str), Some("web" | "mobile-ios" | "mobile-android" | "desktop")) {
+        return Err(AppError::invalid_param("client").detail("Invalid client type supplied"));
+    }
+    Ok(Json(json!([])))
+}
+
 /// `getRolesByNames` through the role cache.
-async fn roles_by_names(St(app): St<State>, _: Auth, Body(mut names): Body<Vec<String>>) -> ApiResult<Json<Vec<Role>>> {
+async fn roles_by_names(St(app): St<State>, _: Auth, body: axum::body::Bytes) -> ApiResult<Json<Vec<Role>>> {
+    // `SortedArrayFromJSON`: a bad body is a payload error, duplicates dropped.
+    let mut names: Vec<String> = serde_json::from_slice::<Option<Vec<String>>>(&body)
+        .map_err(|e| AppError::bad_request("api.payload.parse.error", "").detail(e.to_string()))?
+        .unwrap_or_default();
     names.sort();
+    names.dedup();
     if names.is_empty() {
         return Err(AppError::invalid_param("rolenames"));
     }

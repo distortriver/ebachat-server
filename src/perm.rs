@@ -213,7 +213,7 @@ impl App {
 
     /// `mergeChannelHigherScopedPermissions`: the roles of channel schemes keep a moderated permission only if
     /// the scheme's higher scope (the team's scheme, or the built-in channel roles) has it too.
-    async fn merge_channel_higher_scoped(&self, roles: Vec<Arc<Role>>) -> ApiResult<Vec<Arc<Role>>> {
+    pub(crate) async fn merge_channel_higher_scoped(&self, roles: Vec<Arc<Role>>) -> ApiResult<Vec<Arc<Role>>> {
         let mut names: Vec<String> = roles.iter().filter(|r| r.scheme_managed).map(|r| r.name.clone()).collect();
         if names.is_empty() {
             return Ok(roles);

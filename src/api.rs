@@ -51,6 +51,7 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
 
 pub fn router(app: State) -> Router {
     crate::app::DEVELOPER.store(app.cfg.bool("ServiceSettings.EnableDeveloper"), std::sync::atomic::Ordering::Relaxed);
+    crate::outgoing::spawn_worker(app.clone());
     let r = routes(app).layer(axum::middleware::from_fn(go_headers));
     if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
 }
@@ -96,6 +97,8 @@ fn routes(app: State) -> Router {
         .merge(crate::user_image::routes())
         .merge(crate::system::routes())
         .merge(crate::commands::routes())
+        .merge(crate::command_admin::routes())
+        .merge(crate::outgoing::routes())
         .merge(crate::status::routes())
         .merge(crate::channels::routes())
         .merge(crate::sidebar::routes())
@@ -106,7 +109,9 @@ fn routes(app: State) -> Router {
         .merge(crate::webhooks::routes())
         .merge(crate::integrations::routes())
         .merge(crate::teams::routes())
+        .merge(crate::team_admin::routes())
         .merge(crate::schemes::routes())
+        .merge(crate::roles::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(app)
