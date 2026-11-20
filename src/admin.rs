@@ -920,7 +920,37 @@ const REPORT_SORT: &[(&str, &str)] = &[
     ("totalposts", "TotalPosts"),
 ];
 
-/// `getUsersForReporting`: a page of people (not bots) with their activity over all time.
+/// `GetReportDateRange` for `date_range` (`last_30_days`, `previous_month`, `last_6_months`, else all time) as the
+/// `PostStats.Day` bounds Go joins on: local dates, the start inclusive, the end exclusive.
+fn report_days(range: &str) -> String {
+    use chrono::{Datelike, Duration, Local, NaiveDate};
+    let now = Local::now().date_naive();
+    // Go's `AddDate` normalizes an overflowing day into the next month (Aug 31 - 6 months = Mar 3).
+    let add_months = |d: NaiveDate, months: i32| {
+        let total = d.year() * 12 + d.month0() as i32 + months;
+        let first = NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap();
+        first + Duration::days(d.day() as i64 - 1)
+    };
+    let (start, end) = match range {
+        "last_30_days" => (Some(now - Duration::days(30)), None),
+        "previous_month" => {
+            let first = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap();
+            (Some(add_months(first, -1)), Some(first))
+        }
+        "last_6_months" => (Some(add_months(now, -6)), None),
+        _ => (None, None),
+    };
+    let mut s = String::new();
+    if let Some(d) = start {
+        s.push_str(&format!(" AND ps.Day >= '{}'", d.format("%Y-%m-%d")));
+    }
+    if let Some(d) = end {
+        s.push_str(&format!(" AND ps.Day < '{}'", d.format("%Y-%m-%d")));
+    }
+    s
+}
+
+/// `getUsersForReporting`: a page of people (not bots) with their activity over all time or `date_range`.
 async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<Response> {
     app.require(&s, "sysconsole_read_user_management_users").await?;
     let col = match query(&q, "sort_column") {
@@ -948,6 +978,7 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
         dir = d;
         having = format!("HAVING ({col} {cmp} {typed} OR ({col} = {typed} AND u.Id {cmp} ${i}))");
     }
+    let days = report_days(query(&q, "date_range"));
     let sql = format!(
         "SELECT u.Id, MAX(s.LastActivityAt) AS LastStatusAt, MAX(ps.LastPostDate) AS LastPostDate, \
          COUNT(ps.Day) AS DaysActive, SUM(ps.NumPosts)::bigint AS TotalPosts, \
@@ -955,7 +986,7 @@ async fn user_report(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResul
           AND c.Type IN ('O','P') WHERE cm.UserId = u.Id) AS ChannelCount, \
          COALESCE((SELECT string_agg(t.DisplayName, ', ' ORDER BY t.DisplayName) FROM TeamMembers tm \
           INNER JOIN Teams t ON t.Id = tm.TeamId AND t.DeleteAt = 0 WHERE tm.UserId = u.Id AND tm.DeleteAt = 0), '') AS Teams \
-         FROM Users u LEFT JOIN Status s ON s.UserId = u.Id LEFT JOIN PostStats ps ON ps.UserId = u.Id \
+         FROM Users u LEFT JOIN Status s ON s.UserId = u.Id LEFT JOIN PostStats ps ON ps.UserId = u.Id{days} \
          WHERE {cond} GROUP BY u.Id {having} ORDER BY {col} {dir}, u.Id {dir} LIMIT {page_size}"
     );
     type Row = (String, Option<i64>, Option<i64>, i64, Option<i64>, i64, String);
