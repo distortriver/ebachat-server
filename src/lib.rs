@@ -6,6 +6,8 @@ pub mod channels_api;
 pub mod commands;
 pub mod commands_builtin;
 pub mod config;
+pub mod config_api;
+pub mod config_valid;
 pub mod db;
 pub mod drafts;
 pub mod emoji;
