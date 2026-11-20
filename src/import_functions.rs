@@ -203,7 +203,7 @@ impl Ctx {
         let sql = format!("{} WHERE Name = ANY($1)", Team::SELECT);
         let teams: Vec<Team> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&unique).fetch_all(&self.app.db).await.map_err(|e| err().wrap(e))?;
         if teams.len() != unique.len() {
-            return Err(err().wrap(not_found("Team", &format!("nameIn={names:?}"))));
+            return Err(err().wrap(not_found("Team", &format!("nameIn=[{}]", names.join(" ")))));
         }
         Ok(teams.into_iter().map(|t| (t.name.to_lowercase(), t)).collect())
     }
@@ -814,8 +814,7 @@ impl Ctx {
             crate::user_edit::set_custom_status_prop(&mut user, cs);
         }
 
-        let saved: User;
-        if user.id.is_empty() {
+        let saved: User = if user.id.is_empty() {
             if create_deactivated {
                 user.props.0.insert("importedInactive".into(), "true".into());
             }
@@ -825,7 +824,7 @@ impl Ctx {
             }
             if let Err(e) = app.save_user_row(&mut user).await {
                 let e = IErr::from(e);
-                if self.deactivate_missing_users && e.id == "app.user.save.username_exists.app_error" {
+                if self.deactivate_missing_users && e.id() == "app.user.save.username_exists.app_error" {
                     if let Ok(Some(existing)) = self.user_by_username(&username).await {
                         warn(&format!(
                             "Scoped import: attributing source user's content to the destination account holding the same username — not a verified identity match, review if the two instances don't share username conventions source_username={username} matched_dest_username={}",
@@ -833,7 +832,7 @@ impl Ctx {
                         ));
                         self.report.add(&username, &existing.username);
                     }
-                } else if self.deactivate_missing_users && e.id == "app.user.save.email_exists.app_error" {
+                } else if self.deactivate_missing_users && e.id() == "app.user.save.email_exists.app_error" {
                     warn(&format!(
                         "Scoped import: source user's email already belongs to a differently-named destination account; leaving the source user unresolved rather than attributing their content to it — resolve the collision and re-import if this content matters source_username={username}"
                     ));
@@ -859,7 +858,7 @@ impl Ctx {
             if create_deactivated && u.delete_at == 0 {
                 u = app.update_active(u, false).await?;
             }
-            saved = u;
+            u
         } else {
             let mut s: Option<User> = None;
             if user_changed {
@@ -886,15 +885,12 @@ impl Ctx {
                 app.revoke_all_sessions(&user.id).await?;
                 app.invalidate_user(&user.id);
                 let now = now_ms();
-                let mut q = String::from(
+                // UpdateAuthData: the email too when there is one.
+                let r = sqlx::query(
                     "UPDATE Users SET Password = '', LastPasswordUpdate = $1, UpdateAt = $1, FailedAttempts = 0, AuthService = $2,
-                         AuthData = $3",
-                );
-                if !user.email.is_empty() {
-                    q += ", Email = lower($5)";
-                }
-                q += " WHERE Id = $4";
-                let r = sqlx::query(sqlx::AssertSqlSafe(q))
+                         AuthData = $3, Email = CASE WHEN $5 = '' THEN Email ELSE lower($5) END
+                     WHERE Id = $4",
+                )
                     .bind(now)
                     .bind(&auth_service)
                     .bind(&auth_data)
@@ -923,8 +919,8 @@ impl Ctx {
                 app.invalidate_user(&user.id);
                 app.publish_user_updated(&user.id).await;
             }
-            saved = s.unwrap_or(user);
-        }
+            s.unwrap_or(user)
+        };
 
         if let Some(path) = &d.profile_image {
             self.import_profile_image(&saved.id, path, &d.profile_image_data).await?;
@@ -1566,7 +1562,7 @@ impl Ctx {
         let app = &self.app;
         info(&format!("Validating emoji emoji_name={}", d.name.as_deref().unwrap_or_default()));
         if let Err(e) = validate_emoji(d) {
-            if e.id == "model.emoji.system_emoji_name.app_error" {
+            if e.id() == "model.emoji.system_emoji_name.app_error" {
                 warn(&format!("Skipping emoji import due to name conflict with system emoji emoji_name={}", d.name.as_deref().unwrap_or_default()));
                 return Ok(());
             }
@@ -2196,7 +2192,7 @@ impl Ctx {
                         }
                         Ok(None) => {
                             return Err((line, IErr::new("importMultiplePostLines", "app.import.get_users_by_username.some_users_not_found.error", 400)
-                                .wrap(not_found("User", &format!("username={lookup}")))));
+                                .wrap(format!("failed to find User: {}", not_found("User", &format!("username={lookup}"))))));
                         }
                         Err(e) => return Err((line, IErr::new("extractThreadMembers", "app.user.get_by_username.app_error", 500).wrap(e.text()))),
                     }
@@ -2298,7 +2294,7 @@ impl Ctx {
             }
             return Err(IErr::bad("app.import.import_post.user_not_found.error")
                 .p("Username", &name)
-                .wrap(not_found("User", &format!("username={}", name.to_lowercase()))));
+                .wrap(format!("failed to find User: {}", not_found("User", &format!("username={}", name.to_lowercase())))));
         };
         self.save_reaction(Reaction {
             user_id: user.id,
@@ -2600,7 +2596,7 @@ impl Ctx {
                 Ok(None) => {
                     return Err((0, IErr::bad("app.import.import_post.channel_not_found.error")
                         .p("ChannelName", &channel)
-                        .wrap(not_found("Channel", &format!("TeamId={},Name={channel}", team.id)))));
+                        .wrap(not_found("Channel", &format!("TeamId={}&Name={channel}", team.id)))));
                 }
                 Err(e) => return Err((0, IErr::bad("app.import.import_post.channel_not_found.error").p("ChannelName", &channel).wrap(e.text()))),
             }

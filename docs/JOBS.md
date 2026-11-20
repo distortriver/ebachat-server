@@ -3,7 +3,7 @@
 What an unlicensed Go 12.1 server runs in the background, and how the Rust server runs it. Code: `src/jobs.rs`
 (the job server and `/jobs` routes), `src/job_workers.rs` (workers, schedulers, recurring and startup tasks),
 `src/extract.rs` (content extraction), `src/bulk_export.rs` (bulk export, `/exports`, `/imports`),
-`src/bulk_import.rs`.
+`src/bulk_import.rs` and `src/import_functions.rs` (bulk import).
 
 ## The job server
 
@@ -57,7 +57,7 @@ compliance, access control) answer `model.job.is_valid.type.app_error` as Go.
 | `delete_expired_posts` | `BurnOnReadSchedulerFrequencySeconds`, with burn on read | expired burn-on-read posts scrubbed and deleted, `deleted_post_ids` in data |
 | `delete_empty_drafts_migration`, `delete_orphan_drafts_migration`, `delete_dms_preferences_migration` | created at startup unless done | Go's batch migrations, a batch a second; key in `Systems` when done |
 | `export_process` | (created by `POST /jobs`) | bulk export, below |
-| `import_process` | (created by `POST /jobs`) | checks only, see below |
+| `import_process` | (created by `POST /jobs`) | bulk import, below |
 | `resend_invitation_email` | (created by team invites) | after 48 h, invitations of emails that have not joined resent; `Systems` row of the job removed |
 | `hosted_purchase_screening` | never (Enterprise builds) | screening flag dropped after 3 days |
 | licensed types | never | registered, never enabled: their jobs stay pending |

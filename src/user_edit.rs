@@ -1050,6 +1050,10 @@ impl App {
             check_password(self, &u.password)?;
         }
         u.id.clear();
+        // Go stores `[]` for the users it creates through the API (`null` for bots and imported users).
+        if u.mfa_used_timestamps.0.is_none() {
+            u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
+        }
         self.save_user_row(&mut u).await?;
         self.invalidate_user(&u.id);
         let prefs = [
@@ -1120,10 +1124,6 @@ impl App {
         if let Some(mut cs) = custom_status_of(u) {
             cs.pre_save();
             set_custom_status_prop(u, &cs);
-        }
-        // Go stores `[]` for the users it creates (`null` only for bots).
-        if u.mfa_used_timestamps.0.is_none() {
-            u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
         }
         check_user(u)?;
         let r = crate::db::insert(&self.db, &*u).await;

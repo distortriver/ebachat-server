@@ -300,8 +300,8 @@ impl App {
                 r#type: "add_bot_teams_channels".into(),
                 ..Default::default()
             };
+            // CreatePostAsUser: a bot's post (`from_bot`) leaves its last view alone.
             self.create_post(post, true).await?;
-            self.mark_viewed(std::slice::from_ref(&c.id), &saved.user_id, "").await?;
         }
         Ok(saved)
     }

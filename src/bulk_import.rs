@@ -22,20 +22,23 @@ use crate::user_edit::CustomStatus;
 
 /// A `*model.AppError` as the importer makes it: `Error()` is `where: message[, detail][, wrapped]`.
 #[derive(Debug, Clone)]
-pub struct IErr {
-    pub where_: String,
-    pub id: String,
+pub struct IErr(Box<Inner>);
+
+#[derive(Debug, Clone)]
+struct Inner {
+    where_: String,
+    id: String,
     params: Vec<(String, String)>,
     /// The message of an error made elsewhere (an `AppError` of the rest of the server), already translated.
     message: Option<String>,
     detail: String,
     wrapped: String,
-    pub status: u16,
+    status: u16,
 }
 
 impl IErr {
     pub fn new(where_: &str, id: &str, status: u16) -> IErr {
-        IErr {
+        IErr(Box::new(Inner {
             where_: where_.into(),
             id: id.into(),
             params: vec![],
@@ -43,56 +46,60 @@ impl IErr {
             detail: String::new(),
             wrapped: String::new(),
             status,
-        }
+        }))
     }
     /// `NewAppError("BulkImport", id, ..., 400)`.
     pub fn bad(id: &str) -> IErr {
         IErr::new("BulkImport", id, 400)
     }
+    pub fn id(&self) -> &str {
+        &self.0.id
+    }
     pub fn p(mut self, k: &str, v: impl ToString) -> IErr {
-        self.params.push((k.into(), v.to_string()));
+        self.0.params.push((k.into(), v.to_string()));
         self
     }
     pub fn detail(mut self, d: impl Into<String>) -> IErr {
-        self.detail = d.into();
+        self.0.detail = d.into();
         self
     }
     /// `.Wrap(err)`.
     pub fn wrap(mut self, e: impl std::fmt::Display) -> IErr {
-        self.wrapped = e.to_string();
+        self.0.wrapped = e.to_string();
         self
     }
     /// The error as made at `where_` (Go's `Where`).
     pub fn at(mut self, where_: &str) -> IErr {
-        self.where_ = where_.into();
+        self.0.where_ = where_.into();
         self
     }
     pub fn status(mut self, s: u16) -> IErr {
-        self.status = s;
+        self.0.status = s;
         self
     }
     fn message(&self) -> String {
-        if let Some(m) = &self.message {
+        if let Some(m) = &self.0.message {
             return m.clone();
         }
-        let args: Vec<(&str, &str)> = self.params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        crate::i18n::tr(&self.id, &args).unwrap_or_else(|| self.id.clone())
+        let args: Vec<(&str, &str)> = self.0.params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        crate::i18n::tr(&self.0.id, &args).unwrap_or_else(|| self.0.id.clone())
     }
     /// `AppError.Error()`.
     pub fn text(&self) -> String {
+        let e = &self.0;
         let mut s = String::new();
-        if !self.where_.is_empty() {
-            s += &self.where_;
+        if !e.where_.is_empty() {
+            s += &e.where_;
             s += ": ";
         }
         s += &self.message();
-        if !self.detail.is_empty() {
+        if !e.detail.is_empty() {
             s += ", ";
-            s += &self.detail;
+            s += &e.detail;
         }
-        if !self.wrapped.is_empty() {
+        if !e.wrapped.is_empty() {
             s += ", ";
-            s += &self.wrapped;
+            s += &e.wrapped;
         }
         s
     }
@@ -100,7 +107,7 @@ impl IErr {
 
 impl From<AppError> for IErr {
     fn from(e: AppError) -> IErr {
-        IErr {
+        IErr(Box::new(Inner {
             where_: String::new(),
             id: e.id,
             params: vec![],
@@ -108,7 +115,7 @@ impl From<AppError> for IErr {
             detail: e.detailed_error,
             wrapped: String::new(),
             status: e.status_code,
-        }
+        }))
     }
 }
 
@@ -1378,7 +1385,7 @@ const MAX_LINE: usize = 16 * 1024 * 1024;
 
 /// `stopOnError`: the errors the import goes on after.
 fn stop_on_error(e: &IErr, deactivate_missing_users: bool) -> bool {
-    match e.id.as_str() {
+    match e.id() {
         "api.file.upload_file.large_image.app_error" => {
             crate::logs::warn(&format!("Large image import error err={}", e.text()), &[]);
             false
@@ -1553,10 +1560,10 @@ async fn worker(
                     continue;
                 }
                 posts.push(l);
-                if posts.len() >= MULTIPLE_POSTS_THRESHOLD {
-                    if let Err((line, e)) = ctx.import_multiple_post_lines(std::mem::take(&mut posts)).await {
-                        let _ = errors.send((e, line));
-                    }
+                if posts.len() >= MULTIPLE_POSTS_THRESHOLD
+                    && let Err((line, e)) = ctx.import_multiple_post_lines(std::mem::take(&mut posts)).await
+                {
+                    let _ = errors.send((e, line));
                 }
             }
             "direct_post" => {
@@ -1565,10 +1572,10 @@ async fn worker(
                     continue;
                 }
                 direct_posts.push(l);
-                if direct_posts.len() >= MULTIPLE_POSTS_THRESHOLD {
-                    if let Err((line, e)) = ctx.import_multiple_direct_post_lines(std::mem::take(&mut direct_posts)).await {
-                        let _ = errors.send((e, line));
-                    }
+                if direct_posts.len() >= MULTIPLE_POSTS_THRESHOLD
+                    && let Err((line, e)) = ctx.import_multiple_direct_post_lines(std::mem::take(&mut direct_posts)).await
+                {
+                    let _ = errors.send((e, line));
                 }
             }
             _ => {
@@ -1698,7 +1705,7 @@ pub async fn bulk_import(
             }
         };
         line_number += 1;
-        if line_number % 8192 == 0 {
+        if line_number.is_multiple_of(8192) {
             crate::logs::info(&format!("Reader progress processed_lines={line_number}"), &[]);
         }
         let mut line: LineData = match serde_json::from_slice(&raw) {
@@ -1707,7 +1714,9 @@ pub async fn bulk_import(
                 if let Some(s) = segment.take() {
                     s.drain().await;
                 }
-                return (line_number, Some(IErr::bad("app.import.bulk_import.json_decode.error").wrap(e)));
+                // Go's text for a cut line; other decode errors keep serde's words.
+                let text = if e.is_eof() { "unexpected end of JSON input".to_string() } else { e.to_string() };
+                return (line_number, Some(IErr::bad("app.import.bulk_import.json_decode.error").wrap(text)));
             }
         };
         if let Err(e) = process_attachments(&mut line, import_path, &attached) {
