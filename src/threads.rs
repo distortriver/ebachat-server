@@ -623,7 +623,12 @@ async fn read_thread(
     St(app): St<State>,
     Auth(s): Auth,
     Path((user_id, team_id, thread_id, timestamp)): Path<(String, String, String, String)>,
+    uri: axum::http::Uri,
 ) -> ApiResult<Json<ThreadResponse>> {
+    // The route's `{timestamp:[0-9]+}`: anything else is no route at all.
+    if timestamp.is_empty() || !timestamp.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(crate::api::route_not_found(uri.path()));
+    }
     let user_id = check_ids(&s, &user_id, &team_id).await?;
     if !is_valid_id(&thread_id) {
         return Err(AppError::invalid_url_param("thread_id"));

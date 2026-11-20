@@ -1,6 +1,7 @@
 pub mod api;
 pub mod app;
 pub mod cache;
+pub mod channel_admin;
 pub mod channels;
 pub mod channels_api;
 pub mod commands;
@@ -21,6 +22,7 @@ pub mod opengraph;
 pub mod password;
 pub mod perm;
 pub mod posts;
+pub mod posts_more;
 pub mod reminders;
 pub mod preferences;
 pub mod reactions;

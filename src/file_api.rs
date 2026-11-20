@@ -434,12 +434,19 @@ where
     }
     f.size = written;
 
-    if is_image && let Err(e) = process_image(app, &mut f, &t, kept).await {
+    let prefix = t.prefix(&f.id);
+    if is_image && let Err(e) = process_image(app, &mut f, &t.name, &prefix, kept).await {
         let _ = app.files.remove(&f.path).await;
         return Err(e);
     }
     f.update_at = f.create_at;
     f.remote_id = Some(String::new());
+    save_file_info(app, &f).await?;
+    Ok(f)
+}
+
+/// `SqlFileInfoStore.Save`.
+pub(crate) async fn save_file_info(app: &App, f: &FileInfo) -> ApiResult<()> {
     sqlx::query(
         "INSERT INTO FileInfo (Id, CreatorId, PostId, ChannelId, CreateAt, UpdateAt, DeleteAt, Path, ThumbnailPath,
              PreviewPath, Name, Extension, Size, MimeType, Width, Height, HasPreviewImage, MiniPreview, Content, RemoteId)
@@ -468,12 +475,12 @@ where
     .execute(&app.db)
     .await
     .map_err(|e| AppError::internal("app.file_info.save.app_error", e.to_string()))?;
-    Ok(f)
+    Ok(())
 }
 
 /// `preprocessImage` + `postprocessImage`: size, resolution limit, orientation, and the thumbnail, preview and
 /// mini preview.
-async fn process_image(app: &App, f: &mut FileInfo, t: &Upload, data: Vec<u8>) -> ApiResult<()> {
+pub(crate) async fn process_image(app: &App, f: &mut FileInfo, name: &str, prefix: &str, data: Vec<u8>) -> ApiResult<()> {
     if f.mime_type == "image/svg+xml" {
         if let Some((w, h)) = images::svg_size(&data) {
             (f.width, f.height) = (w as i32, h as i32);
@@ -487,13 +494,12 @@ async fn process_image(app: &App, f: &mut FileInfo, t: &Upload, data: Vec<u8>) -
     if h.width as i64 * h.height as i64 > max_res {
         return Err(AppError::bad_request(
             "api.file.upload_file.large_image_detailed.app_error",
-            &format!("{} dimensions ({} by {} pixels) exceed the limits.", t.name, h.width, h.height),
+            &format!("{} dimensions ({} by {} pixels) exceed the limits.", name, h.width, h.height),
         ));
     }
     f.has_preview_image = true;
-    let stem = &t.name[..t.name.rfind('.').unwrap_or(t.name.len())];
+    let stem = &name[..name.rfind('.').unwrap_or(name.len())];
     let ext = if f.mime_type == "image/png" { "png" } else { "jpg" };
-    let prefix = t.prefix(&f.id);
     f.preview_path = format!("{prefix}{stem}_preview.{ext}");
     f.thumbnail_path = format!("{prefix}{stem}_thumb.{ext}");
     if h.quarter_turn {

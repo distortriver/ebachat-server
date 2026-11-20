@@ -46,6 +46,14 @@ impl Config {
     pub fn i64(&self, path: &str) -> i64 {
         self.get(path).as_i64().unwrap_or(0)
     }
+    /// A boolean feature flag: the config's `FeatureFlags.<name>`, else the 12.1.0 default.
+    pub fn feature(&self, name: &str) -> bool {
+        match self.get(&format!("FeatureFlags.{name}")) {
+            Value::Bool(b) => *b,
+            Value::String(s) => s == "true",
+            _ => FEATURE_FLAGS.iter().any(|(k, v)| *k == name && *v == "true"),
+        }
+    }
 
     /// `GenerateClientConfig` for a server without a license.
     pub fn client(&self, limited: bool) -> BTreeMap<String, String> {

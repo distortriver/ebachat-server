@@ -10,9 +10,13 @@ use crate::app::{AppError, State};
 
 /// Go's answer for a path (or a method) the API does not have.
 async fn not_found(uri: Uri) -> impl IntoResponse {
+    route_not_found(uri.path())
+}
+
+/// Go's router 404, also for a path whose parameter fails the route's pattern (`{timestamp:[0-9]+}`).
+pub fn route_not_found(path: &str) -> AppError {
     let mut e = AppError::not_found("api.context.404.app_error", "Sorry, we could not find the page.").detail(format!(
-        "There doesn't appear to be an api call for the url='{}'.  Typo? are you missing a team_id or user_id as part of the url?",
-        uri.path()
+        "There doesn't appear to be an api call for the url='{path}'.  Typo? are you missing a team_id or user_id as part of the url?"
     ));
     e.request_id.clear();
     e

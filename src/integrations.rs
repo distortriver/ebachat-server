@@ -31,6 +31,8 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/posts/{post_id}/actions/{action_id}", post(do_post_action))
         .route("/api/v4/actions/dialogs/open", post(open_dialog))
         .route("/api/v4/actions/dialogs/submit", post(submit_dialog))
+        .route("/api/v4/actions/dialogs/lookup", post(lookup_dialog))
+        .route("/api/v4/actions/dialogs/execute", post(execute_dialog_action))
 }
 
 /// `MaxIntegrationResponseSize`, `MaxDialogResponseSize`.
@@ -1235,6 +1237,124 @@ impl App {
         }
         Ok(serde_json::to_value(out).unwrap())
     }
+}
+
+/// `IsValidLookupURL`: a plugin path without traversal, or an http(s) URL with a host.
+fn is_valid_lookup_url(url: &str) -> bool {
+    if url.starts_with("/plugins/") {
+        return !url.contains("..") && !url.contains("//");
+    }
+    (url.starts_with("http://") || url.starts_with("https://"))
+        && reqwest::Url::parse(url).is_ok_and(|u| u.host_str().is_some_and(|h| !h.is_empty()))
+}
+
+/// The channel of a dialog request, readable by the session, and its team (empty for DMs and GMs) if the
+/// session may view it, as `lookupDialog` and `executeDialogAction` check them.
+async fn dialog_channel(app: &App, s: &Session, channel_id: &str) -> ApiResult<crate::model::Channel> {
+    let channel = app.channel_or_404(channel_id).await?;
+    if !app.can_read_channel(s, &channel).await?.0 {
+        return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
+    }
+    if !channel.team_id.is_empty() && !app.has_team_perm(s, &channel.team_id, perm::VIEW_TEAM).await {
+        return Err(AppError::forbidden_perm(perm::VIEW_TEAM));
+    }
+    Ok((*channel).clone())
+}
+
+/// `lookupDialog`: a dynamic select's options, from the integration.
+async fn lookup_dialog(St(app): St<State>, Auth(s): Auth, body: axum::body::Bytes) -> ApiResult<Json<Value>> {
+    let mut r: SubmitDialogRequest =
+        serde_json::from_slice(&body).map_err(|e| AppError::invalid_param("dialog").detail(e.to_string()))?;
+    if r.url.is_empty() || !is_valid_lookup_url(&r.url) {
+        return Err(AppError::invalid_param("url"));
+    }
+    r.user_id = s.user_id.clone();
+    let channel = dialog_channel(&app, &s, &r.channel_id).await?;
+    r.team_id = channel.team_id.clone();
+    // LookupInteractiveDialog
+    let url = std::mem::take(&mut r.url);
+    r.kind = "dialog_lookup".into();
+    let resp = app.do_action_request(&s, &url, serde_json::to_vec(&r).unwrap()).await?;
+    if resp.is_empty() {
+        return Ok(Json(json!({"items": null})));
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Lookup {
+        items: Option<Vec<Value>>,
+    }
+    let out: Lookup = serde_json::from_slice(&resp)
+        .map_err(|e| AppError::internal("app.lookup_interactive_dialog.decode_json_error", e.to_string()))?;
+    // DialogSelectOption: text and value.
+    let items = out.items.map(|list| {
+        list.into_iter()
+            .map(|i| {
+                let f = |k: &str| i.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                json!({"text": f("text"), "value": f("value")})
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ExecuteDialogActionRequest {
+    #[serde(deserialize_with = "null_default")]
+    url: String,
+    context: Option<BTreeMap<String, String>>,
+    #[serde(deserialize_with = "null_default")]
+    channel_id: String,
+    #[serde(deserialize_with = "null_default")]
+    team_id: String,
+}
+
+/// `executeDialogAction`: a dialog's action button sent to the integration; the answer is a new trigger id.
+async fn execute_dialog_action(St(app): St<State>, Auth(s): Auth, body: axum::body::Bytes) -> ApiResult<Json<Value>> {
+    let r: ExecuteDialogActionRequest =
+        serde_json::from_slice(&body).map_err(|e| AppError::invalid_param("dialog_action").detail(e.to_string()))?;
+    if r.url.is_empty() || !is_valid_lookup_url(&r.url) {
+        return Err(AppError::invalid_param("url"));
+    }
+    let channel = dialog_channel(&app, &s, &r.channel_id).await?;
+    // ExecuteDialogAction
+    let ctx = r.context.unwrap_or_default();
+    if ctx.len() > 50 {
+        return Err(action_error("query exceeds maximum of 50 entries"));
+    }
+    if let Some((k, _)) = ctx.iter().find(|(k, v)| k.len() > 128 || v.len() > 2048) {
+        return Err(action_error(format!("query entry {k:?} too long")));
+    }
+    let user = app.user(&s.user_id).await?.ok_or_else(|| AppError::internal("app.user.get.app_error", ""))?;
+    let mut req = ActionRequest {
+        user_id: s.user_id.clone(),
+        user_name: user.username.clone(),
+        channel_id: channel.id.clone(),
+        channel_name: channel.name.clone(),
+        team_id: channel.team_id.clone(),
+        kind: "dialog_action".into(),
+        context: (!ctx.is_empty()).then(|| ctx.into_iter().map(|(k, v)| (k, Value::String(v))).collect()),
+        ..Default::default()
+    };
+    if !channel.team_id.is_empty() {
+        req.team_domain = app
+            .team(&channel.team_id)
+            .await
+            .map_err(|e| AppError::internal("app.team.get.finding.app_error", e.detailed_error))?
+            .name
+            .clone();
+    }
+    let keys = app.integration_keys().await?;
+    let (client, signed) = generate_trigger_id(&s.user_id, &channel.id, &keys.signing);
+    req.trigger_id = signed;
+    let clean = r.url.trim_start_matches("./");
+    if clean.starts_with("/plugins/") || clean.starts_with("plugins/") {
+        // The plugin request answers 501 with plugins off: an upstream failure.
+        return Err(AppError::new(StatusCode::BAD_GATEWAY, "api.post.do_action.action_integration.app_error", "")
+            .detail("status=501"));
+    }
+    app.do_action_request(&s, &r.url, serde_json::to_vec(&req).unwrap()).await?;
+    Ok(Json(json!({ "trigger_id": client })))
 }
 
 /// The ephemeral post of `SendEphemeralPost`, with action ids and cookies, ready for `send_ephemeral`.

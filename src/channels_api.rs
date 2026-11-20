@@ -31,14 +31,14 @@ pub fn routes() -> Router<State> {
         .route(&format!("{c}/stats/member_count"), post(channels_member_count))
         .route(&format!("{c}/members/{{user_id}}/view"), post(view_channel))
         .route(&format!("{c}/members/{{user_id}}/mark_read"), post(read_multiple))
-        .route(&format!("{c}/{{channel_id}}"), get(get_channel).delete(delete_channel))
+        .route(&format!("{c}/{{channel_id}}"), get(get_channel).delete(delete_channel).put(crate::channel_admin::update_channel))
         .route(&format!("{c}/{{channel_id}}/patch"), put(patch_channel))
         .route(&format!("{c}/{{channel_id}}/privacy"), put(update_privacy))
         .route(&format!("{c}/{{channel_id}}/restore"), post(restore_channel))
         .route(&format!("{c}/{{channel_id}}/stats"), get(channel_stats))
         .route(&format!("{c}/{{channel_id}}/timezones"), get(channel_timezones))
         .route(&format!("{c}/{{channel_id}}/common_teams"), get(common_teams))
-        .route(&format!("{c}/{{channel_id}}/members"), post(add_member))
+        .route(&format!("{c}/{{channel_id}}/members"), post(add_member).get(crate::channel_admin::get_members).put(crate::channel_admin::set_members))
         .route(&format!("{c}/{{channel_id}}/members/ids"), post(members_by_ids))
         .route(&format!("{c}/{{channel_id}}/members/{{user_id}}"), get(get_member).delete(remove_member))
         .route(&format!("{c}/{{channel_id}}/members/{{user_id}}/notify_props"), put(update_notify_props))
@@ -52,6 +52,7 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/users/{user_id}/teams/{team_id}/channels/members", get(members_for_team_for_user))
         .route("/api/v4/users/{user_id}/channels", get(channels_for_user))
         .route("/api/v4/users/{user_id}/channel_members", get(channel_members_for_user))
+        .merge(crate::channel_admin::routes())
 }
 
 type Q = Query<HashMap<String, String>>;
@@ -71,22 +72,22 @@ pub fn paging(q: &HashMap<String, String>) -> (i64, i64) {
     (page, per_page)
 }
 
-fn require_id(id: &str, name: &str) -> ApiResult<()> {
+pub(crate) fn require_id(id: &str, name: &str) -> ApiResult<()> {
     if is_valid_id(id) { Ok(()) } else { Err(AppError::invalid_url_param(name)) }
 }
 
 /// `RequireUserId`: `me` is the session's user.
-fn user_param(s: &Session, id: &str) -> ApiResult<String> {
+pub(crate) fn user_param(s: &Session, id: &str) -> ApiResult<String> {
     let id = s.resolve(id);
     require_id(&id, "user_id")?;
     Ok(id)
 }
 
-fn status_ok() -> Json<Value> {
+pub(crate) fn status_ok() -> Json<Value> {
     Json(json!({"status": "OK"}))
 }
 
-fn is_guest(s: &Session) -> bool {
+pub(crate) fn is_guest(s: &Session) -> bool {
     s.prop("is_guest") == "true"
 }
 
@@ -1069,9 +1070,8 @@ async fn channels_for_user(
     sql += " ORDER BY Channels.Id ASC";
     let mut list: Vec<Channel> =
         sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&user_id).bind(last_delete_at).fetch_all(&app.db).await?;
-    if list.is_empty() {
-        return Err(AppError::not_found("app.channel.get_channels.not_found.app_error", "No channels were found."));
-    }
+    // Go streams `[` before its first page, so for a user in no channel it sends `[` and then the 404 error
+    // JSON, with status 200: broken JSON. Fixed here: an empty array.
     app.fill_channel_props(&mut list).await?;
     Ok(Json(list))
 }

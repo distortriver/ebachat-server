@@ -73,7 +73,7 @@ pub fn is_valid_channel_name(s: &str) -> bool {
 }
 
 /// `Channel.IsValid` for what this server writes.
-fn validate(c: &Channel) -> ApiResult<()> {
+pub(crate) fn validate(c: &Channel) -> ApiResult<()> {
     let invalid = |id: &str, m: &str| Err(bad(id, m));
     if !is_valid_id(&c.id) {
         return invalid("model.channel.is_valid.id.app_error", "Invalid Id.");
@@ -188,7 +188,7 @@ pub fn sanitize_member(m: &mut ChannelMember, current_user: &str) {
 }
 
 /// A system message as the channel functions post them.
-fn system_post(channel_id: &str, user_id: &str, kind: &str, message: String, props: Value) -> Post {
+pub(crate) fn system_post(channel_id: &str, user_id: &str, kind: &str, message: String, props: Value) -> Post {
     let Value::Object(props) = props else { unreachable!() };
     Post {
         channel_id: channel_id.into(),
@@ -201,7 +201,7 @@ fn system_post(channel_id: &str, user_id: &str, kind: &str, message: String, pro
 }
 
 /// `json:"-"` free JSON of a row, as Go's `json.Marshal` sends it inside event data.
-fn json_string<T: Serialize>(v: &T) -> String {
+pub(crate) fn json_string<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap()
 }
 
@@ -531,6 +531,17 @@ impl App {
 
     /// `SqlChannelStore.Update` + `UpdateChannel`: saved, caches dropped, `channel_updated` to its members.
     pub async fn update_channel(&self, c: &mut Channel) -> ApiResult<()> {
+        self.store_update_channel(c).await?;
+        self.hub.publish(
+            "channel_updated",
+            json!({"channel": json_string(c)}),
+            Broadcast { channel_id: c.id.clone(), ..Default::default() },
+        );
+        Ok(())
+    }
+
+    /// `SqlChannelStore.Update` through the cache layer: saved and the channel's caches dropped, no event.
+    pub async fn store_update_channel(&self, c: &mut Channel) -> ApiResult<()> {
         c.update_at = now_ms();
         if c.delete_at != 0 {
             return Err(bad("app.channel.update.bad_id", "Unable to update the channel."));
@@ -547,11 +558,6 @@ impl App {
         upsert_public_channel(&mut tx, c).await?;
         tx.commit().await?;
         self.invalidate_channel_cache(c);
-        self.hub.publish(
-            "channel_updated",
-            json!({"channel": json_string(c)}),
-            Broadcast { channel_id: c.id.clone(), ..Default::default() },
-        );
         Ok(())
     }
 
@@ -644,7 +650,7 @@ impl App {
     }
 
     /// Posts a system message; its failure is logged, as Go's `...AndForget` messages are.
-    async fn post_system(&self, p: Post) {
+    pub(crate) async fn post_system(&self, p: Post) {
         if let Err(e) = self.create_post(p, true).await
             && e.status_code != StatusCode::NOT_IMPLEMENTED.as_u16()
         {
@@ -994,7 +1000,7 @@ impl App {
     }
 
     /// `removeUserFromChannel`: membership, thread memberships, history, caches and `user_removed`.
-    async fn remove_user_from_channel_row(&self, user: &User, remover_id: &str, channel: &Channel) -> ApiResult<()> {
+    pub(crate) async fn remove_user_from_channel_row(&self, user: &User, remover_id: &str, channel: &Channel) -> ApiResult<()> {
         if channel.name == DEFAULT_CHANNEL && !user.is_guest() {
             return Err(bad(
                 "api.channel.remove.default.app_error",
