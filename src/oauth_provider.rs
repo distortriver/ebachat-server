@@ -1,7 +1,8 @@
 //! This server as an OAuth 2.0 provider for the apps registered with it (`src/oauth.rs`): the authorize page and
 //! its API (`/oauth/authorize`), the token endpoint (`/oauth/access_token`, authorization code with PKCE and
-//! refresh token grants), `/oauth/deauthorize`, the authorization server metadata (RFC 8414) and
-//! `/api/v4/oauth_test`. Codes are `OAuthAuthData` rows, tokens `OAuthAccessData` rows with an OAuth session each.
+//! refresh token grants), `/oauth/deauthorize` and the authorization server metadata (RFC 8414). Codes are
+//! `OAuthAuthData` rows, tokens `OAuthAccessData` rows with an OAuth session each. (Go also registers
+//! `/api/v4/oauth_test`, but behind the API router it is never reached: a 404.)
 
 // Based on Mattermost server/channels/web/oauth.go, app/oauth.go, app/session.go, model/authorize.go,
 // model/access.go, model/oauth.go, model/oauth_metadata.go and store/sqlstore/oauth_store.go,
@@ -32,7 +33,6 @@ pub fn routes() -> Router<State> {
         .route("/oauth/access_token", post(access_token))
         .route("/.well-known/oauth-authorization-server", get(metadata))
         .route("/.well-known/oauth-authorization-server/{*rest}", get(metadata))
-        .route("/api/v4/oauth_test", get(oauth_test))
 }
 
 const AUTH_CODE_EXPIRE_SECS: i32 = 600;
@@ -1064,11 +1064,6 @@ fn server_metadata(app: &App) -> ApiResult<Metadata> {
         m.registration_endpoint = gourl::url_join_path(site, "/api/v4/oauth/apps/register").map_err(invalid)?;
     }
     Ok(m)
-}
-
-/// `testHandler`: OK for any session, OAuth ones included.
-async fn oauth_test(_: Auth) -> Response {
-    ok().into_response()
 }
 
 #[cfg(test)]

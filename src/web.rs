@@ -401,6 +401,21 @@ async fn robots(req: Request) -> Response {
     "User-agent: *\nDisallow: /\n".into_response()
 }
 
+/// Marks an answer the Go router writes itself, outside `web.Handler`: none of its headers are added.
+#[derive(Clone, Copy)]
+pub struct Raw;
+
+/// The Go router's own 404 for a path outside `/api/` that no route takes with this method (only GET and HEAD
+/// reach the client's page): `http.NotFound`.
+pub fn router_not_found() -> Response {
+    let mut r = (StatusCode::NOT_FOUND, "404 page not found\n").into_response();
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    r.extensions_mut().insert(Raw);
+    r
+}
+
 /// `unsupportedBrowserScriptHandler`: the script of the unsupported-browser page, from the templates directory
 /// (`EBACHAT_TEMPLATES_DIR`, default `templates/`) as `http.ServeFile` serves it, or the built-in copy.
 async fn unsupported_browser_js(req: Request) -> Response {
@@ -625,7 +640,7 @@ pub fn routes() -> axum::Router<State> {
         .route("/login/sso/saml", get(saml).post(saml))
         .route("/static/plugins/{*rel}", get(static_plugins))
         .route("/static/{*rel}", get(static_files))
-        .route("/robots.txt", get(robots))
+        .route("/robots.txt", axum::routing::any(robots))
         .route("/unsupported_browser.js", get(unsupported_browser_js))
 }
 

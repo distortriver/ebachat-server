@@ -19,6 +19,9 @@ async fn not_found(
     if !api && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
         return crate::web::root_for(&app, &headers, &uri).await;
     }
+    if !api {
+        return crate::web::router_not_found();
+    }
     route_not_found(uri.path()).into_response()
 }
 
@@ -44,6 +47,9 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     use axum::http::HeaderValue;
     let get = req.method() == axum::http::Method::GET;
     let mut r = next.run(req).await;
+    if r.extensions().get::<crate::web::Raw>().is_some() {
+        return r;
+    }
     let h = r.headers_mut();
     if !h.contains_key("x-request-id") {
         h.insert("x-request-id", HeaderValue::from_str(&crate::app::new_id()).unwrap());
