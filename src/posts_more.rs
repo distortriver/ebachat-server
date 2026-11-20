@@ -237,9 +237,12 @@ async fn check_upload_perm(app: &App, s: &Session, channel_id: &str) -> ApiResul
     Ok(())
 }
 
+/// An `UploadSessions` row, its columns in `UploadSession`'s order (with `Path`).
+type SessionRow = (String, String, i64, String, String, String, String, i64, i64, String, String);
+
 impl App {
     async fn upload_session(&self, id: &str) -> ApiResult<UploadSession> {
-        let row: Option<(String, String, i64, String, String, String, String, i64, i64, String, String)> = sqlx::query_as(
+        let row: Option<SessionRow> = sqlx::query_as(
             "SELECT Id, COALESCE(Type::text, ''), COALESCE(CreateAt, 0), COALESCE(UserId, ''), COALESCE(ChannelId, ''),
                     COALESCE(Filename, ''), COALESCE(Path, ''), COALESCE(FileSize, 0), COALESCE(FileOffset, 0),
                     COALESCE(RemoteId, ''), COALESCE(ReqFileId, '')
@@ -494,6 +497,8 @@ async fn write_part(app: &App, mut us: UploadSession, data: Vec<u8>) -> ApiResul
         ..Default::default()
     };
     info.update_at = info.create_at;
+    // Go's UploadData makes the preview and thumbnail but never sets `HasPreviewImage`, so clients never show
+    // them; fixed here: the image is processed as a plain upload's (`has_preview_image` set, mini preview).
     if info.mime_type.starts_with("image") {
         let bytes = app.files.read(&upload_path).await.map_err(storage)?.to_vec();
         let dir = &us.path[..us.path.rfind('/').map(|i| i + 1).unwrap_or(0)];

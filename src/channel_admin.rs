@@ -227,7 +227,7 @@ async fn get_all_channels(St(app): St<State>, Auth(s): Auth, q: Q) -> ApiResult<
     let sql = format!("SELECT count(c.Id) FROM Channels AS c{policy_join}{acp_join} WHERE {cond}");
     let total: i64 =
         sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(&group).bind(&exclude_names).fetch_one(&app.db).await?;
-    Ok(Json(json!({"channels": list, "total_count": total})).into_response())
+    Ok(Json(ChannelsWithCount { channels: list, total_count: total }).into_response())
 }
 
 /// `DefaultChannelNames`.
@@ -371,6 +371,7 @@ struct SetMembersResponse {
     promoted: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     demoted: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<SetMembersError>,
 }
 
@@ -763,7 +764,7 @@ async fn members_minus_group_members(
     Auth(s): Auth,
     Path(channel_id): Path<String>,
     q: Q,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<UsersWithGroupsAndCount>> {
     require_id(&channel_id, "channel_id")?;
     let raw = q.get("group_ids").cloned().unwrap_or_default();
     // groupIDsQueryParamRegex removes what is not an id character or a comma.
@@ -805,18 +806,43 @@ async fn members_minus_group_members(
     for row in &rows {
         let mut u: User = sqlx::FromRow::from_row(row)?;
         u.sanitize_profile(show);
-        let mut v = serde_json::to_value(&u).unwrap();
-        // Groups need a license; without one there are none to list.
-        let o = v.as_object_mut().unwrap();
-        o.insert("groups".into(), json!([]));
-        o.insert("scheme_guest".into(), json!(db::col::<bool>(row, "mg_guest")?));
-        o.insert("scheme_user".into(), json!(db::col::<bool>(row, "mg_user")?));
-        o.insert("scheme_admin".into(), json!(db::col::<bool>(row, "mg_admin")?));
-        users.push(v);
+        users.push(UserWithGroups {
+            user: u,
+            // Groups need a license; without one there are none to list.
+            groups: vec![],
+            scheme_guest: db::col(row, "mg_guest")?,
+            scheme_user: db::col(row, "mg_user")?,
+            scheme_admin: db::col(row, "mg_admin")?,
+        });
     }
     let sql = format!("SELECT count(DISTINCT Users.Id) {from}");
-    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(&channel_id).bind(&group_ids).fetch_one(&app.db).await?;
-    Ok(Json(json!({"users": users, "total_count": total})))
+    let total_count: i64 =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(&channel_id).bind(&group_ids).fetch_one(&app.db).await?;
+    Ok(Json(UsersWithGroupsAndCount { users, total_count }))
+}
+
+/// `model.UserWithGroups`, in Go's order.
+#[derive(Serialize)]
+struct UserWithGroups {
+    #[serde(flatten)]
+    user: User,
+    groups: Vec<Value>,
+    scheme_guest: bool,
+    scheme_user: bool,
+    scheme_admin: bool,
+}
+
+#[derive(Serialize)]
+struct UsersWithGroupsAndCount {
+    users: Vec<UserWithGroups>,
+    total_count: i64,
+}
+
+/// `model.ChannelsWithCount`.
+#[derive(Serialize)]
+struct ChannelsWithCount {
+    channels: Vec<WithTeam<Channel>>,
+    total_count: i64,
 }
 
 // ---------- a member's unread counts ----------
