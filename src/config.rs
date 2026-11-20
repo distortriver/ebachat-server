@@ -619,6 +619,9 @@ pub fn fill_defaults(schema: &Value, v: &mut Value) {
     let (Some(sm), Some(vm)) = (schema.as_object(), v.as_object_mut()) else { return };
     for (k, s) in sm {
         match vm.get_mut(k) {
+            // A `json.RawMessage` (`AdvancedLoggingJSON`) unmarshals `null` as the four bytes "null", which
+            // `IsEmptyJSON` does not take for empty: it stays `null`.
+            Some(Value::Null) if k == "AdvancedLoggingJSON" => {}
             None | Some(Value::Null) => {
                 vm.insert(k.clone(), s.clone());
             }
