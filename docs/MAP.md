@@ -146,6 +146,16 @@ The bootstrap runs about 25× per device in 4 h: desktop re-syncs often.
     files.
   - **Checked with Mattermost Desktop 6.2.2** on the Rust server: as a user, login, channels, posting, threads,
     reactions, search, DMs, file paste with thumbnail and preview, and the theme. As admin, System Console pages.
+- **Web routes outside `/api/`** (`src/web.rs`): their errors are Go's web error page, an HTML page or a 3xx
+  redirect to the client's signed `/error?message=...&s=...` (`RenderWebAppError`); JSON only with `X-Mobile-App`.
+  - **Served:** `GET|HEAD /files/{id}/public`, `GET|POST /login/sso/saml` (always "SAML not available", 302),
+    `/manualtest` (the client's page unless `EnableTesting`).
+  - **Go bug fixed:** for a public link with a missing or wrong `h`, Go renders the page in the handler and again
+    in `handleContextError`, so the 400 body holds two pages. Rust sends one.
+  - **Not ported:** the OAuth 2.0 provider pages (`/oauth/authorize`, `/oauth/access_token`,
+    `/oauth/deauthorize`, `/.well-known/oauth-authorization-server`), OAuth SSO login (`/oauth/{service}/login`,
+    `mobile_login`, `signup`, `complete`, `/signup|login/{service}/complete`), `/oauth/intune` and
+    `/login/one_time_link`. A GET there gets the client's page, any other method the API 404.
 - **No user limit.** An unlicensed 12.1 server refuses to create users past 250 (`maxUsersHardLimit`,
   `channels/app/limits.go`); production has 1,200. The Rust server has no such limit. A Go server taking its turn
   on the database keeps working for existing users, but cannot add any: build it from source without the limit if
@@ -198,6 +208,11 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   - Startup, the websocket, and posts, threads, reactions, edits, deletes and DMs from another user all worked.
   - Every answer was 2xx, and the client logged no errors.
 - **Caches:** Go's caches are reproduced, see `docs/CACHES.md`.
+- **Server busy** (`POST /server_busy`): as Go, the ten `DisableWhenBusy` routes (user, post, team, channel and
+  file searches, REST typing) answer 503 `api.context.server_busy.app_error` after the session check,
+  `status_change` is not broadcast and the websocket `user_typing` action fails until the expiry. One atomic load
+  per check.
+- **Properties:** see `docs/PROPERTIES.md`.
 - **Left:**
   - mobile push (no push proxy);
   - email (no SMTP);

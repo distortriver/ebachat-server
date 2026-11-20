@@ -295,14 +295,49 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
     }
 }
 
+/// `model.WebSocketResponse`, in Go's field order.
+#[derive(Serialize)]
+struct WsReply {
+    status: &'static str,
+    #[serde(skip_serializing_if = "is_zero")]
+    seq_reply: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<WsReplyError>,
+}
+
+/// The `AppError` of a failed socket request, its detail wiped (`WipeDetailed`).
+#[derive(Serialize)]
+struct WsReplyError {
+    id: &'static str,
+    message: String,
+    detailed_error: &'static str,
+    status_code: u16,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+/// Why a socket request failed: `NewInvalidWebSocketParamError`, `NewServerBusyWebSocketError`.
+enum WsError {
+    Param(&'static str),
+    Busy,
+}
+
 /// A client's request on the socket (`wsapi`), answered with `{"status","seq_reply"}`.
 async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
     let Ok(req) = serde_json::from_str::<Value>(text) else { return };
     let seq = req["seq"].clone();
     let data = &req["data"];
     let reply = match req["action"].as_str().unwrap_or("") {
-        "user_typing" => {
+        "user_typing" => 'typing: {
             app.extend_session_if_needed(s).await;
+            if crate::admin::is_busy() {
+                // A non-critical service, off while the server is busy.
+                break 'typing Err(WsError::Busy);
+            }
             let channel_id = data["channel_id"].as_str().unwrap_or("");
             if crate::app::is_valid_id(channel_id)
                 && app.channel_perm(s, channel_id, crate::perm::CREATE_POST).await.is_ok_and(|p| p.0)
@@ -310,7 +345,7 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
                 publish_typing(app, &s.user_id, channel_id, data["parent_id"].as_str().unwrap_or(""));
                 Ok(None)
             } else {
-                Err("channel_id")
+                Err(WsError::Param("channel_id"))
             }
         }
         "user_update_active_status" => match data["user_is_active"].as_bool() {
@@ -324,7 +359,7 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
                 app.touch_session(s).await;
                 Ok(None)
             }
-            None => Err("user_is_active"),
+            None => Err(WsError::Param("user_is_active")),
         },
         "get_statuses" => Ok(Some(json!({}))),
         "get_statuses_by_ids" => {
@@ -333,23 +368,30 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             if ids.is_empty() {
-                Err("user_ids")
+                Err(WsError::Param("user_ids"))
             } else {
                 let st = app.statuses(&ids).await.unwrap_or_default();
                 Ok(Some(Value::Object(st.into_iter().map(|s| (s.user_id, Value::String(s.status))).collect())))
             }
         }
         "ping" => Ok(Some(json!({"text": "pong", "version": crate::SERVER_VERSION_FULL, "server_time": now_ms()}))),
-        _ => Err("action"),
+        _ => Err(WsError::Param("action")),
     };
+    let seq_reply = seq.as_i64().unwrap_or(0);
     let msg = match reply {
-        Ok(None) => json!({"status": "OK", "seq_reply": seq}),
-        Ok(Some(d)) => json!({"status": "OK", "seq_reply": seq, "data": d}),
-        Err(param) => json!({"status": "FAIL", "seq_reply": seq, "error": {
-            "id": "api.websocket_handler.invalid_param.app_error",
-            "message": format!("Invalid {param} parameter"), "status_code": 400}}),
+        Ok(data) => WsReply { status: "OK", seq_reply, data, error: None },
+        Err(e) => {
+            let (id, status_code, args): (&str, u16, &[(&str, &str)]) = match &e {
+                WsError::Param(name) => ("api.websocket_handler.invalid_param.app_error", 400, &[("Name", name)]),
+                WsError::Busy => ("api.websocket_handler.server_busy.app_error", 503, &[]),
+            };
+            let message = crate::i18n::tr(id, args).unwrap_or_else(|| id.to_string());
+            let error = WsReplyError { id, message, detailed_error: "", status_code };
+            WsReply { status: "FAIL", seq_reply, data: None, error: Some(error) }
+        }
     };
-    let _ = conn.tx.send(Out::Reply(msg.to_string()));
+    let msg = serde_json::to_string(&msg).unwrap_or_default();
+    let _ = conn.tx.send(Out::Reply(msg));
 }
 
 /// `PublishUserTyping`.

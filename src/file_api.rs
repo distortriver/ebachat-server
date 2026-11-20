@@ -19,7 +19,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::app::{ApiResult, App, AppError, Auth, State, is_valid_id, new_id, now_ms};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, State, is_valid_id, new_id, now_ms};
 use crate::model::channel::{DIRECT, GROUP, OPEN};
 use crate::model::{Base64, Channel, FileInfo, Session};
 use crate::search_params::{self, SearchParams};
@@ -1070,25 +1070,39 @@ async fn get_link(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, hea
 }
 
 /// `getPublicFile`: with the link's hash, no session.
+/// `getPublicFile`, on the web router (`/files/{file_id:[A-Za-z0-9]+}/public`): its errors are the web error page.
+/// Go renders the page for a bad hash twice, once in the handler and again from `handleContextError`, so the
+/// body holds two pages; here it is rendered once.
 async fn get_public(
     St(app): St<State>,
     Path(id): Path<String>,
     Query(q): Query<DownloadQuery>,
     method: Method,
     headers: HeaderMap,
-) -> ApiResult<Response> {
-    if !is_valid_id(&id) {
+) -> Response {
+    // An id outside the route's pattern is no route: the web client's page.
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return crate::web::root(&app).await;
+    }
+    match public_file(&app, &id, &q, &method, &headers).await {
+        Ok(r) => r,
+        Err(e) => crate::web::web_error(&app, &headers, e).await,
+    }
+}
+
+async fn public_file(app: &App, id: &str, q: &DownloadQuery, method: &Method, headers: &HeaderMap) -> ApiResult<Response> {
+    if !is_valid_id(id) {
         return Err(AppError::invalid_url_param("file_id"));
     }
     if !app.cfg.bool("FileSettings.EnablePublicLink") {
         return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled."));
     }
-    let f = app.file_info(&id).await?.ok_or_else(get_info_error)?;
+    let f = app.file_info(id).await?.ok_or_else(get_info_error)?;
     let want = public_link_hash(&f.id, app.cfg.str("FileSettings.PublicLinkSalt"));
     if q.h.is_empty() || !constant_eq(q.h.as_bytes(), want.as_bytes()) {
         return Err(AppError::bad_request("api.file.get_file.public_invalid.app_error", "The public link does not appear to be valid."));
     }
-    serve_file(&app, &f.path, &f.name, &f.mime_type, f.update_at, false, &method, &headers, None).await
+    serve_file(app, &f.path, &f.name, &f.mime_type, f.update_at, false, method, headers, None).await
 }
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1153,7 +1167,7 @@ pub struct FileInfoList {
     pub first_inaccessible_file_time: i64,
 }
 
-async fn search_in_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<String>, body: Bytes) -> ApiResult<Response> {
+async fn search_in_team(St(app): St<State>, BusyAuth(s): BusyAuth, Path(team_id): Path<String>, body: Bytes) -> ApiResult<Response> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
@@ -1163,7 +1177,7 @@ async fn search_in_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<S
     search_files(&app, &s, &team_id, &body).await
 }
 
-async fn search_all_teams(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
+async fn search_all_teams(St(app): St<State>, BusyAuth(s): BusyAuth, body: Bytes) -> ApiResult<Response> {
     search_files(&app, &s, "", &body).await
 }
 

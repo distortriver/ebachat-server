@@ -129,19 +129,6 @@ GET    /api/v4/plugins/webapp | anon off:PluginSettings.Enable:501:app.plugin.di
 DELETE /api/v4/plugins/{plugin_id} |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
 POST   /api/v4/plugins/{plugin_id}/disable |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
 POST   /api/v4/plugins/{plugin_id}/enable |  | 501 app.plugin.disabled.app_error | Plugins have been disabled. Please check your logs for details.
-POST   /api/v4/properties/groups/{group_name}/fields/search |  | 404 app.property_group.get.app_error | Unable to get property group.
-GET    /api/v4/properties/groups/{group_name}/system/values |  | 404 app.property_group.get.app_error | Unable to get property group.
-PATCH  /api/v4/properties/groups/{group_name}/system/values |  | 404 app.property_group.get.app_error | Unable to get property group.
-GET    /api/v4/properties/groups/{group_name}/{object_type}/fields |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-POST   /api/v4/properties/groups/{group_name}/{object_type}/fields |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-DELETE /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-PATCH  /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-DELETE /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-GET    /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-PATCH  /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-POST   /api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}/options |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-GET    /api/v4/properties/groups/{group_name}/{object_type}/values/{target_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
-PATCH  /api/v4/properties/groups/{group_name}/{object_type}/values/{target_id} |  | 400 api.context.invalid_url_param.app_error | Invalid or missing object_type parameter in request URL.
 GET    /api/v4/recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
 POST   /api/v4/recaps |  | 501 api.recap.disabled.app_error | This feature is not enabled.
 GET    /api/v4/recaps/limit_status |  | 501 api.recap.disabled.app_error | This feature is not enabled.

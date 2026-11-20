@@ -33,6 +33,7 @@ pub mod posts_more;
 pub mod reminders;
 pub mod roles;
 pub mod preferences;
+pub mod properties;
 pub mod reactions;
 pub mod schemes;
 pub mod search;

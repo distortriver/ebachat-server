@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, Body, State, is_valid_id};
+use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, Body, State, is_valid_id};
 use crate::channels::{self as ch, WithTeam, sanitize_member};
 use crate::db::{self, Table};
 use crate::model::channel::{DIRECT, GROUP, OPEN, PRIVATE};
@@ -203,7 +203,7 @@ struct ChannelSearch {
 
 async fn search_group(
     St(app): St<State>,
-    Auth(s): Auth,
+    BusyAuth(s): BusyAuth,
     Body(b): Body<Option<ChannelSearch>>,
 ) -> ApiResult<Json<Vec<Channel>>> {
     let b = b.ok_or_else(|| AppError::invalid_param("channel_search"))?;
@@ -214,7 +214,7 @@ async fn search_group(
 /// search.
 async fn search_all(
     St(app): St<State>,
-    Auth(s): Auth,
+    BusyAuth(s): BusyAuth,
     q: Q,
     Body(b): Body<Option<ChannelSearch>>,
 ) -> ApiResult<Response> {
