@@ -84,7 +84,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 struct Conn {
     io: BufReader<Box<dyn Stream>>,
+    /// The stream really is TLS (`Client.tls` of `net/smtp`): a TLS connection, or a STARTTLS that went through.
+    /// What the auth mechanisms check, never the configured security.
+    tls: bool,
 }
+
+/// `net/smtp`'s `validateLine`: a command may not carry CR or LF, so no value can smuggle in another command.
+const BAD_LINE: &str = "smtp: A line must not contain CR or LF";
 
 impl Conn {
     /// A reply: its code and its lines (`textproto.ReadResponse`).
@@ -109,6 +115,9 @@ impl Conn {
         }
     }
     async fn cmd(&mut self, expect: u16, line: &str) -> Result<(u16, Vec<String>), String> {
+        if line.contains(['\r', '\n']) {
+            return Err(BAD_LINE.into());
+        }
         self.io.get_mut().write_all(format!("{line}\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
         let (code, msg) = self.reply().await?;
         if code / 100 != expect / 100 && code != expect {
@@ -187,22 +196,25 @@ async fn connect(cfg: &SmtpConfig) -> Result<(Conn, Vec<String>), String> {
         .map_err(|_| format!("unable to connect to the SMTP server: dial tcp {addr}: i/o timeout"))?
         .map_err(|e| format!("unable to connect to the SMTP server: dial tcp {addr}: {}", go_net_error(&e)))?;
     let mut stream: Box<dyn Stream> = Box::new(tcp);
-    if cfg.connection_security == "TLS" {
+    let tls = cfg.connection_security == "TLS";
+    if tls {
         stream = tls_wrap(stream, cfg).await.map_err(|e| format!("unable to connect to the SMTP server through TLS: {e}"))?;
     }
-    let mut c = Conn { io: BufReader::new(stream) };
+    let mut c = Conn { io: BufReader::new(stream), tls };
     let (code, msg) = c.reply().await.map_err(|e| format!("unable to connect to the SMTP server: {e}"))?;
     if code != 220 {
         return Err(format!("unable to connect to the SMTP server: {code} {}", msg.join("\n")));
     }
     let local = if cfg.hostname.is_empty() { "localhost".to_string() } else { cfg.hostname.clone() };
     let mut ext = ehlo(&mut c, &local).await?;
-    if cfg.connection_security == "STARTTLS" && ext.iter().any(|e| e.eq_ignore_ascii_case("STARTTLS")) {
-        // Go ignores the error of StartTLS.
+    if cfg.connection_security == "STARTTLS" {
+        // `Client.StartTLS`, sent whether the server offers it or not. Go ignores its error, so a server that
+        // refuses STARTTLS (or a man in the middle that strips it) leaves the session in plain text: `tls` stays
+        // false, and the auth below refuses to send the credentials.
         if c.cmd(220, "STARTTLS").await.is_ok() {
             let plain = c.io.into_inner();
             let tls = tls_wrap(plain, cfg).await?;
-            c = Conn { io: BufReader::new(tls) };
+            c = Conn { io: BufReader::new(tls), tls: true };
             ext = ehlo(&mut c, &local).await?;
         }
     }
@@ -230,25 +242,25 @@ async fn ehlo(c: &mut Conn, local: &str) -> Result<Vec<String>, String> {
     }
 }
 
-/// `authChooser`: PLAIN when offered, LOGIN otherwise; both need TLS (or, for PLAIN, localhost) as `net/smtp`.
+/// `authChooser`: PLAIN when offered, LOGIN otherwise. Both refuse a session that is not really TLS
+/// (`plainAuth.Start`, Mattermost's `loginAuth.Start`) with "unencrypted connection", whatever the configured
+/// security says. `net/smtp` spares PLAIN on localhost, but Go names the server `host:port` there, which is never
+/// "localhost": no server is spared.
 async fn auth(c: &mut Conn, ext: &[String], cfg: &SmtpConfig) -> Result<(), String> {
     let mechs: Vec<String> = ext
         .iter()
         .find_map(|e| e.strip_prefix("AUTH ").or_else(|| e.strip_prefix("auth ")))
         .map(|m| m.split_whitespace().map(str::to_uppercase).collect())
         .unwrap_or_default();
-    let tls = cfg.connection_security == "TLS" || cfg.connection_security == "STARTTLS";
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    if !c.tls {
+        // `Client.Auth` says QUIT when the mechanism refuses to start.
+        let _ = c.cmd(221, "QUIT").await;
+        return Err("unencrypted connection".into());
+    }
     if mechs.iter().any(|m| m == "PLAIN") {
-        let local = matches!(cfg.server_name.as_str(), "localhost" | "127.0.0.1" | "::1");
-        if !tls && !local {
-            return Err("unencrypted connection".into());
-        }
         c.cmd(235, &format!("AUTH PLAIN {}", b64(&format!("\0{}\0{}", cfg.username, cfg.password)))).await?;
         return Ok(());
-    }
-    if !tls {
-        return Err("unencrypted connection".into());
     }
     c.cmd(334, "AUTH LOGIN").await?;
     c.cmd(334, &b64(&cfg.username)).await?;
@@ -283,6 +295,11 @@ pub async fn send(m: &Mail, cfg: &SmtpConfig) -> Result<(), String> {
         mail_from.push_str(" SMTPUTF8");
     }
     c.cmd(250, &mail_from).await.map_err(|e| format!("failed to set the from address: {e}"))?;
+    // Go gives `Rcpt` the value as it came, so `validateLine` refuses CR or LF anywhere in it (a parenthesised
+    // comment may hold them and still parse); the command carries the parsed address.
+    if m.to.contains(['\r', '\n']) {
+        return Err(format!("failed to set the to address: {BAD_LINE}"));
+    }
     c.cmd(250, &format!("RCPT TO:<{to}>")).await.map_err(|e| format!("failed to set the to address: {e}"))?;
     c.cmd(354, "DATA").await.map_err(|e| format!("failed to add email message data: {e}"))?;
     let mut data = String::with_capacity(msg.len() + 64);
@@ -314,23 +331,443 @@ pub async fn send(m: &Mail, cfg: &SmtpConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// `validateSingleAddress`: the bare address.
+/// `validateSingleAddress`: exactly one address by `mail.ParseAddressList`, its addr-spec.
 fn single_address(v: &str) -> Result<String, String> {
-    let v = v.trim();
-    if v.is_empty() {
-        return Err("failed to parse address: mail: no address".into());
+    let list = parse_address_list(v).map_err(|e| format!("failed to parse address: {e}"))?;
+    match <[_; 1]>::try_from(list) {
+        Ok([(_, addr)]) => Ok(addr),
+        Err(list) => Err(format!("must contain exactly one address, got {}", list.len())),
     }
-    if v.contains(',') {
-        return Err(format!("must contain exactly one address, got {}", v.split(',').count()));
-    }
-    let addr = match (v.rfind('<'), v.rfind('>')) {
-        (Some(a), Some(b)) if a < b => &v[a + 1..b],
-        _ => v,
+}
+
+// ---------- net/mail address lists ----------
+
+// Based on Go's net/mail (message.go, addrParser), Copyright 2011 The Go Authors, BSD-style license.
+
+/// `mail.ParseAddressList`: (display name, addr-spec) pairs, or Go's error.
+pub fn parse_address_list(list: &str) -> Result<Vec<(String, String)>, String> {
+    AddrParser { s: list.as_bytes() }.parse_address_list()
+}
+
+struct AddrParser<'a> {
+    s: &'a [u8],
+}
+
+/// `utf8.DecodeRune`: the first rune and its size; `None` for invalid bytes (size 1) or nothing (size 0).
+fn decode_rune(s: &[u8]) -> (Option<char>, usize) {
+    let n = match s.first() {
+        None => return (None, 0),
+        Some(0..=0x7f) => 1,
+        Some(0xc0..=0xdf) => 2,
+        Some(0xe0..=0xef) => 3,
+        Some(0xf0..=0xf7) => 4,
+        Some(_) => return (None, 1),
     };
-    if !addr.contains('@') {
-        return Err("failed to parse address: mail: missing '@' or angle-addr".into());
+    match s.get(..n).map(std::str::from_utf8) {
+        Some(Ok(t)) => (t.chars().next(), n),
+        _ => (None, 1),
     }
-    Ok(addr.to_string())
+}
+
+fn is_vchar(r: char) -> bool {
+    ('!'..='~').contains(&r) || r as u32 >= 0x80
+}
+fn is_wsp(r: char) -> bool {
+    r == ' ' || r == '\t'
+}
+fn is_atext(r: char, dot: bool) -> bool {
+    match r {
+        '.' => dot,
+        '(' | ')' | '<' | '>' | '[' | ']' | ':' | ';' | '@' | '\\' | ',' | '"' => false,
+        _ => is_vchar(r),
+    }
+}
+fn is_qtext(r: char) -> bool {
+    r != '\\' && r != '"' && is_vchar(r)
+}
+fn is_dtext(r: char) -> bool {
+    r != '[' && r != ']' && r != '\\' && is_vchar(r)
+}
+
+/// Go's `%q` of a string, close enough for error texts.
+fn go_quote(s: &[u8]) -> String {
+    format!("{:?}", String::from_utf8_lossy(s))
+}
+
+impl AddrParser<'_> {
+    fn empty(&self) -> bool {
+        self.s.is_empty()
+    }
+    fn peek(&self) -> u8 {
+        self.s[0]
+    }
+    fn consume(&mut self, c: u8) -> bool {
+        if self.empty() || self.peek() != c {
+            return false;
+        }
+        self.s = &self.s[1..];
+        true
+    }
+    fn skip_space(&mut self) {
+        while let Some(b' ' | b'\t') = self.s.first() {
+            self.s = &self.s[1..];
+        }
+    }
+
+    fn parse_address_list(&mut self) -> Result<Vec<(String, String)>, String> {
+        let mut list = vec![];
+        loop {
+            self.skip_space();
+            if self.consume(b',') {
+                continue;
+            }
+            list.extend(self.parse_address(true)?);
+            if !self.skip_cfws() {
+                return Err("mail: misformatted parenthetical comment".into());
+            }
+            if self.empty() {
+                break;
+            }
+            if self.peek() != b',' {
+                return Err("mail: expected comma".into());
+            }
+            while self.consume(b',') {
+                self.skip_space();
+            }
+            if self.empty() {
+                break;
+            }
+        }
+        Ok(list)
+    }
+
+    fn parse_address(&mut self, handle_group: bool) -> Result<Vec<(String, String)>, String> {
+        self.skip_space();
+        if self.empty() {
+            return Err("mail: no address".into());
+        }
+        // addr-spec, then an optional display name in a comment.
+        if let Ok(spec) = self.consume_addr_spec() {
+            self.skip_space();
+            let mut name = String::new();
+            if !self.empty() && self.peek() == b'(' {
+                name = self.consume_display_name_comment()?;
+            }
+            return Ok(vec![(name, spec)]);
+        }
+        let mut name = String::new();
+        if self.peek() != b'<' {
+            name = self.consume_phrase()?;
+        }
+        self.skip_space();
+        if handle_group && self.consume(b':') {
+            return self.consume_group_list();
+        }
+        if !self.consume(b'<') {
+            if name.chars().all(|r| is_atext(r, true)) {
+                return Err("mail: missing '@' or angle-addr".into());
+            }
+            return Err("mail: no angle-addr".into());
+        }
+        let spec = self.consume_addr_spec()?;
+        if !self.consume(b'>') {
+            return Err("mail: unclosed angle-addr".into());
+        }
+        Ok(vec![(name, spec)])
+    }
+
+    fn consume_group_list(&mut self) -> Result<Vec<(String, String)>, String> {
+        let mut group = vec![];
+        self.skip_space();
+        if self.consume(b';') {
+            if !self.skip_cfws() {
+                return Err("mail: misformatted parenthetical comment".into());
+            }
+            return Ok(group);
+        }
+        loop {
+            self.skip_space();
+            group.extend(self.parse_address(false)?);
+            if !self.skip_cfws() {
+                return Err("mail: misformatted parenthetical comment".into());
+            }
+            if self.consume(b';') {
+                if !self.skip_cfws() {
+                    return Err("mail: misformatted parenthetical comment".into());
+                }
+                break;
+            }
+            if !self.consume(b',') {
+                return Err("mail: expected comma".into());
+            }
+        }
+        Ok(group)
+    }
+
+    /// An addr-spec; on error the parser is where it was.
+    fn consume_addr_spec(&mut self) -> Result<String, String> {
+        let orig = self.s;
+        let r = self.addr_spec();
+        if r.is_err() {
+            self.s = orig;
+        }
+        r
+    }
+    fn addr_spec(&mut self) -> Result<String, String> {
+        self.skip_space();
+        if self.empty() {
+            return Err("mail: no addr-spec".into());
+        }
+        let local = if self.peek() == b'"' {
+            // Go replaces any quoted-string error by this one.
+            match self.consume_quoted_string() {
+                Ok(q) if !q.is_empty() => q,
+                _ => return Err("mail: empty quoted string in addr-spec".into()),
+            }
+        } else {
+            self.consume_atom(true, false)?
+        };
+        if !self.consume(b'@') {
+            return Err("mail: missing @ in addr-spec".into());
+        }
+        self.skip_space();
+        if self.empty() {
+            return Err("mail: no domain in addr-spec".into());
+        }
+        let domain = if self.peek() == b'[' { self.consume_domain_literal()? } else { self.consume_atom(true, false)? };
+        Ok(format!("{local}@{domain}"))
+    }
+
+    fn consume_phrase(&mut self) -> Result<String, String> {
+        let mut words: Vec<String> = vec![];
+        let mut encoded = String::new();
+        let mut err = None;
+        loop {
+            if !words.is_empty() && !self.skip_cfws() {
+                return Err("mail: misformatted parenthetical comment".into());
+            }
+            self.skip_space();
+            if self.empty() {
+                break;
+            }
+            let r = if self.peek() == b'"' {
+                self.consume_quoted_string().map(|w| (w, false))
+            } else {
+                self.consume_atom(true, true).and_then(|w| decode_rfc2047_word(&w))
+            };
+            match r {
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+                Ok((w, true)) => encoded.push_str(&w),
+                Ok((w, false)) => {
+                    if !encoded.is_empty() {
+                        words.push(std::mem::take(&mut encoded));
+                    }
+                    words.push(w);
+                }
+            }
+        }
+        if !encoded.is_empty() {
+            words.push(encoded);
+        }
+        if let Some(e) = err
+            && words.is_empty()
+        {
+            return Err(format!("mail: missing word in phrase: {e}"));
+        }
+        Ok(words.join(" "))
+    }
+
+    fn consume_quoted_string(&mut self) -> Result<String, String> {
+        let mut i = 1;
+        let mut out = String::new();
+        let mut escaped = false;
+        loop {
+            let (r, size) = decode_rune(&self.s[i..]);
+            let Some(r) = r else {
+                if size == 0 {
+                    return Err("mail: unclosed quoted-string".into());
+                }
+                return Err(format!("mail: invalid utf-8 in quoted-string: {}", go_quote(self.s)));
+            };
+            if escaped {
+                if !is_vchar(r) && !is_wsp(r) {
+                    return Err(format!("mail: bad character in quoted-string: {r:?}"));
+                }
+                out.push(r);
+                escaped = false;
+            } else if is_qtext(r) || is_wsp(r) {
+                out.push(r);
+            } else if r == '"' {
+                break;
+            } else if r == '\\' {
+                escaped = true;
+            } else {
+                return Err(format!("mail: bad character in quoted-string: {r:?}"));
+            }
+            i += size;
+        }
+        self.s = &self.s[i + 1..];
+        Ok(out)
+    }
+
+    fn consume_atom(&mut self, dot: bool, permissive: bool) -> Result<String, String> {
+        let mut i = 0;
+        loop {
+            match decode_rune(&self.s[i..]) {
+                (None, 1) => return Err(format!("mail: invalid utf-8 in address: {}", go_quote(self.s))),
+                (Some(r), size) if is_atext(r, dot) => i += size,
+                _ => break,
+            }
+        }
+        if i == 0 {
+            return Err("mail: invalid string".into());
+        }
+        let atom = String::from_utf8_lossy(&self.s[..i]).into_owned();
+        self.s = &self.s[i..];
+        if !permissive {
+            if atom.starts_with('.') {
+                return Err("mail: leading dot in atom".into());
+            }
+            if atom.contains("..") {
+                return Err("mail: double dot in atom".into());
+            }
+            if atom.ends_with('.') {
+                return Err("mail: trailing dot in atom".into());
+            }
+        }
+        Ok(atom)
+    }
+
+    fn consume_domain_literal(&mut self) -> Result<String, String> {
+        if !self.consume(b'[') {
+            return Err("mail: missing \"[\" in domain-literal".into());
+        }
+        let start = self.s;
+        let mut len = 0;
+        loop {
+            if self.empty() {
+                return Err("mail: unclosed domain-literal".into());
+            }
+            if self.peek() == b']' {
+                break;
+            }
+            let (r, size) = decode_rune(self.s);
+            let Some(r) = r else {
+                return Err(format!("mail: invalid utf-8 in domain-literal: {}", go_quote(self.s)));
+            };
+            if !is_dtext(r) {
+                return Err(format!("mail: bad character in domain-literal: {r:?}"));
+            }
+            len += size;
+            self.s = &self.s[size..];
+        }
+        let dtext = String::from_utf8_lossy(&start[..len]).into_owned();
+        if !self.consume(b']') {
+            return Err("mail: unclosed domain-literal".into());
+        }
+        if dtext.parse::<std::net::IpAddr>().is_err() {
+            return Err(format!("mail: invalid IP address in domain-literal: {dtext:?}"));
+        }
+        Ok(format!("[{dtext}]"))
+    }
+
+    fn consume_display_name_comment(&mut self) -> Result<String, String> {
+        if !self.consume(b'(') {
+            return Err("mail: comment does not start with (".into());
+        }
+        let Some(comment) = self.consume_comment() else {
+            return Err("mail: misformatted parenthetical comment".into());
+        };
+        let mut words = vec![];
+        for w in comment.split([' ', '\t']).filter(|w| !w.is_empty()) {
+            words.push(decode_rfc2047_word(w)?.0);
+        }
+        Ok(words.join(" "))
+    }
+
+    fn skip_cfws(&mut self) -> bool {
+        self.skip_space();
+        while self.consume(b'(') {
+            if self.consume_comment().is_none() {
+                return false;
+            }
+            self.skip_space();
+        }
+        true
+    }
+
+    /// A comment after its `(`, nested ones included; `None` when it does not close.
+    fn consume_comment(&mut self) -> Option<String> {
+        let mut depth = 1;
+        let mut out = vec![];
+        while !self.empty() && depth != 0 {
+            if self.peek() == b'\\' && self.s.len() > 1 {
+                self.s = &self.s[1..];
+            } else if self.peek() == b'(' {
+                depth += 1;
+            } else if self.peek() == b')' {
+                depth -= 1;
+            }
+            if depth > 0 {
+                out.push(self.s[0]);
+            }
+            self.s = &self.s[1..];
+        }
+        (depth == 0).then(|| String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
+/// `addrParser.decodeRFC2047Word`: an encoded-word decoded (`true`), anything else as it is (`false`); an error
+/// only for a charset Go cannot read (it knows UTF-8, ISO-8859-1 and US-ASCII).
+fn decode_rfc2047_word(s: &str) -> Result<(String, bool), String> {
+    let plain = || Ok((s.to_string(), false));
+    if s.len() < 8 || !s.starts_with("=?") || !s.ends_with("?=") || s.matches('?').count() != 4 {
+        return plain();
+    }
+    let (charset, rest) = s[2..s.len() - 2].split_once('?').unwrap_or_default();
+    let (enc, text) = rest.split_once('?').unwrap_or_default();
+    if charset.is_empty() || enc.len() != 1 {
+        return plain();
+    }
+    let content = match enc {
+        "b" | "B" => match base64::engine::general_purpose::STANDARD.decode(text) {
+            Ok(c) => c,
+            Err(_) => return plain(),
+        },
+        "q" | "Q" => {
+            let b = text.as_bytes();
+            let mut out = vec![];
+            let mut i = 0;
+            while i < b.len() {
+                match b[i] {
+                    b'_' => out.push(b' '),
+                    b'=' => {
+                        let hex = b.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit));
+                        let Some(v) = hex.and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()) else {
+                            return plain();
+                        };
+                        out.push(v);
+                        i += 2;
+                    }
+                    c if (b' '..=b'~').contains(&c) || c == b'\n' || c == b'\r' || c == b'\t' => out.push(c),
+                    _ => return plain(),
+                }
+                i += 1;
+            }
+            out
+        }
+        _ => return plain(),
+    };
+    let word = match charset.to_ascii_lowercase().as_str() {
+        "utf-8" => String::from_utf8_lossy(&content).into_owned(),
+        "iso-8859-1" => content.iter().map(|&b| b as char).collect(),
+        "us-ascii" => content.iter().map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }).collect(),
+        _ => return Err(format!("charset not supported: {charset:?}")),
+    };
+    Ok((word, true))
 }
 
 /// `mail.Address.String()` of a name and address.
@@ -799,6 +1236,136 @@ mod tests {
     fn text_of_html() {
         let t = html_to_text("<html><head><style>x{}</style></head><body><h2>Hi there</h2><p>See <a href='http://a'>this</a> and <b>bold</b><br>next</p></body></html>");
         assert_eq!(t, "--------\nHi there\n--------\n\nSee this ( http://a ) and *bold*\nnext");
+    }
+
+    /// Expectations printed by Go 1.26's `mail.ParseAddressList` for the same inputs.
+    #[test]
+    fn parses_addresses_like_go() {
+        let cases: &[(&str, Result<&[(&str, &str)], &str>)] = &[
+            ("a@b.com", Ok(&[("", "a@b.com")])),
+            ("", Err("mail: no address")),
+            ("  ", Err("mail: no address")),
+            ("a@b.com, c@d.com", Ok(&[("", "a@b.com"), ("", "c@d.com")])),
+            ("a@b.com\r\nRCPT TO:<x@y.z>", Err("mail: expected comma")),
+            ("a@b.com\nX", Err("mail: expected comma")),
+            ("a@b.com (x\r\ny)", Ok(&[("x\r\ny", "a@b.com")])),
+            ("Bob <bob@x.com>", Ok(&[("Bob", "bob@x.com")])),
+            ("bob", Err("mail: missing '@' or angle-addr")),
+            ("bob smith", Err("mail: no angle-addr")),
+            ("\"bob\"@x.com", Ok(&[("", "bob@x.com")])),
+            ("\"\"@x.com", Err("mail: missing '@' or angle-addr")),
+            ("a..b@x.com", Err("mail: missing '@' or angle-addr")),
+            (".a@x.com", Err("mail: missing '@' or angle-addr")),
+            ("a.@x.com", Err("mail: missing '@' or angle-addr")),
+            ("a@[127.0.0.1]", Ok(&[("", "a@[127.0.0.1]")])),
+            ("a@[foo]", Err("mail: missing '@' or angle-addr")),
+            ("a@[1.2", Err("mail: missing '@' or angle-addr")),
+            ("<a@b.com", Err("mail: unclosed angle-addr")),
+            ("group: a@b.com, c@d.com;", Ok(&[("", "a@b.com"), ("", "c@d.com")])),
+            ("undisclosed:;", Ok(&[])),
+            ("a@b.com,", Ok(&[("", "a@b.com")])),
+            (",,a@b.com", Ok(&[("", "a@b.com")])),
+            ("a@", Err("mail: missing '@' or angle-addr")),
+            ("@b.com", Err("mail: missing word in phrase: mail: invalid string")),
+            ("=?utf-8?q?J=C3=B6rg?= <j@x.com>", Ok(&[("Jörg", "j@x.com")])),
+            ("=?koi8-r?q?x?= <j@x.com>", Err("mail: missing word in phrase: charset not supported: \"koi8-r\"")),
+            ("a@b.com (=?koi8-r?q?x?=)", Err("charset not supported: \"koi8-r\"")),
+            ("a@b.com x", Err("mail: expected comma")),
+            ("\"a\rb\"@x.com", Err("mail: missing word in phrase: mail: bad character in quoted-string: '\\r'")),
+            ("a@b.com (unclosed", Err("mail: misformatted parenthetical comment")),
+            ("José <j@x.com>", Ok(&[("José", "j@x.com")])),
+            ("a@b.com\t", Ok(&[("", "a@b.com")])),
+            ("(c) a@b.com", Err("mail: missing word in phrase: mail: invalid string")),
+        ];
+        for (input, want) in cases {
+            let got = parse_address_list(input);
+            let want = want.map(|l| l.iter().map(|(n, a)| (n.to_string(), a.to_string())).collect::<Vec<_>>());
+            assert_eq!(got, want.map_err(str::to_string), "{input:?}");
+        }
+        assert_eq!(single_address("a@b.com, c@d.com"), Err("must contain exactly one address, got 2".into()));
+        assert_eq!(single_address("x@y.z\r\nRCPT TO:<y@z>").unwrap_err(), "failed to parse address: mail: expected comma");
+        assert_eq!(single_address("Bob <bob@x.com>"), Ok("bob@x.com".into()));
+    }
+
+    /// A fake SMTP server: answers each line from `replies` in turn and records what it got.
+    async fn fake_smtp(replies: Vec<&'static str>) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut s = BufReader::new(s);
+            s.get_mut().write_all(b"220 fake ESMTP\r\n").await.unwrap();
+            let mut got = vec![];
+            for r in replies {
+                let mut line = String::new();
+                if s.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                got.push(line.trim_end().to_string());
+                s.get_mut().write_all(r.as_bytes()).await.unwrap();
+            }
+            got
+        });
+        (port, h)
+    }
+
+    fn smtp_cfg(port: u16, security: &str) -> SmtpConfig {
+        SmtpConfig {
+            connection_security: security.into(),
+            server_name: "localhost".into(),
+            server: "127.0.0.1".into(),
+            port: port.to_string(),
+            timeout_secs: 5,
+            username: "user".into(),
+            password: "secret".into(),
+            auth: true,
+            feedback_email: "noreply@x.com".into(),
+            ..Default::default()
+        }
+    }
+
+    /// A server that refuses STARTTLS (or a downgrading man in the middle) never gets the credentials, by PLAIN
+    /// or LOGIN, even on localhost: Go's `unencrypted connection`.
+    #[tokio::test]
+    async fn no_credentials_without_tls() {
+        for (security, mechs) in [
+            ("STARTTLS", "250-fake\r\n250 AUTH PLAIN LOGIN\r\n"),
+            ("STARTTLS", "250-fake\r\n250 AUTH LOGIN\r\n"),
+            ("", "250-fake\r\n250 AUTH PLAIN\r\n"),
+        ] {
+            let (port, h) = fake_smtp(vec![mechs, "454 TLS not available\r\n", "221 bye\r\n"]).await;
+            let err = test_connection(&smtp_cfg(port, security)).await.unwrap_err();
+            assert_eq!(err, "unable to connect: authentication failed: unencrypted connection");
+            let got = h.await.unwrap();
+            assert!(got.iter().all(|l| !l.starts_with("AUTH")), "{got:?}");
+            assert_eq!(got.last().map(String::as_str), Some("QUIT"), "{got:?}");
+            if security == "STARTTLS" {
+                assert_eq!(got[1], "STARTTLS");
+            }
+        }
+    }
+
+    /// No value reaches the SMTP session with a line break in it.
+    #[tokio::test]
+    async fn no_command_injection() {
+        let (port, h) = fake_smtp(vec!["250 OK\r\n", "250 OK\r\n", "250 OK\r\n", "250 OK\r\n"]).await;
+        let mut cfg = smtp_cfg(port, "");
+        cfg.auth = false;
+        let m = Mail { to: "a@b.com (x\r\nRCPT TO:<evil@x.com>)".into(), subject: "s".into(), html: "h".into(), ..Default::default() };
+        let err = send(&m, &cfg).await.unwrap_err();
+        assert_eq!(err, "failed to set the to address: smtp: A line must not contain CR or LF");
+        let got = h.await.unwrap();
+        assert!(got.iter().all(|l| !l.contains("evil")), "{got:?}");
+        let m = Mail { to: "a@b.com\r\nRCPT TO:<evil@x.com>".into(), ..Default::default() };
+        let (port, _h) = fake_smtp(vec!["250 OK\r\n", "250 OK\r\n"]).await;
+        cfg.port = port.to_string();
+        assert_eq!(send(&m, &cfg).await.unwrap_err(), "invalid To header: failed to parse address: mail: expected comma");
+        cfg.feedback_email = "x@y.com>\r\nRCPT TO:<evil@x.com".into();
+        let (port, h) = fake_smtp(vec!["250 OK\r\n", "250 OK\r\n"]).await;
+        cfg.port = port.to_string();
+        let m = Mail { to: "a@b.com".into(), ..Default::default() };
+        assert_eq!(send(&m, &cfg).await.unwrap_err(), "failed to set the from address: smtp: A line must not contain CR or LF");
+        assert!(h.await.unwrap().iter().all(|l| !l.contains("evil")));
     }
 
     #[test]

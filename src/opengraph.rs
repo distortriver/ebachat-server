@@ -124,18 +124,42 @@ fn in_cidr(ip: IpAddr, net: IpAddr, bits: u8) -> bool {
 #[derive(Clone, Default)]
 struct Allowed(Vec<String>);
 
+/// `ErrAddressForbidden`.
+const ADDRESS_FORBIDDEN: &str = "address forbidden, you may need to set AllowedUntrustedInternalConnections to allow \
+                                 an integration access to your internal network";
+
 impl Allowed {
+    /// `isAllowedInternalHost`: the host (without brackets) is listed as it is.
     fn host(&self, host: &str) -> bool {
+        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
         self.0.iter().any(|a| a == host)
     }
-    fn ip(&self, ip: IpAddr) -> bool {
-        if !is_reserved(ip) {
-            return true;
+    /// `checkInternalIP`: an address that is neither reserved nor this host's own, or one inside an allowed CIDR.
+    /// The interfaces are listed on every check, as Go does; if they cannot be, nothing is allowed.
+    fn check_ip(&self, ip: IpAddr) -> Result<(), String> {
+        self.check_ip_with(ip, is_own_ip)
+    }
+    fn check_ip_with(&self, ip: IpAddr, own: impl Fn(IpAddr) -> std::io::Result<bool>) -> Result<(), String> {
+        let ip = canonical_ip(ip);
+        let reserved = is_reserved(ip);
+        let own = own(ip).map_err(|e| format!("unable to determine if IP is own IP: {e}"))?;
+        if !reserved && !own {
+            return Ok(());
         }
-        self.0.iter().any(|a| {
+        let in_allowed_range = self.0.iter().any(|a| {
             let Some((net, bits)) = a.split_once('/') else { return false };
-            matches!((net.parse::<IpAddr>(), bits.parse::<u8>()), (Ok(n), Ok(b)) if in_cidr(ip, n, b))
-        })
+            matches!((net.parse::<IpAddr>(), bits.parse::<u8>()), (Ok(n), Ok(b)) if in_cidr(ip, canonical_ip(n), b))
+        });
+        if in_allowed_range {
+            return Ok(());
+        }
+        if reserved {
+            return Err(format!("IP {ip} is in a reserved range and not in AllowedUntrustedInternalConnections"));
+        }
+        Err(format!("IP {ip} is a self-assigned IP and not in AllowedUntrustedInternalConnections"))
+    }
+    fn ip(&self, ip: IpAddr) -> bool {
+        self.check_ip(ip).is_ok()
     }
     /// A URL whose host is an IP literal: allowed as a resolved address would be.
     fn url(&self, u: &Url) -> bool {
@@ -147,6 +171,56 @@ impl Allowed {
             Ok(ip) => self.ip(ip),
             Err(_) => true,
         }
+    }
+    /// `dialContextFilter`'s error for addresses that were all refused.
+    fn forbidden(reasons: &[String]) -> String {
+        if reasons.is_empty() {
+            return ADDRESS_FORBIDDEN.to_string();
+        }
+        format!("{ADDRESS_FORBIDDEN}: {}", reasons.join("; "))
+    }
+}
+
+/// An IPv4-mapped IPv6 address as its IPv4 address (Go's `net.IP` compares them equal).
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    }
+}
+
+/// `IsOwnIP`: an address of one of this host's interfaces (`getifaddrs`).
+pub fn is_own_ip(ip: IpAddr) -> std::io::Result<bool> {
+    let ip = canonical_ip(ip);
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `head` with a list that freeifaddrs releases below; every node and address is read
+    // only while the list is alive, and each sockaddr is read as the type its family says.
+    unsafe {
+        if libc::getifaddrs(&mut head) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut found = false;
+        let mut cur = head;
+        while !cur.is_null() && !found {
+            let sa = (*cur).ifa_addr;
+            if !sa.is_null() {
+                let own = match (*sa).sa_family as i32 {
+                    libc::AF_INET => {
+                        let a = &*(sa as *const libc::sockaddr_in);
+                        Some(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr))))
+                    }
+                    libc::AF_INET6 => {
+                        let a = &*(sa as *const libc::sockaddr_in6);
+                        Some(canonical_ip(IpAddr::V6(std::net::Ipv6Addr::from(a.sin6_addr.s6_addr))))
+                    }
+                    _ => None,
+                };
+                found = own == Some(ip);
+            }
+            cur = (*cur).ifa_next;
+        }
+        libc::freeifaddrs(head);
+        Ok(found)
     }
 }
 
@@ -162,13 +236,90 @@ impl reqwest::dns::Resolve for FilteringResolver {
             if allowed.host(&host) {
                 return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
             }
-            let ok: Vec<SocketAddr> = addrs.into_iter().filter(|a| allowed.ip(a.ip())).collect();
+            let mut reasons = vec![];
+            let mut ok = vec![];
+            for a in addrs {
+                match allowed.check_ip(a.ip()) {
+                    Ok(()) => ok.push(a),
+                    Err(r) => reasons.push(r),
+                }
+            }
             if ok.is_empty() {
-                return Err("address forbidden, you may need to set AllowedUntrustedInternalConnections to allow an \
-                            integration access to your internal network"
-                    .into());
+                return Err(Allowed::forbidden(&reasons).into());
             }
             Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The connect-time check of every untrusted client (`dialContextFilter`), below the resolver: hyper connects to
+/// an IP-literal host without asking the resolver, so the resolver alone lets `http://127.0.0.1/` through. A
+/// literal host is checked before dialling; then the address really connected to (`HttpInfo::remote_addr`, the
+/// proxy's when there is one, as Go's dialer sees it) is checked again, so no caller has to remember a pre-check.
+#[derive(Clone)]
+struct ConnectGuard(Allowed);
+
+#[derive(Clone)]
+struct Guarded<S> {
+    inner: S,
+    allowed: Allowed,
+}
+
+impl<S> tower_layer::Layer<S> for ConnectGuard {
+    type Service = Guarded<S>;
+    fn layer(&self, inner: S) -> Guarded<S> {
+        Guarded { inner, allowed: self.0.clone() }
+    }
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The host of reqwest's connector request, from its `Debug` (`Unnameable(<uri>)`): reqwest does not name the
+/// type. `None` when it cannot be read, which allows no host by name.
+fn connect_host(req: &impl std::fmt::Debug) -> Option<String> {
+    let s = format!("{req:?}");
+    let uri = s.strip_prefix("Unnameable(")?.strip_suffix(')')?;
+    let uri: http::Uri = uri.parse().ok()?;
+    let host = uri.host()?;
+    Some(host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).to_string())
+}
+
+impl<S, R> tower_service::Service<R> for Guarded<S>
+where
+    R: std::fmt::Debug,
+    S: tower_service::Service<R, Error = BoxError>,
+    S::Response: hyper_util::client::legacy::connect::Connection + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = BoxError;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<S::Response, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: R) -> Self::Future {
+        let host = connect_host(&req);
+        let allowed = self.allowed.clone();
+        if host.as_deref().is_some_and(|h| allowed.host(h)) {
+            return Box::pin(self.inner.call(req));
+        }
+        if let Some(Ok(ip)) = host.as_deref().map(str::parse::<IpAddr>)
+            && let Err(reason) = allowed.check_ip(ip)
+        {
+            return Box::pin(std::future::ready(Err(Allowed::forbidden(&[reason]).into())));
+        }
+        let connecting = self.inner.call(req);
+        Box::pin(async move {
+            let conn = connecting.await?;
+            let mut extras = http::Extensions::new();
+            hyper_util::client::legacy::connect::Connection::connected(&conn).get_extras(&mut extras);
+            let Some(peer) = extras.get::<hyper_util::client::legacy::connect::HttpInfo>().map(|i| i.remote_addr()) else {
+                return Err(Allowed::forbidden(&[]).into());
+            };
+            allowed.check_ip(peer.ip()).map_err(|r| Allowed::forbidden(&[r]))?;
+            Ok(conn)
         })
     }
 }
@@ -194,6 +345,7 @@ impl App {
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(30))
                 .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .connector_layer(ConnectGuard(allowed.clone()))
                 .dns_resolver(Arc::new(FilteringResolver(allowed)))
                 .redirect(reqwest::redirect::Policy::custom(move |a| {
                     if a.previous().len() >= 10 {
@@ -230,6 +382,7 @@ impl App {
                 .user_agent(USER_AGENT)
                 .connect_timeout(Duration::from_secs(30))
                 .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
+                .connector_layer(ConnectGuard(allowed.clone()))
                 .dns_resolver(Arc::new(FilteringResolver(allowed)))
                 .redirect(reqwest::redirect::Policy::custom(move |a| {
                     if a.previous().len() >= 10 {
@@ -249,11 +402,13 @@ impl App {
     pub fn no_redirect_client(&self) -> &'static reqwest::Client {
         static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
         CLIENT.get_or_init(|| {
+            let allowed = self.allowed_untrusted();
             reqwest::Client::builder()
                 .user_agent(USER_AGENT)
                 .connect_timeout(Duration::from_secs(30))
                 .danger_accept_invalid_certs(self.cfg.bool("ServiceSettings.EnableInsecureOutgoingConnections"))
-                .dns_resolver(Arc::new(FilteringResolver(self.allowed_untrusted())))
+                .connector_layer(ConnectGuard(allowed.clone()))
+                .dns_resolver(Arc::new(FilteringResolver(allowed)))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("http client")
@@ -862,6 +1017,91 @@ pub fn query_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn allowed(list: &[&str]) -> Allowed {
+        Allowed(list.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// `checkInternalIP`, with the interface list given.
+    #[test]
+    fn internal_ips() {
+        let own = |ip: IpAddr| Ok(ip == "203.0.114.7".parse::<IpAddr>().unwrap());
+        let none = allowed(&[]);
+        assert_eq!(none.check_ip_with("8.8.8.8".parse().unwrap(), own), Ok(()));
+        assert_eq!(
+            none.check_ip_with("127.0.0.1".parse().unwrap(), own),
+            Err("IP 127.0.0.1 is in a reserved range and not in AllowedUntrustedInternalConnections".into())
+        );
+        // IPv4-mapped IPv6 is the IPv4 address.
+        assert_eq!(
+            none.check_ip_with("::ffff:10.0.0.1".parse().unwrap(), own),
+            Err("IP 10.0.0.1 is in a reserved range and not in AllowedUntrustedInternalConnections".into())
+        );
+        // A public address of this host's own (IsOwnIP).
+        assert_eq!(
+            none.check_ip_with("203.0.114.7".parse().unwrap(), own),
+            Err("IP 203.0.114.7 is a self-assigned IP and not in AllowedUntrustedInternalConnections".into())
+        );
+        assert_eq!(
+            none.check_ip_with("::ffff:203.0.114.7".parse().unwrap(), own),
+            Err("IP 203.0.114.7 is a self-assigned IP and not in AllowedUntrustedInternalConnections".into())
+        );
+        let some = allowed(&["10.0.0.0/8", "203.0.114.0/24", "intranet"]);
+        assert_eq!(some.check_ip_with("10.1.2.3".parse().unwrap(), own), Ok(()));
+        assert_eq!(some.check_ip_with("203.0.114.7".parse().unwrap(), own), Ok(()));
+        assert!(some.host("intranet") && !some.host("10.1.2.3"));
+        // No interface list: nothing is allowed, not even a public address.
+        let broken = |_: IpAddr| Err(std::io::Error::other("no interfaces"));
+        assert_eq!(
+            some.check_ip_with("8.8.8.8".parse().unwrap(), broken),
+            Err("unable to determine if IP is own IP: no interfaces".into())
+        );
+        // The loopback interface is this host's.
+        assert!(is_own_ip("127.0.0.1".parse().unwrap()).unwrap());
+        assert!(is_own_ip("::ffff:127.0.0.1".parse().unwrap()).unwrap());
+        assert!(!is_own_ip("192.0.2.200".parse().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn connector_request_host() {
+        #[derive(Debug)]
+        struct Unnameable(#[allow(dead_code)] http::Uri);
+        let host = |u: &str| connect_host(&Unnameable(u.parse().unwrap()));
+        assert_eq!(host("http://127.0.0.1:8080/"), Some("127.0.0.1".into()));
+        assert_eq!(host("https://[::1]:443"), Some("::1".into()));
+        assert_eq!(host("http://example.com"), Some("example.com".into()));
+        assert_eq!(connect_host(&"something else"), None);
+    }
+
+    /// The guard refuses an IP-literal host before dialling, and a name that resolved to an internal address
+    /// after connecting, whatever resolver the client has; an allowed host or CIDR goes through.
+    #[tokio::test]
+    async fn guard_refuses_internal_addresses() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = accepted.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Ok((mut s, _)) = l.accept().await {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = s.write_all(b"HTTP/1.1 302 Found\r\nLocation: /x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            }
+        });
+        let client = |a: Allowed| {
+            reqwest::Client::builder().connector_layer(ConnectGuard(a)).redirect(reqwest::redirect::Policy::none()).build().unwrap()
+        };
+        let err = client(allowed(&[])).head(format!("http://127.0.0.1:{port}/")).send().await.unwrap_err();
+        let chain = format!("{:?}", err);
+        assert!(chain.contains("IP 127.0.0.1 is in a reserved range"), "{chain}");
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0, "dialled a refused literal");
+        let err = client(allowed(&[])).head(format!("http://localhost:{port}/")).send().await.unwrap_err();
+        assert!(format!("{err:?}").contains("address forbidden"), "{err:?}");
+        let ok = client(allowed(&["127.0.0.0/8"])).head(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
+        assert_eq!(ok.status(), 302);
+        let ok = client(allowed(&["localhost"])).head(format!("http://localhost:{port}/")).send().await.unwrap();
+        assert_eq!(ok.status(), 302);
+    }
 
     #[test]
     fn hash_matches_go() {

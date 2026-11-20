@@ -607,9 +607,16 @@ async fn redirect_location(St(app): St<State>, _: Auth, Query(q): Q) -> ApiResul
     let location = match hit {
         Some((at, l)) if at.elapsed() < Duration::from_secs(3600) => l,
         _ => {
-            let l = match app.no_redirect_client().head(&url).send().await {
-                Ok(r) => r.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("").to_string(),
-                Err(_) => String::new(),
+            // An internal address is a failure like any other (Go's dialer refuses it): "" for an hour. The client
+            // refuses it at connect time too; this spares the attempt.
+            let internal = reqwest::Url::parse(&url).is_ok_and(|u| !app.untrusted_url_allowed(&u));
+            let l = if internal {
+                String::new()
+            } else {
+                match app.no_redirect_client().head(&url).send().await {
+                    Ok(r) => r.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("").to_string(),
+                    Err(_) => String::new(),
+                }
             };
             let mut c = CACHE.lock().unwrap();
             let c = c.get_or_insert_with(HashMap::new);
