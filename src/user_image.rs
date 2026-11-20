@@ -214,6 +214,7 @@ async fn set_image(
     if let Ok(old) = app.files.read(&path).await
         && old.as_ref() == out.as_slice()
     {
+        crate::audit::log(&app, Some(&s), "").await;
         return Ok(ok());
     }
     app.files
@@ -223,6 +224,7 @@ async fn set_image(
     let now = now_ms();
     sqlx::query("UPDATE Users SET LastPictureUpdate = $1, UpdateAt = $1 WHERE Id = $2").bind(now).bind(&u.id).execute(&app.db).await?;
     app.publish_user_updated(&u.id).await;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -297,6 +299,7 @@ async fn set_default(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<Stri
         });
         app.hub.publish("user_updated", serde_json::json!({ "user": u }), crate::hub::Broadcast::default());
     }
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 

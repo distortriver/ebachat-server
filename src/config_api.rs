@@ -57,6 +57,7 @@ impl App {
 
     /// The config listener: when the settings changed, every client gets the new client config.
     pub async fn config_changed(&self, old: &Value, new: &Value) {
+        crate::logs::configure(new);
         let strip = |v: &Value| {
             let mut v = v.clone();
             if let Some(m) = v.as_object_mut() {
@@ -278,6 +279,7 @@ async fn update_config(St(app): St<State>, Auth(s): Auth, body: axum::body::Byte
     message_export(&mut new, app_cfg);
     crate::config_valid::is_valid(&new)?;
     let (old, new) = app.cfg.save(new).await?;
+    crate::audit::log(&app, Some(&s), "updateConfig").await;
     Ok(saved(&app, &access, old, new).await)
 }
 

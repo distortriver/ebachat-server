@@ -228,10 +228,12 @@ impl App {
     /// The hook and the checks the read, delete and regenerate routes share.
     async fn own_hook(&self, s: &Session, id: &str) -> ApiResult<OutgoingWebhook> {
         let h = self.outgoing_webhook(id).await?;
+        crate::audit::log(self, Some(s), "attempt").await;
         if !self.has_team_perm(s, &h.team_id, MANAGE_OWN).await {
             return Err(AppError::forbidden_perm(MANAGE_OWN));
         }
         if s.user_id != h.creator_id && !self.has_team_perm(s, &h.team_id, MANAGE_OTHERS).await {
+            crate::audit::log(self, Some(s), "fail - inappropriate permissions").await;
             return Err(AppError::forbidden_perm(MANAGE_OTHERS));
         }
         Ok(h)
@@ -245,6 +247,7 @@ fn require_hook_id(id: &str) -> ApiResult<()> {
 /// `createOutgoingHook`.
 async fn create_hook(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
     let mut h: OutgoingWebhook = decode(&body, "outgoing_webhook")?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     if !app.has_team_perm(&s, &h.team_id, MANAGE_OWN).await {
         return Err(AppError::forbidden_perm(MANAGE_OWN));
     }
@@ -252,13 +255,30 @@ async fn create_hook(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResul
         h.creator_id = s.user_id.clone();
     } else {
         if !app.has_team_perm(&s, &h.team_id, MANAGE_OTHERS).await {
+            crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
             return Err(AppError::forbidden_perm(MANAGE_OTHERS));
         }
         let user = app.user(&h.creator_id).await?.ok_or_else(crate::users::missing_account)?;
         let channel = if h.channel_id.is_empty() { None } else { Some(app.get_channel(&h.channel_id).await?) };
-        app.validate_hook_user(&s, &user, &h.team_id, channel.as_deref()).await?;
+        if let Err(e) = app.validate_hook_user(&s, &user, &h.team_id, channel.as_deref()).await {
+            crate::audit::log(&app, Some(&s), "fail - invalid webhook user").await;
+            return Err(e);
+        }
     }
-    // CreateOutgoingWebhook
+    match create_outgoing(&app, h).await {
+        Ok(h) => {
+            crate::audit::log(&app, Some(&s), "success").await;
+            Ok((StatusCode::CREATED, Json(h)).into_response())
+        }
+        Err(e) => {
+            crate::audit::log(&app, Some(&s), "fail").await;
+            Err(e)
+        }
+    }
+}
+
+/// `CreateOutgoingWebhook`.
+async fn create_outgoing(app: &App, mut h: OutgoingWebhook) -> ApiResult<OutgoingWebhook> {
     app.outgoing_on()?;
     if !h.channel_id.is_empty() {
         let c: Option<Channel> = db::get(&app.db, &h.channel_id).await?;
@@ -284,7 +304,7 @@ async fn create_hook(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResul
     h.update_at = h.create_at;
     h.validate()?;
     db::insert(&app.db, &h).await.map_err(|e| AppError::internal("app.webhooks.save_outgoing.app_error", e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(h)).into_response())
+    Ok(h)
 }
 
 /// `getOutgoingHooks`: of a channel, a team, or everywhere; only the session's own without `manage_others`.
@@ -343,6 +363,7 @@ async fn update_hook(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, 
     if h.id != id {
         return Err(AppError::invalid_param("hook_id"));
     }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let old = app.outgoing_webhook(&id).await?;
     if h.team_id.is_empty() {
         h.team_id = old.team_id.clone();
@@ -354,12 +375,16 @@ async fn update_hook(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, 
         return Err(AppError::forbidden_perm(MANAGE_OWN));
     }
     if s.user_id != old.creator_id && !app.has_team_perm(&s, &h.team_id, MANAGE_OTHERS).await {
+        crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
         return Err(AppError::forbidden_perm(MANAGE_OTHERS));
     }
     if !h.channel_id.is_empty() && h.channel_id != old.channel_id {
         let c = app.get_channel(&h.channel_id).await?;
         let user = app.user(&old.creator_id).await?.ok_or_else(crate::users::missing_account)?;
-        app.validate_hook_user(&s, &user, &h.team_id, Some(&c)).await?;
+        if let Err(e) = app.validate_hook_user(&s, &user, &h.team_id, Some(&c)).await {
+            crate::audit::log(&app, Some(&s), "fail - invalid webhook user").await;
+            return Err(e);
+        }
     }
     // UpdateOutgoingWebhook
     app.outgoing_on()?;
@@ -380,6 +405,7 @@ async fn update_hook(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, 
     h.delete_at = old.delete_at;
     h.team_id = old.team_id;
     app.update_outgoing_row(&mut h).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(h))
 }
 
@@ -389,20 +415,28 @@ async fn regen_token(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) 
     app.outgoing_on()?;
     h.token = new_id();
     app.update_outgoing_row(&mut h).await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(h))
 }
 
 async fn delete_hook(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     require_hook_id(&id)?;
     let h = app.own_hook(&s, &id).await?;
-    app.outgoing_on()?;
-    let now = now_ms();
-    sqlx::query("UPDATE OutgoingWebhooks SET DeleteAt = $1, UpdateAt = $1 WHERE Id = $2")
-        .bind(now)
-        .bind(&h.id)
-        .execute(&app.db)
-        .await
-        .map_err(|e| AppError::internal("app.webhooks.delete_outgoing.app_error", e.to_string()))?;
+    let deleted = match app.outgoing_on() {
+        Err(e) => Err(e),
+        Ok(()) => sqlx::query("UPDATE OutgoingWebhooks SET DeleteAt = $1, UpdateAt = $1 WHERE Id = $2")
+            .bind(now_ms())
+            .bind(&h.id)
+            .execute(&app.db)
+            .await
+            .map(|_| ())
+            .map_err(|e| AppError::internal("app.webhooks.delete_outgoing.app_error", e.to_string())),
+    };
+    if let Err(e) = deleted {
+        crate::audit::log(&app, Some(&s), "fail").await;
+        return Err(e);
+    }
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(json!({"status": "OK"})))
 }
 

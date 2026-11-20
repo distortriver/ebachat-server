@@ -176,13 +176,21 @@ impl App {
     }
 
     /// The checks every command route but create shares: the command, `manage_own` in its team (a 404 without
-    /// it), and `manage_others` for someone else's.
+    /// it), and `manage_others` for someone else's. The routes that answer a permission error (all but the read)
+    /// write Go's audit row for a refusal.
     async fn own_command(&self, s: &crate::model::Session, id: &str, others_404: bool) -> ApiResult<Command> {
         let c = self.command(id).await.map_err(|_| not_found())?;
+        let audit = !others_404;
         if !self.has_team_perm(s, &c.team_id, MANAGE_OWN).await {
+            if audit {
+                crate::audit::log(self, Some(s), "fail - inappropriate permissions").await;
+            }
             return Err(not_found());
         }
         if s.user_id != c.creator_id && !self.has_team_perm(s, &c.team_id, MANAGE_OTHERS).await {
+            if audit {
+                crate::audit::log(self, Some(s), "fail - inappropriate permissions").await;
+            }
             return Err(if others_404 { not_found() } else { AppError::forbidden_perm(MANAGE_OTHERS) });
         }
         Ok(c)
@@ -196,12 +204,14 @@ fn require_command_id(id: &str) -> ApiResult<()> {
 /// `createCommand`: owned by the session's user, or by another with `manage_others_slash_commands`.
 async fn create_command(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Response> {
     let mut c: Command = decode(&body, "command")?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     if !app.has_team_perm(&s, &c.team_id, MANAGE_OWN).await {
         return Err(AppError::forbidden_perm(MANAGE_OWN));
     }
     let mut creator = s.user_id.clone();
     if !c.creator_id.is_empty() && c.creator_id != s.user_id {
         if !app.has_team_perm(&s, &c.team_id, MANAGE_OTHERS).await {
+            crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
             return Err(AppError::forbidden_perm(MANAGE_OTHERS));
         }
         app.user(&c.creator_id).await?.ok_or_else(crate::users::missing_account)?;
@@ -223,6 +233,7 @@ async fn create_command(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiRe
     c.update_at = c.create_at;
     command_is_valid(&c)?;
     db::insert(&app.db, &c).await.map_err(|e| AppError::internal("app.command.createcommand.internal_error", e.to_string()))?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
@@ -242,6 +253,7 @@ async fn update_command(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
     if c.id != id {
         return Err(AppError::invalid_param("command"));
     }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let old = app.command(&id).await.map_err(|_| not_found())?;
     if c.team_id != old.team_id {
         return Err(bad("api.command.team_mismatch.app_error").detail(format!("user_id={}", s.user_id)));
@@ -257,6 +269,7 @@ async fn update_command(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
     c.team_id = old.team_id;
     app.check_trigger_unique(&c.team_id, &c.trigger, &c.id).await?;
     app.update_command_row(&mut c, "app.command.updatecommand.internal_error").await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(c))
 }
 
@@ -270,23 +283,28 @@ struct MoveRequest {
 async fn move_command(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
     require_command_id(&id)?;
     let m: MoveRequest = decode(&body, "team_id")?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let team = app.team(&m.team_id).await?;
     if !app.has_team_perm(&s, &team.id, MANAGE_OWN).await {
+        crate::audit::log(&app, Some(&s), "fail - inappropriate permissions").await;
         return Err(AppError::forbidden_perm(MANAGE_OWN));
     }
     let mut c = app.own_command(&s, &id, false).await?;
     if !app.user_team_perm(&c.creator_id, &team.id, MANAGE_OWN).await {
+        crate::audit::log(&app, Some(&s), "fail - command creator does not have permission to new team").await;
         return Err(bad("api.command.move_command.creator_no_permission.app_error")
             .detail(format!("creator_id={} team_id={}", c.creator_id, team.id)));
     }
     app.check_trigger_unique(&team.id, &c.trigger, &c.id).await?;
     c.team_id = team.id.clone();
     app.update_command_row(&mut c, "app.command.movecommand.internal_error").await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(json!({"status": "OK"})))
 }
 
 async fn delete_command(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     require_command_id(&id)?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let c = app.own_command(&s, &id, false).await?;
     app.commands_on()?;
     let now = now_ms();
@@ -296,14 +314,17 @@ async fn delete_command(St(app): St<State>, Auth(s): Auth, Path(id): Path<String
         .execute(&app.db)
         .await
         .map_err(|e| AppError::internal("app.command.deletecommand.internal_error", e.to_string()))?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(json!({"status": "OK"})))
 }
 
 async fn regen_token(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     require_command_id(&id)?;
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let mut c = app.own_command(&s, &id, false).await?;
     app.commands_on()?;
     c.token = new_id();
     app.update_command_row(&mut c, "app.command.regencommandtoken.internal_error").await?;
+    crate::audit::log(&app, Some(&s), "success").await;
     Ok(Json(json!({"token": c.token})))
 }

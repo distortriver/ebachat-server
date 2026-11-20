@@ -149,6 +149,7 @@ async fn revoke_session(
     }
     app.revoke_session(&found).await?;
     app.clear_sessions_for_user(&found.user_id);
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -159,6 +160,7 @@ async fn revoke_all_for_user(St(app): St<State>, Auth(s): Auth, Path(user_id): P
         return Err(AppError::forbidden_perm(EDIT_OTHER_USERS));
     }
     app.revoke_all_sessions(&user_id).await?;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -178,6 +180,7 @@ async fn revoke_all_users(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<V
     for (t,) in tokens {
         app.hub.close_session(&t);
     }
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
 }
 
@@ -276,7 +279,9 @@ async fn update_user(
     if !user.email.is_empty() && old.email != user.email && s.user_id == user_id {
         app.double_check_password(&old, &user.password).await.map_err(|_| AppError::invalid_param("password"))?;
     }
-    Ok(Json(app.update_user(user, true, false).await?))
+    let r = app.update_user(user, true, false).await?;
+    crate::audit::log(&app, Some(&s), "").await;
+    Ok(Json(r))
 }
 
 #[derive(Deserialize, Default)]
@@ -524,6 +529,7 @@ async fn update_roles(
         e
     })?;
     app.update_user_roles(user, &roles, true).await?;
+    crate::audit::log(&app, Some(&s), &format!("user={user_id} roles={roles}")).await;
     Ok(ok())
 }
 
@@ -566,7 +572,9 @@ async fn update_active(
             "",
         ));
     }
+    let uid = user.id.clone();
     app.update_active(user, active).await?;
+    crate::audit::log(&app, Some(&s), &format!("user_id={uid} active={active}")).await;
     app.hub.publish("user_activation_status_change", json!({}), Broadcast::default());
     Ok(ok())
 }
@@ -640,6 +648,7 @@ async fn update_auth(
         ua.auth_service.clear();
     }
     app.update_user_auth(&user_id, &ua.auth_service, ua.auth_data.as_deref()).await?;
+    crate::audit::log(&app, Some(&s), &format!("updated user {user_id} auth to service={}", ua.auth_service)).await;
     Ok(Json(ua))
 }
 
@@ -661,12 +670,13 @@ async fn update_mfa(
     let Some(activate) = props.get("activate").and_then(Value::as_bool) else {
         return Err(AppError::invalid_param("activate"));
     };
+    let code = props.get("code").and_then(Value::as_str).unwrap_or("");
+    if activate && code.is_empty() {
+        return Err(AppError::invalid_param("code"));
+    }
+    crate::audit::log(&app, Some(&s), "attempt").await;
     let user = get_user(&app, &user_id).await?;
     if activate {
-        let code = props.get("code").and_then(Value::as_str).unwrap_or("");
-        if code.is_empty() {
-            return Err(AppError::invalid_param("code"));
-        }
         // ActivateMfa
         if !user.auth_service.is_empty() && user.auth_service != "ldap" {
             return Err(AppError::bad_request("api.user.activate_mfa.email_and_ldap_only.app_error", ""));
@@ -695,6 +705,7 @@ async fn update_mfa(
             .map_err(|e| AppError::internal("mfa.deactivate.app_error", e.to_string()))?;
     }
     app.invalidate_user(&user_id);
+    crate::audit::log(&app, Some(&s), "success - mfa updated").await;
     Ok(ok())
 }
 
@@ -813,7 +824,23 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
         return Err(AppError::invalid_param("token"));
     }
     let new_password = props.remove("new_password").unwrap_or_default();
-    let t = token_row(&app, &token)
+    let prefix = &token[..5];
+    crate::audit::log(&app, None, &format!("attempt - token_prefix={prefix}")).await;
+    match reset_password_from_token(&app, &token, &new_password).await {
+        Ok(()) => {
+            crate::audit::log(&app, None, &format!("success - token_prefix={prefix}")).await;
+            Ok(ok())
+        }
+        Err(e) => {
+            crate::audit::log(&app, None, &format!("fail - token_prefix={prefix}")).await;
+            Err(e)
+        }
+    }
+}
+
+/// `ResetPasswordFromToken`.
+async fn reset_password_from_token(app: &App, token: &str, new_password: &str) -> ApiResult<()> {
+    let t = token_row(app, token)
         .await?
         .ok_or_else(|| AppError::bad_request("api.user.reset_password.invalid_link.app_error", ""))?;
     if t.r#type != "password_recovery" {
@@ -824,7 +851,7 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
     }
     let extra: TokenExtra = serde_json::from_str(&t.extra)
         .map_err(|_| AppError::internal("api.user.reset_password.token_parse.error", ""))?;
-    let user = get_user(&app, &extra.user_id).await?;
+    let user = get_user(app, &extra.user_id).await?;
     if user.email != extra.email {
         return Err(AppError::bad_request("api.user.reset_password.link_expired.app_error", ""));
     }
@@ -837,9 +864,9 @@ async fn reset_password(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value
     if user.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
         return Err(AppError::bad_request("api.user.reset_password.broken_token.app_error", ""));
     }
-    app.set_password(&user, &new_password, None).await?;
-    delete_token(&app, &t.token).await;
-    Ok(ok())
+    app.set_password(&user, new_password, None).await?;
+    delete_token(app, &t.token).await;
+    Ok(())
 }
 
 /// `verifyUserEmail` (`VerifyEmailFromToken`): any failure is a bad link.
@@ -858,6 +885,7 @@ async fn verify_email(St(app): St<State>, body: Bytes) -> ApiResult<Json<Value>>
     get_user(&app, &extra.user_id).await.map_err(|_| bad())?;
     app.verify_user_email(&extra.user_id, &extra.email.to_lowercase()).await.map_err(|_| bad())?;
     delete_token(&app, &t.token).await;
+    crate::audit::log(&app, None, "Email Verified").await;
     Ok(ok())
 }
 
@@ -884,6 +912,7 @@ async fn verify_member(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<St
     let user = get_user(&app, &user_id).await?;
     app.require(&s, MANAGE_SYSTEM).await?;
     app.verify_user_email(&user.id, &user.email).await?;
+    crate::audit::log(&app, Some(&s), "user verified").await;
     let mut u = user;
     u.sanitize_profile(app.show(&s).await);
     Ok(Json(u))
@@ -1079,6 +1108,7 @@ async fn save_user_terms(
             .await
             .map_err(|e| AppError::internal("app.user_terms_of_service.delete.app_error", e.to_string()))?;
     }
+    crate::audit::log(&app, Some(&s), &format!("TermsOfServiceId={terms_id}, accepted={accepted}")).await;
     Ok(ok())
 }
 
@@ -1417,6 +1447,7 @@ async fn switch_account(St(app): St<State>, MaybeAuth(s): MaybeAuth, body: Bytes
             return Err(AppError::bad_request("api.user.oauth_to_email.not_oauth_user.app_error", ""));
         }
         app.set_password(&user, &r.password, None).await?;
+        crate::audit::log(&app, Some(&s), "success").await;
         return Ok(Json(json!({"follow_link": "/login?extra=signin_change"})));
     }
     if ldap_to_email {

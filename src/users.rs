@@ -326,15 +326,44 @@ fn login_error(app: &App, e: AppError) -> AppError {
     AppError::new(StatusCode::UNAUTHORIZED, id, "Enter a valid email or username and/or password.")
 }
 
-async fn login(St(app): St<State>, headers: HeaderMap, Body(b): Body<LoginBody>) -> Response {
-    match do_login(&app, &headers, b).await {
+async fn login(
+    St(app): St<State>,
+    crate::app::MaybeAuth(cur): crate::app::MaybeAuth,
+    headers: HeaderMap,
+    Body(b): Body<LoginBody>,
+) -> Response {
+    match do_login(&app, cur.as_deref(), &headers, b).await {
         Ok(r) => r,
         Err(e) => login_error(&app, e).into_response(),
     }
 }
 
-/// `AuthenticateUserForLogin` + `DoLogin` for email/username and password.
-async fn do_login(app: &State, headers: &HeaderMap, b: LoginBody) -> ApiResult<Response> {
+/// `login`: `AuthenticateUserForLogin`, then `DoLogin`, with Go's audit rows.
+async fn do_login(app: &State, cur: Option<&Session>, headers: &HeaderMap, b: LoginBody) -> ApiResult<Response> {
+    crate::audit::log_user(app, cur, &b.id, &format!("attempt - login_id={}", b.login_id)).await;
+    let user = match authenticate(app, &b).await {
+        Ok(u) => u,
+        Err(e) => {
+            crate::audit::log_user(app, cur, &b.id, &format!("failure - login_id={}", b.login_id)).await;
+            return Err(e);
+        }
+    };
+    let unauthorized = |id: &str, m: &str| AppError::new(StatusCode::UNAUTHORIZED, id, m);
+    // Guests need a license; remote users cannot log in here.
+    if user.is_guest() {
+        return Err(unauthorized("api.user.login.guest_accounts.license.error", "Guest accounts are disabled by the current license."));
+    }
+    if user.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
+        return Err(unauthorized("api.user.login.remote_users.login.error", "Login failed because remote users are not allow to log in."));
+    }
+    crate::audit::log_user(app, cur, &user.id, "authenticated").await;
+    let (r, s) = start_session(app, headers, &b, user).await?;
+    crate::audit::log_user(app, Some(&s), &s.user_id, "success").await;
+    Ok(r)
+}
+
+/// `AuthenticateUserForLogin` for email/username and password.
+async fn authenticate(app: &State, b: &LoginBody) -> ApiResult<User> {
     if b.password.is_empty() {
         return Err(AppError::bad_request("api.user.login.blank_pwd.app_error", "Password field must not be blank"));
     }
@@ -416,8 +445,11 @@ async fn do_login(app: &State, headers: &HeaderMap, b: LoginBody) -> ApiResult<R
     if !user.email_verified && app.cfg.bool("EmailSettings.RequireEmailVerification") {
         return Err(unauthorized("api.user.login.not_verified.app_error", "Login failed because email address has not been verified."));
     }
+    Ok(user)
+}
 
-    // DoLogin
+/// `DoLogin`: the session, its cookies, and the user as the answer.
+async fn start_session(app: &State, headers: &HeaderMap, b: &LoginBody, user: User) -> ApiResult<(Response, Session)> {
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
     let mobile = !b.device_id.is_empty() || crate::user_agent::is_mobile(ua);
     let mut s = Session { user_id: user.id.clone(), roles: user.roles.clone(), device_id: b.device_id.clone(), ..Default::default() };
@@ -460,7 +492,7 @@ async fn do_login(app: &State, headers: &HeaderMap, b: LoginBody) -> ApiResult<R
     let h = r.headers_mut();
     h.insert("Token", HeaderValue::from_str(&s.token).unwrap());
     attach_cookies(app, h, &s, headers);
-    Ok(r)
+    Ok((r, s))
 }
 
 /// `AttachSessionCookies`.
@@ -513,8 +545,13 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-async fn logout(St(app): St<State>, Auth(s): Auth) -> Response {
-    let _ = app.revoke_session(&s).await;
+async fn logout(St(app): St<State>, crate::app::MaybeAuth(s): crate::app::MaybeAuth) -> Response {
+    crate::audit::log(&app, s.as_deref(), "").await;
+    if let Some(s) = &s
+        && let Err(e) = app.revoke_session(s).await
+    {
+        return e.into_response();
+    }
     let mut r = Json(json!({"status": "OK"})).into_response();
     for name in ["MMAUTHTOKEN", "MMUSERID", "MMCSRF"] {
         let c = format!("{name}=; Path=/; Max-Age=0");

@@ -112,7 +112,6 @@ POST   /api/v4/ldap/test_connection |  | 501 api.ldap_groups.license_error | you
 POST   /api/v4/ldap/test_diagnostics |  | 501 api.ldap_groups.license_error | your license does not support ldap groups
 POST   /api/v4/ldap/users/{user_id}/group_sync_memberships | perm:sysconsole_write_user_management_groups | 404 app.user.missing_account.const | Unable to find the user.
 GET    /api/v4/llmservices |  | json []
-GET    /api/v4/logs/download | rperm:get_logs | 500 api.system.logs.download_bytes_buffer.app_error | Failed to write logs to buffer
 GET    /api/v4/oauth/outgoing_connections | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
 POST   /api/v4/oauth/outgoing_connections | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
 POST   /api/v4/oauth/outgoing_connections/validate | perm:manage_outgoing_oauth_connections off:ServiceSettings.EnableOutgoingOAuthConnections:501:api.context.outgoing_oauth_connection.not_available.configuration_disabled | 501 api.license.upgrade_needed.app_error
@@ -185,4 +184,3 @@ POST   /api/v4/jobs/{job_id}/cancel | id:job_id | 404 app.job.get.app_error | Un
 GET    /api/v4/jobs/{job_id}/download | id:job_id off:MessageExportSettings.DownloadExportResults:501:app.job.download_export_results_not_enabled | 404 app.job.get.app_error | Unable to get the job.
 PATCH  /api/v4/jobs/{job_id}/status | id:job_id prop:status:status | 404 app.job.get.app_error | Unable to get the job.
 POST   /api/v4/trial-license | rperm:manage_license_information | 403 api.license.upgrade_needed.app_error
-DELETE /api/v4/license | rperm:manage_license_information | ok

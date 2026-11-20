@@ -224,6 +224,7 @@ async fn create(
     if t.description.is_empty() {
         return Err(AppError::invalid_param("description"));
     }
+    crate::audit::log(&app, Some(&s), "").await;
     app.require(&s, CREATE).await?;
     if !user_or_bot_perm(&app, &s, &user_id).await? {
         return Err(AppError::forbidden_perm(crate::perm::EDIT_OTHER_USERS));
@@ -231,7 +232,9 @@ async fn create(
     if user.is_system_admin() {
         app.require(&s, MANAGE_SYSTEM).await?;
     }
-    Ok(Json(app.create_access_token(&user_id, &t.description, t.expires_at).await?))
+    let t = app.create_access_token(&user_id, &t.description, t.expires_at).await?;
+    crate::audit::log(&app, Some(&s), &format!("success - token_id={}", t.id)).await;
+    Ok(Json(t))
 }
 
 type Q = Query<HashMap<String, String>>;
@@ -361,6 +364,8 @@ async fn get_one(St(app): St<State>, Auth(s): Auth, Path(token_id): Path<String>
 /// after a missing `token_id` (and answers with a later error); this answers the missing parameter.
 async fn managed_token(app: &App, s: &Session, body: &[u8], perm: &str) -> ApiResult<UserAccessToken> {
     let token_id = map_from_json(body).remove("token_id").unwrap_or_default();
+    // Go logs its audit row even for a missing `token_id`, then carries on.
+    crate::audit::log(app, Some(s), "").await;
     if token_id.is_empty() {
         return Err(AppError::invalid_param("token_id"));
     }
@@ -379,6 +384,7 @@ async fn managed_token(app: &App, s: &Session, body: &[u8], perm: &str) -> ApiRe
 async fn revoke(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Json<Value>> {
     let t = managed_token(&app, &s, &body, REVOKE).await?;
     app.revoke_access_token(&t).await?;
+    crate::audit::log(&app, Some(&s), &format!("success - token_id={}", t.id)).await;
     Ok(ok())
 }
 
@@ -395,6 +401,7 @@ async fn disable(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Js
         .await
         .map_err(|e| AppError::internal("app.user_access_token.update_token_disable.app_error", e.to_string()))?;
     app.forget_token_session(&t);
+    crate::audit::log(&app, Some(&s), &format!("success - token_id={}", t.id)).await;
     Ok(ok())
 }
 
@@ -406,6 +413,7 @@ async fn enable(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Jso
         .execute(&app.db)
         .await
         .map_err(|e| AppError::internal("app.user_access_token.update_token_enable.app_error", e.to_string()))?;
+    crate::audit::log(&app, Some(&s), &format!("success - token_id={}", t.id)).await;
     Ok(ok())
 }
 
@@ -422,6 +430,7 @@ async fn rotate(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Jso
     if b.token_id.is_empty() {
         return Err(AppError::invalid_param("token_id"));
     }
+    crate::audit::log(&app, Some(&s), "").await;
     if s.is_oauth {
         return Err(oauth_denied(CREATE));
     }
@@ -460,6 +469,7 @@ async fn rotate(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResult<Jso
     app.forget_token_session(&t);
     t.token = secret;
     t.expires_at = b.expires_at;
+    crate::audit::log(&app, Some(&s), &format!("success - token_id={}", t.id)).await;
     Ok(Json(t))
 }
 

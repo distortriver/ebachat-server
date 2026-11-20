@@ -514,6 +514,7 @@ async fn patch_team(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<Strin
     app.update_team_row(&mut team).await?;
     app.send_team_event(&team, "update_team");
     app.sanitize_team(&s, &mut team).await;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(Json(team))
 }
 
@@ -563,6 +564,7 @@ async fn regenerate_invite_id(St(app): St<State>, Auth(s): Auth, Path(team_id): 
     app.update_team_row(&mut team).await?;
     app.send_team_event(&team, "update_team");
     app.sanitize_team(&s, &mut team).await;
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(Json(team))
 }
 
@@ -672,6 +674,7 @@ async fn set_icon(
     let mut team = (*team).clone();
     team.last_team_icon_update = now;
     app.send_team_event(&team, "update_team");
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(status_ok())
 }
 
@@ -692,6 +695,7 @@ async fn remove_icon(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<Stri
     let mut team = (*team).clone();
     team.last_team_icon_update = 0;
     app.send_team_event(&team, "update_team");
+    crate::audit::log(&app, Some(&s), "").await;
     Ok(status_ok())
 }
 
