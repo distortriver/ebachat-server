@@ -2830,26 +2830,21 @@ struct TypingBody {
     parent_id: String,
 }
 
-/// `publishUserTyping` (REST).
+/// `publishUserTyping` (REST): another user's typing only for system admins, and the user (not the session) must
+/// be able to post in the channel.
 async fn user_typing(
     St(app): St<State>,
     Auth(s): Auth,
     Path(user_id): Path<String>,
-    Body(b): Body<TypingBody>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
-    let user_id = s.resolve(&user_id);
-    if !is_valid_id(&user_id) {
-        return Err(AppError::invalid_url_param("user_id"));
+    let user_id = crate::preferences::user_param(&s, &user_id)?;
+    let b: TypingBody = crate::app::decode_json(&body, "typing_request")?;
+    if user_id != s.user_id && !app.has_perm(&s, perm::MANAGE_SYSTEM).await {
+        return Err(AppError::forbidden_perm(perm::MANAGE_SYSTEM));
     }
-    if !is_valid_id(&b.channel_id) {
-        return Err(AppError::invalid_param("channel_id"));
-    }
-    app.require_user(&s, &user_id).await?;
-    if !app.channel_perm(&s, &b.channel_id, perm::CREATE_POST).await?.0 {
+    if !app.user_channel_perm(&user_id, &b.channel_id, perm::CREATE_POST).await.0 {
         return Err(AppError::forbidden_perm(perm::CREATE_POST));
-    }
-    if !app.cfg.bool("ServiceSettings.EnableUserTypingMessages") {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.system.typing.disabled", "Typing messages are disabled."));
     }
     crate::hub::publish_typing(&app, &user_id, &b.channel_id, &b.parent_id);
     Ok(ok())

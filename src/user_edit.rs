@@ -55,7 +55,7 @@ pub fn valid_username(s: &str) -> bool {
 }
 
 /// `IsValidEmail`: lower case, one plain address.
-fn valid_email(s: &str) -> bool {
+pub fn valid_email(s: &str) -> bool {
     if s.chars().any(|c| c.is_uppercase() || c.is_whitespace() || c == '<' || c == '>') {
         return false;
     }
@@ -64,7 +64,7 @@ fn valid_email(s: &str) -> bool {
 }
 
 /// `User.IsValid` for the fields this server writes.
-fn check_user(u: &User) -> ApiResult<()> {
+pub fn check_user(u: &User) -> ApiResult<()> {
     if !is_valid_id(&u.id) {
         return Err(invalid_user("id"));
     }
@@ -103,7 +103,7 @@ fn check_user(u: &User) -> ApiResult<()> {
 }
 
 /// `SanitizeUnicode`: no bidi controls or zero-width characters.
-fn sanitize_unicode(s: &str) -> String {
+pub fn sanitize_unicode(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF))
         .collect()
@@ -158,7 +158,7 @@ fn pre_update(u: &mut User) {
 }
 
 /// `CheckEmailDomain`: one of the space-separated domains, or any when none.
-fn email_domain_ok(email: &str, domains: &str) -> bool {
+pub fn email_domain_ok(email: &str, domains: &str) -> bool {
     let d: Vec<String> = domains.to_lowercase().replace(['@', ','], " ").split_whitespace().map(str::to_string).collect();
     d.is_empty() || d.iter().any(|d| email.to_lowercase().ends_with(&format!("@{d}")))
 }
@@ -403,18 +403,54 @@ impl App {
 /// `model.UserPatch`: absent fields stay as they are.
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct UserPatch {
-    username: Option<String>,
-    password: Option<String>,
-    nickname: Option<String>,
-    first_name: Option<String>,
-    last_name: Option<String>,
-    position: Option<String>,
-    email: Option<String>,
-    props: Option<BTreeMap<String, String>>,
-    notify_props: Option<BTreeMap<String, String>>,
-    locale: Option<String>,
-    timezone: Option<BTreeMap<String, String>>,
+pub struct UserPatch {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub nickname: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub position: Option<String>,
+    pub email: Option<String>,
+    pub props: Option<BTreeMap<String, String>>,
+    pub notify_props: Option<BTreeMap<String, String>>,
+    pub locale: Option<String>,
+    pub timezone: Option<BTreeMap<String, String>>,
+}
+
+impl UserPatch {
+    /// `User.Patch` (the password is not a profile field).
+    pub fn apply(self, u: &mut User) {
+        if let Some(v) = self.username {
+            u.username = v;
+        }
+        if let Some(v) = self.nickname {
+            u.nickname = v;
+        }
+        if let Some(v) = self.first_name {
+            u.first_name = v;
+        }
+        if let Some(v) = self.last_name {
+            u.last_name = v;
+        }
+        if let Some(v) = self.position {
+            u.position = v;
+        }
+        if let Some(v) = self.email {
+            u.email = v;
+        }
+        if let Some(v) = self.props {
+            u.props.0 = v;
+        }
+        if let Some(v) = self.notify_props {
+            u.notify_props.0 = v;
+        }
+        if let Some(v) = self.locale {
+            u.locale = v;
+        }
+        if let Some(v) = self.timezone {
+            u.timezone.0 = v;
+        }
+    }
 }
 
 /// `patchUser`.
@@ -443,36 +479,7 @@ async fn patch_user(
         app.double_check_password(&old, p).await?;
     }
     let mut u = (*old).clone();
-    if let Some(v) = patch.username {
-        u.username = v;
-    }
-    if let Some(v) = patch.nickname {
-        u.nickname = v;
-    }
-    if let Some(v) = patch.first_name {
-        u.first_name = v;
-    }
-    if let Some(v) = patch.last_name {
-        u.last_name = v;
-    }
-    if let Some(v) = patch.position {
-        u.position = v;
-    }
-    if let Some(v) = patch.email {
-        u.email = v;
-    }
-    if let Some(v) = patch.props {
-        u.props.0 = v;
-    }
-    if let Some(v) = patch.notify_props {
-        u.notify_props.0 = v;
-    }
-    if let Some(v) = patch.locale {
-        u.locale = v;
-    }
-    if let Some(v) = patch.timezone {
-        u.timezone.0 = v;
-    }
+    patch.apply(&mut u);
     let mut r = app.update_user(u, true, false).await?;
     // The API answers with the profile as the caller may see it.
     if r.id != s.user_id {
@@ -482,7 +489,7 @@ async fn patch_user(
 }
 
 /// `SessionHasPermissionToUserOrBot`: one's own bots too.
-async fn user_or_bot_perm(app: &App, s: &Session, user_id: &str) -> ApiResult<bool> {
+pub async fn user_or_bot_perm(app: &App, s: &Session, user_id: &str) -> ApiResult<bool> {
     let owner: Option<(String,)> = sqlx::query_as("SELECT COALESCE(OwnerId, '') FROM Bots WHERE UserId = $1")
         .bind(user_id)
         .fetch_optional(&app.db)

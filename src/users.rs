@@ -167,17 +167,38 @@ async fn get_user(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> 
     one_user(&app, &s, u).await
 }
 
+/// A missing user under view restrictions is a permission error (`getUserByUsername`, `getUserByEmail`).
+async fn missing_or_restricted(app: &App, s: &Session, missing: AppError) -> AppError {
+    match app.restriction_cond(s).await {
+        Ok(Some(_)) => AppError::forbidden_perm(crate::perm::VIEW_MEMBERS),
+        Ok(None) => missing,
+        Err(e) => e,
+    }
+}
+
 async fn get_by_username(St(app): St<State>, Auth(s): Auth, Path(name): Path<String>) -> ApiResult<Json<User>> {
-    let u = load_user_by(&app, "u.username = $1", &name.to_lowercase()).await?.ok_or_else(missing_account)?;
+    if !crate::user_edit::valid_username(&name) {
+        return Err(AppError::invalid_param("username"));
+    }
+    let Some(u) = load_user_by(&app, "u.username = $1", &name).await? else {
+        let missing = AppError::not_found("app.user.get_by_username.app_error", "Unable to find an existing account matching your username for this team. This team may require an invite from the team owner to join.");
+        return Err(missing_or_restricted(&app, &s, missing).await);
+    };
     one_user(&app, &s, Arc::new(u)).await
 }
 
 async fn get_by_email(St(app): St<State>, Auth(s): Auth, Path(email): Path<String>) -> ApiResult<Json<User>> {
+    let email = email.to_lowercase();
+    if !crate::user_edit::valid_email(&email) {
+        return Err(AppError::invalid_url_param("email"));
+    }
     let show = app.show(&s).await;
     if !show.email {
         return Err(AppError::forbidden().with_id("api.user.get_user_by_email.permissions.app_error"));
     }
-    let u = load_user_by(&app, "u.email = $1", &email.to_lowercase()).await?.ok_or_else(missing_account)?;
+    let Some(u) = load_user_by(&app, "u.email = $1", &email).await? else {
+        return Err(missing_or_restricted(&app, &s, missing_account()).await);
+    };
     if !app.can_see_user(&s, &u.id).await? {
         return Err(AppError::forbidden_perm(crate::perm::VIEW_MEMBERS));
     }

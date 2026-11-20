@@ -482,13 +482,47 @@ impl Session {
 }
 
 /// A JSON request body read as Go reads it: whatever the `Content-Type`, a bad body is a 400 for `name`.
+/// A list of strings is read as `model.SortedArrayFromJSON`, which every such Go handler uses: `null` is an empty
+/// list, anything else unreadable (an empty body too) is `api.payload.parse.error`.
 pub struct Body<T>(pub T);
 
 impl<T: serde::de::DeserializeOwned> axum::extract::FromRequest<State> for Body<T> {
     type Rejection = AppError;
     async fn from_request(req: axum::extract::Request, state: &State) -> Result<Body<T>, AppError> {
         let bytes = axum::body::Bytes::from_request(req, state).await.map_err(|_| AppError::invalid_param("body"))?;
-        let b: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) { b"null" } else { &bytes };
-        serde_json::from_slice(b).map(Body).map_err(|e| AppError::invalid_param("body").detail(e.to_string()))
+        let blank = bytes.iter().all(u8::is_ascii_whitespace);
+        let b: &[u8] = if blank { b"null" } else { &bytes };
+        serde_json::from_slice(b).map(Body).or_else(|e| {
+            if serde_json::from_slice::<T>(br#"["a"]"#).is_err() {
+                return Err(AppError::invalid_param("body").detail(e.to_string()));
+            }
+            if !blank && serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v.is_null()) {
+                return serde_json::from_slice(b"[]").map(Body).map_err(|e| AppError::invalid_param("body").detail(e.to_string()));
+            }
+            Err(AppError::bad_request("api.payload.parse.error", "Error parsing the payload.").detail(e.to_string()))
+        })
     }
+}
+
+/// A body decoded as Go's `json.NewDecoder(r.Body).Decode(&v)` into a struct: the first JSON value only, `null`
+/// leaves the zero value, an empty or bad body is `SetInvalidParamWithErr(name)`.
+pub fn decode_json<T: serde::de::DeserializeOwned + Default>(b: &[u8], name: &str) -> ApiResult<T> {
+    let v = serde_json::Deserializer::from_slice(b)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .ok_or_else(|| AppError::invalid_param(name).detail("EOF"))?
+        .map_err(|e| AppError::invalid_param(name).detail(e.to_string()))?;
+    if v.is_null() {
+        return Ok(T::default());
+    }
+    serde_json::from_value(v).map_err(|e| AppError::invalid_param(name).detail(e.to_string()))
+}
+
+/// `model.MapFromJSON`: a JSON object of strings, anything else an empty map.
+pub fn map_from_json(b: &[u8]) -> std::collections::HashMap<String, String> {
+    serde_json::Deserializer::from_slice(b)
+        .into_iter::<std::collections::HashMap<String, String>>()
+        .next()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }

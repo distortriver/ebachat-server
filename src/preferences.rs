@@ -230,10 +230,12 @@ pub fn user_param(s: &Session, id: &str) -> ApiResult<String> {
     Ok(id)
 }
 
-async fn get_all(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Vec<Preference>>> {
+/// `getPreferences`: `null` for a user without preferences (the store's nil slice).
+async fn get_all(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<String>) -> ApiResult<Json<Option<Vec<Preference>>>> {
     let user_id = user_param(&s, &user_id)?;
     app.require_user(&s, &user_id).await?;
-    Ok(Json(app.preferences(&user_id).await?))
+    let p = app.preferences(&user_id).await?;
+    Ok(Json((!p.is_empty()).then_some(p)))
 }
 
 async fn get_category(
