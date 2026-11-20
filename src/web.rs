@@ -88,8 +88,11 @@ fn compressible(ct: &str) -> bool {
         || ct.contains("compressed"))
 }
 
+/// A file's compressed bytes, with the modification time they were made from.
+type Gz = (SystemTime, Arc<Vec<u8>>);
+
 #[derive(Default)]
-pub struct GzCache(Mutex<HashMap<PathBuf, (SystemTime, Arc<Vec<u8>>)>>);
+pub struct GzCache(Mutex<HashMap<PathBuf, Gz>>);
 
 impl GzCache {
     fn get(&self, path: &PathBuf, mtime: SystemTime, data: &[u8]) -> Arc<Vec<u8>> {
