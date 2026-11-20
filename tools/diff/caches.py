@@ -36,7 +36,8 @@ def j(v):
 class S:
     def __init__(self, base):
         self.base = base
-        self.rust = base.endswith("8066")
+        # The Rust server is the one with the counters route (any port).
+        self.rust = diff.call(base, None, "GET", "/ebachat/caches")[0] != 404
         self.admin = diff.login(base, "admin", "Admin-pass-123")
         self.fail = 0
         self.n = 0

@@ -1082,10 +1082,22 @@ mod tests {
         let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let n = accepted.clone();
         tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
             while let Ok((mut s, _)) = l.accept().await {
                 n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = s.write_all(b"HTTP/1.1 302 Found\r\nLocation: /x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                tokio::spawn(async move {
+                    // Read the request first: closing with it unread would reset the connection.
+                    let mut buf = vec![0u8; 4096];
+                    let mut got = vec![];
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(k) => got.extend_from_slice(&buf[..k]),
+                        }
+                    }
+                    let _ = s.write_all(b"HTTP/1.1 302 Found\r\nLocation: /x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    let _ = s.shutdown().await;
+                });
             }
         });
         let client = |a: Allowed| {

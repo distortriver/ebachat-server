@@ -226,6 +226,8 @@ are a risk for taking turns on one database: switch servers with a restart, neve
   per check.
 - **Properties:** see `docs/PROPERTIES.md`.
 - **Push and email:** `docs/NOTIFICATIONS.md`.
+- **Security review fixes** (SMTP injection and STARTTLS downgrade, SSRF at connect time and own addresses,
+  websocket origin, MFA lockout and replay, the public link salt): `docs/SECURITY.md`.
 - **Background jobs:** Go's job server, the Team Edition workers and schedulers, the recurring cleanups, content
   extraction, bulk export and bulk import (every JSONL line type, rows as Go writes them); see `docs/JOBS.md`.
 - **Left:**

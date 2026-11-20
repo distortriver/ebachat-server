@@ -1241,7 +1241,8 @@ mod tests {
     /// Expectations printed by Go 1.26's `mail.ParseAddressList` for the same inputs.
     #[test]
     fn parses_addresses_like_go() {
-        let cases: &[(&str, Result<&[(&str, &str)], &str>)] = &[
+        type Want = Result<&'static [(&'static str, &'static str)], &'static str>;
+        let cases: &[(&str, Want)] = &[
             ("a@b.com", Ok(&[("", "a@b.com")])),
             ("", Err("mail: no address")),
             ("  ", Err("mail: no address")),
