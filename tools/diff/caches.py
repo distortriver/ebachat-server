@@ -232,6 +232,7 @@ def main():
     s.call(a, "POST", "/roles/names", ["channel_user"])
     s.call(a, "POST", "/roles/names", ["channel_user"])
     s.counted("role", st, "hits", "roles")
+    s.counted("role_permissions", st, "hits", "role permissions (ChannelHigherScopedPermissions)")
 
 
     # --- files: a file's info in post metadata from the cache.

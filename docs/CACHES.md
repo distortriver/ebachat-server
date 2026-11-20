@@ -43,8 +43,8 @@ Two constraints follow from this.
 | `EmojiById`, `EmojiByName` | 5000, 30 min (not found: 60 s) | custom emoji in metadata and reactions | emoji save/delete | `caches.emoji_by_id`, `caches.emoji_by_name` |
 | `TermsOfService` | 20000, 30 min | latest terms | save | `caches.terms_of_service` |
 | `Webhook` | 25000, 15 min | incoming webhook by id (`POST /hooks/{id}`) | webhook update/delete | `caches.webhook`; Go drops the entry on every use (`UpdateIncomingLastUsed`), we update it in place, so it actually hits |
-| `RolePermission` | 20000, 30 min | `ChannelHigherScopedPermissions` (admin console) | role save | not needed by T1 |
-| `PostsUsage`, `ReadReceipt*`, `TemporaryPost`, `ContentFlagging`, `DeliveryTracking`, `PropertyField`, `UserAttributes`, `AccessControlPolicyEtag`, `UserAutoTranslation`, `PostTranslationEtag`, `SessionAttribute` | | licensed, cloud or plugin features | | not ported |
+| `RolePermission` | 20000, 30 min | `ChannelHigherScopedPermissions`, run by `mergeChannelHigherScopedPermissions` on every role read (each permission check, `roles/names`) | role save | `caches.role_permissions`, merged in `App::roles` |
+| The rest | | | | not reachable for EBAChat or without a license; see "Go's caches not ported" below |
 
 ## Beyond Go's caches
 
@@ -76,7 +76,7 @@ On Rust the counters are checked too; on Go only the answers.
 
 | Run | Result |
 | --- | --- |
-| Rust `:8066` | 42/42 |
+| Rust `:8066` | 43/43 |
 | Go `:8065`, the same steps (answers only) | 24/25 |
 
 The checks cover:
@@ -114,6 +114,40 @@ The Rust server reads them where Go does:
   - `PUT /channels/{channel_id}/members/{user_id}/roles`;
   - `PUT /teams/{team_id}/members/{user_id}/roles`;
   - `GET /schemes/{scheme_id}`.
+
+## Go's caches not ported
+
+These caches are the rest of `localcachelayer`. None of them is read on EBAChat's paths by a server without a
+license:
+
+- `docs/map/routes.tsv` gives the store calls each route can reach (`tools/mmmap`, an upper bound).
+- Where a route can reach a cache's read, the Go code at the call shows what stands in front of it.
+
+| Go cache | Reads | Can EBAChat's routes reach it? | What stands in front |
+| --- | --- | --- | --- |
+| `UserAutoTranslation`, `PostTranslationEtag` | `AutoTranslation.GetUserLanguage`, `IsUserEnabled`, `GetLatestPostUpdateAtForChannel` | no | |
+| `DeliveryTracking` | `DeliveryTracking.*` | no | |
+| `PostsUsage` | `Post.AnalyticsPostCount` | no | cloud usage limits |
+| `FileInfo` storage usage | `FileInfo.GetStorageUsage` | no (only the admin `analytics/old`) | |
+| `AccessControlPolicyEtag` | `AccessControlPolicy.GetEtagEpoch` | yes, in `AppendABACEtag` | `attributeBasedAccessControlEnabled()`: the `PermissionPolicies` flag and `EnableAttributeBasedAccessControl` (off in production), an Enterprise Advanced feature |
+| `UserAttributes`, `UserPropertyValuesEpoch` | `Attributes.GetSubject`, `GetUserPropertyValuesEpoch` | yes, in `AppendABACEtag` and the access control code | the same ABAC switch |
+| `SessionAttribute` | `SessionAttribute.Get`, `GetEpoch` | yes, in `AppendABACEtag` and session attributes | ABAC, and `sessionAttributesEnabled()`: a feature flag and an Enterprise Advanced license |
+| `PropertyField` | `PropertyField.GetForGroup` | yes, in session attributes | `sessionAttributesEnabled()` |
+| `ContentFlagging` | `ContentFlagging.GetReviewerSettings` | yes, in content flagging | an Enterprise Advanced license; `EnableContentFlagging` is off in production |
+| `ReadReceipt`, `ReadReceiptPostReaders`, `ReadReceiptPostUnreadCount`, `TemporaryPost` | `ReadReceipt.*`, `TemporaryPost.Get` | yes, for burn-on-read posts | Only burn-on-read posts read them. `FillInPostProps` refuses such posts without an Enterprise Advanced license (501), even with `EnableBurnOnRead`, which production has on. The stand's database has none. |
+
+Every one of them is a licensed feature or not on EBAChat's paths at all. The Rust server answers these features as
+an unlicensed Go server does, so there is nothing for these caches to serve.
+
+**`RolePermission` was missing from the Rust server, and is ported now.**
+
+- `mergeChannelHigherScopedPermissions` runs on every role read, and so on every permission check: it limits a
+  channel scheme's moderated permissions to what the higher scope allows.
+- Checked on the stand with a channel scheme whose user role lacks `create_post`. Go and Rust agree on:
+  - the member's roles;
+  - the merged permissions of `roles/names` (27 in the role, 26 after merging);
+  - the refused post.
+- The cache hits in `tools/diff/caches.py`.
 
 **Go's one failure is a bug in Go, not in the check.**
 

@@ -144,6 +144,8 @@ pub struct Caches {
     pub team_ids_for_user: Lru<String, Arc<Vec<String>>>,
     // store: roles, schemes
     pub role: Lru<String, Arc<Role>>,
+    /// `RolePermission`: `ChannelHigherScopedPermissions` by the sorted role names.
+    pub role_permissions: Lru<String, crate::perm::HigherScoped>,
     pub scheme: Lru<String, Arc<Scheme>>,
     // store: post extras
     pub reactions: Lru<String, Arc<Vec<Reaction>>>,
@@ -177,6 +179,7 @@ impl Caches {
             last_posts: Lru::new(20000, m(30)),
             team_ids_for_user: Lru::new(20000, m(30)),
             role: Lru::new(20000, m(30)),
+            role_permissions: Lru::new(20000, m(30)),
             scheme: Lru::new(20000, m(30)),
             reactions: Lru::new(20000, m(30)),
             file_infos: Lru::new(25000, m(30)),
@@ -208,6 +211,7 @@ impl Caches {
             ("last_posts", self.last_posts.stats()),
             ("team_ids_for_user", self.team_ids_for_user.stats()),
             ("role", self.role.stats()),
+            ("role_permissions", self.role_permissions.stats()),
             ("scheme", self.scheme.stats()),
             ("reactions", self.reactions.stats()),
             ("file_infos", self.file_infos.stats()),

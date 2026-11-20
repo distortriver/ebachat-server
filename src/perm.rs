@@ -160,6 +160,34 @@ pub async fn team_members(app: &App, cond: &str, args: &[&str]) -> ApiResult<Vec
 
 // ---------- roles ----------
 
+/// Role name → (the built-in channel role it stands for, the higher scope's permissions).
+pub type HigherScoped = Arc<HashMap<String, (String, Vec<String>)>>;
+
+/// Channel-scoped permissions in `AllPermissions` order, and whether each is channel-moderated
+/// (`ChannelModeratedPermissionsMap`); dumped from the Go model.
+const CHANNEL_PERMISSIONS: &str = include_str!("../data/channel_permissions.txt");
+
+/// `Role.MergeChannelHigherScopedPermissions`.
+fn merged_permissions(role_id: &str, higher: &[String], own: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    for line in CHANNEL_PERMISSIONS.lines() {
+        let Some((id, moderated)) = line.split_once(' ') else { continue };
+        let on_higher = higher.iter().any(|p| p == id);
+        if role_id == CHANNEL_ADMIN && on_higher {
+            out.push(id.to_string());
+            continue;
+        }
+        if moderated == "true" {
+            if on_higher && own.iter().any(|p| p == id) {
+                out.push(id.to_string());
+            }
+        } else if on_higher {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
 impl App {
     /// `GetRolesByNames` through the role cache.
     pub async fn roles(&self, names: &[&str]) -> ApiResult<Vec<Arc<Role>>> {
@@ -180,7 +208,86 @@ impl App {
                 out.push(r);
             }
         }
-        Ok(out)
+        self.merge_channel_higher_scoped(out).await
+    }
+
+    /// `mergeChannelHigherScopedPermissions`: the roles of channel schemes keep a moderated permission only if
+    /// the scheme's higher scope (the team's scheme, or the built-in channel roles) has it too.
+    async fn merge_channel_higher_scoped(&self, roles: Vec<Arc<Role>>) -> ApiResult<Vec<Arc<Role>>> {
+        let mut names: Vec<String> = roles.iter().filter(|r| r.scheme_managed).map(|r| r.name.clone()).collect();
+        if names.is_empty() {
+            return Ok(roles);
+        }
+        names.sort();
+        let higher = self.channel_higher_scoped_permissions(names).await?;
+        if higher.is_empty() {
+            return Ok(roles);
+        }
+        Ok(roles
+            .into_iter()
+            .map(|r| match higher.get(&r.name).filter(|_| r.scheme_managed) {
+                Some((role_id, perms)) => {
+                    let mut m = (*r).clone();
+                    m.permissions.0 = merged_permissions(role_id, perms, &r.permissions.0);
+                    Arc::new(m)
+                }
+                None => r,
+            })
+            .collect())
+    }
+
+    /// `RoleStore.ChannelHigherScopedPermissions` through the role permissions cache, keyed by the sorted names.
+    async fn channel_higher_scoped_permissions(&self, names: Vec<String>) -> ApiResult<HigherScoped> {
+        let key = names.join("/");
+        if let Some(m) = self.caches.role_permissions.get(&key) {
+            return Ok(m);
+        }
+        // `channelHigherScopedPermissionsQuery`, the names bound instead of spliced in.
+        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT '' , COALESCE(RoleSchemes.DefaultChannelUserRole, ''), COALESCE(RoleSchemes.DefaultChannelAdminRole, ''),
+                    '', COALESCE(UserRoles.Permissions, ''), COALESCE(AdminRoles.Permissions, '')
+             FROM Schemes AS RoleSchemes
+                  JOIN Channels ON Channels.SchemeId = RoleSchemes.Id
+                  JOIN Teams ON Teams.Id = Channels.TeamId
+                  JOIN Schemes ON Schemes.Id = Teams.SchemeId
+                  RIGHT JOIN Roles AS UserRoles ON UserRoles.Name = Schemes.DefaultChannelUserRole
+                  RIGHT JOIN Roles AS AdminRoles ON AdminRoles.Name = Schemes.DefaultChannelAdminRole
+             WHERE RoleSchemes.DefaultChannelUserRole = ANY($1) OR RoleSchemes.DefaultChannelAdminRole = ANY($1)
+             UNION
+             SELECT COALESCE(RoleSchemes.DefaultChannelGuestRole, ''), '', '', COALESCE(GuestRoles.Permissions, ''), '', ''
+             FROM Schemes AS RoleSchemes
+                  JOIN Channels ON Channels.SchemeId = RoleSchemes.Id
+                  JOIN Teams ON Teams.Id = Channels.TeamId
+                  JOIN Schemes ON Schemes.Id = Teams.SchemeId
+                  RIGHT JOIN Roles AS GuestRoles ON GuestRoles.Name = Schemes.DefaultChannelGuestRole
+             WHERE RoleSchemes.DefaultChannelGuestRole = ANY($1)
+             UNION
+             SELECT COALESCE(Schemes.DefaultChannelGuestRole, ''), COALESCE(Schemes.DefaultChannelUserRole, ''),
+                    COALESCE(Schemes.DefaultChannelAdminRole, ''), COALESCE(GuestRoles.Permissions, ''),
+                    COALESCE(UserRoles.Permissions, ''), COALESCE(AdminRoles.Permissions, '')
+             FROM Schemes
+                  JOIN Channels ON Channels.SchemeId = Schemes.Id
+                  JOIN Teams ON Teams.Id = Channels.TeamId
+                  JOIN Roles AS GuestRoles ON GuestRoles.Name = 'channel_guest'
+                  JOIN Roles AS UserRoles ON UserRoles.Name = 'channel_user'
+                  JOIN Roles AS AdminRoles ON AdminRoles.Name = 'channel_admin'
+             WHERE (Schemes.DefaultChannelGuestRole = ANY($1) OR Schemes.DefaultChannelUserRole = ANY($1)
+                    OR Schemes.DefaultChannelAdminRole = ANY($1))
+               AND (Teams.SchemeId = '' OR Teams.SchemeId IS NULL)",
+        )
+        .bind(&names)
+        .fetch_all(&self.db)
+        .await?;
+        let mut m = HashMap::new();
+        let split = |p: &str| p.split(' ').map(str::to_string).collect::<Vec<_>>();
+        for (g, u, a, gp, up, ap) in rows {
+            m.insert(g, (CHANNEL_GUEST.to_string(), split(&gp)));
+            m.insert(u, (CHANNEL_USER.to_string(), split(&up)));
+            m.insert(a, (CHANNEL_ADMIN.to_string(), split(&ap)));
+        }
+        let m = Arc::new(m);
+        self.caches.role_permissions.put(key, m.clone());
+        Ok(m)
     }
 
     /// `RolesGrantPermission`.
