@@ -3,15 +3,18 @@ CLIENT ?= ../ebac-messenger/src
 
 .PHONY: build test compat map stand stand-down
 
+# Builds run at the lowest priority so the stand, the clients and the desktop stay responsive.
+CARGO ?= nice -n 19 cargo
+
 build:
-	cargo build
+	$(CARGO) build --release
 
 test:
-	cargo test
+	$(CARGO) test --release
 
 # Tests against the Go server; needs `make stand`.
 compat:
-	cargo test --test compat_model
+	$(CARGO) test --release --test compat_model
 
 # Regenerate docs/map/*.tsv from the Go source, EBAChat and docs/prod-traffic.tsv.
 map:
