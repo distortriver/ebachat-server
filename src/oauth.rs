@@ -54,7 +54,7 @@ pub struct OAuthApp {
     pub is_dynamically_registered: bool,
 }
 
-const SELECT: &str = "SELECT o.Id AS id, COALESCE(o.CreatorId, '') AS creator_id, COALESCE(o.CreateAt, 0) AS create_at,
+pub(crate) const SELECT: &str = "SELECT o.Id AS id, COALESCE(o.CreatorId, '') AS creator_id, COALESCE(o.CreateAt, 0) AS create_at,
     COALESCE(o.UpdateAt, 0) AS update_at, COALESCE(o.ClientSecret, '') AS client_secret, COALESCE(o.Name, '') AS name,
     COALESCE(o.Description, '') AS description, COALESCE(o.IconURL, '') AS icon_url,
     COALESCE(o.CallbackUrls, '') AS callback_urls, COALESCE(o.Homepage, '') AS homepage,

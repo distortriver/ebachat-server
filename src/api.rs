@@ -87,6 +87,7 @@ fn routes(app: State) -> Router {
         .merge(crate::tokens::routes())
         .merge(crate::bots::routes())
         .merge(crate::oauth::routes())
+        .merge(crate::oauth_provider::routes())
         .merge(crate::terms::routes())
         .merge(crate::system::routes())
         .merge(crate::config_api::routes())
