@@ -588,7 +588,7 @@ async fn password_update(app: &App, s: &Session, user_id: &str, b: &PasswordBody
         }
         let u = user.ok_or_else(missing_account)?;
         app.store_password(&u.id, &b.new_password).await?;
-        password_change_email(&app, &u, "api.user.reset_password.method");
+        password_change_email(app, &u, "api.user.reset_password.method");
         return Ok(());
     }
     if user_id == s.user_id {
@@ -608,11 +608,11 @@ async fn password_update(app: &App, s: &Session, user_id: &str, b: &PasswordBody
         }
         let u = app.user(&user_id).await?.ok_or_else(missing_account)?;
         app.set_password(&u, &b.new_password, Some(&s)).await?;
-        password_change_email(&app, &u, "api.user.update_password.menu");
+        password_change_email(app, &u, "api.user.update_password.menu");
     } else if can {
         let u = user.ok_or_else(missing_account)?;
         app.set_password(&u, &b.new_password, Some(&s)).await?;
-        password_change_email(&app, &u, "api.user.reset_password.method");
+        password_change_email(app, &u, "api.user.reset_password.method");
     } else {
         return Err(context_err());
     }
