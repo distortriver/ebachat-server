@@ -147,8 +147,10 @@ impl App {
     }
 
     /// `ClearSessionCacheForUser`: the user's sessions are read again (roles, team memberships changed).
+    /// Its websockets load their session again before their next event (`invalidateWebConnSessionCacheForUser`).
     pub fn clear_sessions_for_user(&self, user_id: &str) {
         self.caches.session.remove_where(|_, s| s.user_id == user_id);
+        self.hub.invalidate_user(user_id);
     }
 
     /// `ExtendSessionExpiryIfNeeded`.

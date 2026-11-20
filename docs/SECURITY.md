@@ -194,3 +194,54 @@ on the shared database, with its job schedulers.
   SAML ones, guests against `GuestAccountsSettings.RestrictCreationToDomains`.
 - **Now:** `create_user_or_guest` sets the role first and checks as Go does; the magic link creates the guest
   through it (no `system_user` row in between).
+- **Checked against Go** (third review): with `TeamSettings.RestrictCreationToDomains` = `allowed.org`, a GitLab
+  sign-up and a GitLab login of a new `@offdomain.net` account (fake GitLab) are refused by both with 400 and the
+  `api.user.create_user.accepted_domain.app_error` message on `/error`; no user is created. Go reaches the check
+  only below its 250-user limit, so both ran on a scratch copy of the database with active users below it
+  (dropped afterwards).
+
+## Websocket events kept flowing on the connect-time session (third review, fixed)
+
+- **Was:** a connection kept the token, `admin` flag and teams of its connect and no expiry; `publish` never
+  checked the session again (only the `required_permissions` branch reloaded it). After `POST /oauth/deauthorize`
+  or an OAuth refresh (neither closed the socket), after a demotion (admin-only events, unsanitised users with
+  emails), or past the session's expiry, the socket kept streaming. Guests got `user_updated` and `new_user` about
+  users they cannot see.
+- **Now**, as Go's `WebConn` (`ShouldSendEvent`, `IsBasicAuthenticated`, `InvalidateCache`,
+  `ShouldSendEventToGuest`):
+  - a connection holds its session, with its admin and guest flags, teams and `ExpiresAt`;
+  - `clear_sessions_for_user` (Go's `ClearSessionCacheForUser` → `Hub.InvalidateUser`) marks the user's
+    connections stale; `POST /caches/invalidate` and license changes mark all of them (`InvalidateAllCache`);
+    a revoked or rotated OAuth token marks its own (`invalidate_session`);
+  - before an event goes to a stale connection or one past its `ExpiresAt` (which also covers the expired-session
+    cleanup job), the session is loaded again (`app.session`) off the publisher's path; admin, guest and teams come
+    from the fresh session, and required permissions are checked on it;
+  - a session that cannot be loaded ends the deliveries for good (Go clears the token) while the socket stays
+    open, its requests answered with the session error; the webapp then logs out at its next REST call, as with
+    Go;
+  - a guest session (`is_guest` = `true`) gets `user_updated` (`data.user.id`) and `new_user` (`data.user_id`)
+    only when `can_see_user` says so; an error means no delivery. Only events that reach that check in Go (no
+    connection, user, channel or team) are filtered;
+  - the routing follows Go's order: admin-only data is checked for every event, also one sent to a user or
+    connection; channel membership and the team only for events not sent to a user or connection (an
+    `ephemeral_message` to a user in a channel it is not a member of now arrives, as with Go).
+- **Cost:** a loaded, non-guest connection costs a few atomic loads per event; the database or cache is touched
+  only for a stale or expired connection (once per invalidation) and for a guest on `user_updated`/`new_user`.
+- **Deviations:** a server error while reloading (5xx) closes the socket so the client reconnects and catches up;
+  Go silences the connection as for an invalid session. A session with `ExpiresAt` 0 is not reloaded for every
+  event as Go does (Go fetches it from its cache each time); revocations reach it through the invalidation.
+- **Checked against Go** (`ws99/wssec.py` in the session scratchpad, my Go on :8083 and Rust on :8099, same
+  config copy with OAuth provider and guests on, `ShowEmailAddress` off), the events each observer socket got,
+  identical on both:
+  - OAuth: an `?access_token=` socket gets `user_updated` before `POST /oauth/deauthorize` and nothing after (the
+    user's normal socket keeps getting it); after a refresh the old token's socket gets nothing, the new one's
+    does;
+  - demotion: before, `user_updated` with email and `job_updated` (admin-only); `user_role_updated`; after,
+    `user_updated` without email and no `job_updated`;
+  - expiry: `ExpiresAt` set in the past and `POST /caches/invalidate`: no `posted`; a session expiring 4 s after
+    the connect with no invalidation: `posted` before, nothing after;
+  - guest (a user session made a guest's: guests cannot log in without a license): `user_updated` of a user in a
+    shared channel and of itself, none for a user in no shared channel. `new_user` was checked on Rust only (Go
+    cannot create users past 250 on this database): none for the guest, delivered to a regular user.
+  
+  `diff.py --writes` 61/61, `routes.py` the 5 known diffs, `caches.py` 43/43; unit tests `hub::tests`.

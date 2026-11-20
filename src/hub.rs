@@ -5,7 +5,7 @@
 // 2015-present Mattermost, Inc. Licensed under AGPL-3.0.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -34,9 +34,95 @@ pub struct Conn {
     pub user_id: String,
     pub connection_id: String,
     token: String,
-    admin: bool,
+    /// The session events are filtered with (`WebConn.session`): the connect's, then the one reloaded after an
+    /// invalidation or its expiry. `admin`, `guest`, `expires_at` and `teams` are read from it, so that the hot
+    /// path is a few atomic loads.
+    session: RwLock<Arc<Session>>,
+    admin: AtomicBool,
+    guest: AtomicBool,
+    /// `sessionExpiresAt` (0: never).
+    expires_at: AtomicI64,
+    /// `InvalidateCache` bumps `generation`; the session is loaded again while `loaded` differs.
+    generation: AtomicU64,
+    loaded: AtomicU64,
+    /// Go's cleared session token: the session could not be loaded again (or was revoked), nothing more is sent.
+    dead: AtomicBool,
     teams: RwLock<HashSet<String>>,
     tx: mpsc::UnboundedSender<Out>,
+}
+
+impl Conn {
+    fn new(id: u64, session: Arc<Session>, tx: mpsc::UnboundedSender<Out>) -> Conn {
+        let c = Conn {
+            id,
+            user_id: session.user_id.clone(),
+            connection_id: new_id(),
+            token: session.token.clone(),
+            session: RwLock::new(session.clone()),
+            admin: AtomicBool::new(false),
+            guest: AtomicBool::new(false),
+            expires_at: AtomicI64::new(0),
+            generation: AtomicU64::new(0),
+            loaded: AtomicU64::new(0),
+            dead: AtomicBool::new(false),
+            teams: RwLock::new(HashSet::new()),
+            tx,
+        };
+        c.set_session(session);
+        c
+    }
+
+    /// `SetSession` and `SetSessionExpiresAt`, with what the filters read from the session.
+    fn set_session(&self, s: Arc<Session>) {
+        self.admin.store(s.is_system_admin(), Ordering::Relaxed);
+        self.guest.store(s.prop("is_guest") == "true", Ordering::Relaxed);
+        self.expires_at.store(s.expires_at, Ordering::Relaxed);
+        *self.teams.write().unwrap() = s.team_members.iter().map(|t| t.team_id.clone()).collect();
+        *self.session.write().unwrap() = s;
+    }
+
+    fn session(&self) -> Arc<Session> {
+        self.session.read().unwrap().clone()
+    }
+
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
+    }
+
+    /// Whether the session must be loaded again before an event goes out: invalidated (`InvalidateCache`) or past
+    /// its expiry (`IsBasicAuthenticated`).
+    fn is_stale(&self, now: i64) -> bool {
+        let exp = self.expires_at.load(Ordering::Relaxed);
+        self.generation.load(Ordering::Acquire) != self.loaded.load(Ordering::Acquire) || (exp > 0 && exp < now)
+    }
+
+    /// `IsBasicAuthenticated`: the session as it is now when it is stale. A session that is gone or invalid ends
+    /// the deliveries as Go's cleared token does (the socket stays open; its requests fail with the session
+    /// error). A server error closes the socket instead of silencing it for good (Go clears the token on any
+    /// error): the client reconnects and loads what it missed.
+    async fn authenticate(&self, app: &crate::app::App) -> bool {
+        if self.is_dead() {
+            return false;
+        }
+        if !self.is_stale(now_ms()) {
+            return true;
+        }
+        let generation = self.generation.load(Ordering::Acquire);
+        match app.session(&self.token).await {
+            Ok(s) => {
+                self.set_session(s);
+                self.loaded.store(generation, Ordering::Release);
+                true
+            }
+            Err(e) => {
+                self.dead.store(true, Ordering::Relaxed);
+                if e.status_code >= 500 {
+                    let _ = self.tx.send(Out::Close);
+                }
+                false
+            }
+        }
+    }
 }
 
 enum Out {
@@ -81,14 +167,6 @@ pub type PerUser = Arc<dyn Fn(&str) -> Option<serde_json::Map<String, Value>> + 
 /// The `post` of an event for one recipient (by user id), when it differs from the shared one.
 pub type PostHook = Arc<dyn Fn(State, String) -> futures_util::future::BoxFuture<'static, Option<String>> + Send + Sync>;
 
-/// The post hook's answer for the user of a connection.
-async fn post_for(hook: &Option<PostHook>, app: &State, c: &Conn) -> Option<String> {
-    match hook {
-        Some(h) => h(app.clone(), c.user_id.clone()).await,
-        None => None,
-    }
-}
-
 /// The event as JSON without its closing `"seq":N}`: `{"event":..,"data":..,"broadcast":..,"seq":`.
 fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
     // Go's field order (webSocketEventJSON); serde_json would sort the keys.
@@ -98,6 +176,105 @@ fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
         data,
         serde_json::to_string(b).unwrap()
     ))
+}
+
+/// One published event and what `ShouldSendEvent` checks for it, shared by the connections it goes to.
+struct Delivery {
+    event: String,
+    data: Value,
+    b: Broadcast,
+    full: Arc<str>,
+    sanitized: Option<Arc<str>>,
+    /// The broadcast names its connection or user: no channel, team or guest check (Go returns before them).
+    routed: bool,
+    /// `ShouldSendEventToGuest`: the user a guest must be able to see (`user_updated`, `new_user`), when the
+    /// event reaches that check (no channel, team, connection or user).
+    guest_subject: Option<String>,
+}
+
+impl Delivery {
+    /// The checks on the connection's session that need no I/O: sensitive data, the team.
+    fn session_allows(&self, c: &Conn) -> bool {
+        if self.b.admin_only && self.b.required_permissions.is_empty() && !c.admin.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !self.routed && self.b.channel_id.is_empty() && !self.b.team_id.is_empty() {
+            return c.teams.read().unwrap().contains(&self.b.team_id);
+        }
+        true
+    }
+
+    /// Whether a connection whose session is loaded and allowed needs no async check.
+    fn is_plain(&self, c: &Conn) -> bool {
+        self.b.required_permissions.is_empty()
+            && (self.routed || self.b.channel_id.is_empty())
+            && self.b.post_hook.is_none()
+            && !(self.guest_subject.is_some() && c.guest.load(Ordering::Relaxed))
+    }
+
+    /// `ShouldSendEvent` for a connection, with what needs the app: the session reloaded when stale, the required
+    /// permissions, channel membership (`GetAllChannelMembersForUser`, cached), the guest's view of the user.
+    async fn allows(&self, app: &crate::app::App, c: &Conn) -> bool {
+        if !c.authenticate(app).await || !self.session_allows(c) {
+            return false;
+        }
+        if !self.b.required_permissions.is_empty() {
+            let s = c.session();
+            for p in &self.b.required_permissions {
+                if !app.has_perm(&s, p).await {
+                    return false;
+                }
+            }
+        }
+        if !self.routed && !self.b.channel_id.is_empty() {
+            match app.member_roles(&c.user_id, false).await {
+                Ok(m) if m.contains_key(&self.b.channel_id) => {}
+                _ => return false,
+            }
+        }
+        if let Some(subject) = &self.guest_subject
+            && c.guest.load(Ordering::Relaxed)
+        {
+            // An error means no delivery, as Go.
+            return matches!(app.can_see_user(&c.session(), subject).await, Ok(true));
+        }
+        true
+    }
+
+    /// The event for one connection: admin or sanitized data, and the hooks' fields.
+    fn render(&self, c: &Conn, post: Option<String>) -> Arc<str> {
+        let admin = c.admin.load(Ordering::Relaxed);
+        let base = if admin { &self.full } else { self.sanitized.as_ref().unwrap_or(&self.full) };
+        let mut extra = self.b.per_user.as_ref().and_then(|f| f(&c.user_id));
+        if let Some(p) = post {
+            extra.get_or_insert_with(serde_json::Map::new).insert("post".into(), Value::String(p));
+        }
+        let Some(extra) = extra else { return base.clone() };
+        let mut d = if admin { self.data.clone() } else { self.b.sanitized.clone().unwrap_or_else(|| self.data.clone()) };
+        if let Value::Object(m) = &mut d {
+            m.extend(extra);
+        }
+        prefix(&self.event, &d, &self.b)
+    }
+
+    /// The post hook's answer for the user of a connection.
+    async fn post_for(&self, app: &State, c: &Conn) -> Option<String> {
+        match &self.b.post_hook {
+            Some(h) => h(app.clone(), c.user_id.clone()).await,
+            None => None,
+        }
+    }
+}
+
+/// `ShouldSendEventToGuest`'s subject: the user of `user_updated` (`data.user.id`), the `user_id` of `new_user`.
+/// An event without one goes to no guest (an empty id is a user nobody can see).
+fn guest_subject(event: &str, data: &Value) -> Option<String> {
+    let id = match event {
+        "user_updated" => &data["user"]["id"],
+        "new_user" => &data["user_id"],
+        _ => return None,
+    };
+    Some(id.as_str().unwrap_or_default().to_string())
 }
 
 impl Hub {
@@ -129,10 +306,33 @@ impl Hub {
         self.conns.read().unwrap().len()
     }
 
-    /// Closes the connections of a revoked session.
+    /// Closes the connections of a revoked session; nothing more is sent to them meanwhile.
     pub fn close_session(&self, token: &str) {
         for c in self.conns.read().unwrap().iter().filter(|c| c.token == token) {
+            c.dead.store(true, Ordering::Relaxed);
             let _ = c.tx.send(Out::Close);
+        }
+    }
+
+    /// `Hub.InvalidateUser` (`WebConn.InvalidateCache`): the user's connections load their session again before
+    /// their next event (roles, guest, teams, a revoked or expired session).
+    pub fn invalidate_user(&self, user_id: &str) {
+        for c in self.conns.read().unwrap().iter().filter(|c| c.user_id == user_id) {
+            c.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The connections of one session load it again before their next event (a revoked OAuth token).
+    pub fn invalidate_session(&self, token: &str) {
+        for c in self.conns.read().unwrap().iter().filter(|c| c.token == token) {
+            c.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// `Hub.InvalidateAllCache`: every connection loads its session again before its next event.
+    pub fn invalidate_all(&self) {
+        for c in self.conns.read().unwrap().iter() {
+            c.generation.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -143,97 +343,73 @@ impl Hub {
         }
     }
 
-    /// `Publish`: to every connection the broadcast selects. Channel events go to members of the channel, as
-    /// `GetAllChannelMembersForUser` (cached) says.
+    /// `Publish`: to every connection `ShouldSendEvent` selects. A connection whose session is loaded and that
+    /// needs nothing more gets the event here; the others (a stale session, channel membership, required
+    /// permissions, a guest's view, a post hook) get it off the caller's path.
     pub fn publish(&self, event: &str, data: Value, b: Broadcast) {
-        let targets: Vec<Arc<Conn>> = {
+        let now = now_ms();
+        let routed = !b.connection_id.is_empty() || !b.user_id.is_empty();
+        let subject = if !routed && b.channel_id.is_empty() && b.team_id.is_empty() { guest_subject(event, &data) } else { None };
+        let mut later: Vec<Arc<Conn>> = Vec::new();
+        let mut now_conns: Vec<Arc<Conn>> = Vec::new();
+        {
             let conns = self.conns.read().unwrap();
-            conns
-                .iter()
-                .filter(|c| {
-                    if !b.connection_id.is_empty() {
-                        return c.connection_id == b.connection_id;
+            for c in conns.iter() {
+                // The broadcast's own routing, which needs no session.
+                if !b.connection_id.is_empty() {
+                    if c.connection_id != b.connection_id {
+                        continue;
                     }
-                    if !b.omit_connection_id.is_empty() && c.connection_id == b.omit_connection_id {
-                        return false;
+                } else if !b.omit_connection_id.is_empty() && c.connection_id == b.omit_connection_id {
+                    continue;
+                } else if !b.user_id.is_empty() {
+                    if c.user_id != b.user_id {
+                        continue;
                     }
-                    if !b.user_id.is_empty() {
-                        return c.user_id == b.user_id;
-                    }
-                    if b.omit_users.as_ref().is_some_and(|o| o.contains_key(&c.user_id)) {
-                        return false;
-                    }
-                    if b.admin_only && b.required_permissions.is_empty() && !c.admin {
-                        return false;
-                    }
-                    if !b.team_id.is_empty() && b.channel_id.is_empty() {
-                        return c.teams.read().unwrap().contains(&b.team_id);
-                    }
-                    true
-                })
-                .cloned()
-                .collect()
-        };
-        if targets.is_empty() {
-            return;
-        }
-        let full = prefix(event, &data, &b);
-        let sanitized = b.sanitized.as_ref().map(|d| prefix(event, d, &b));
-        let event = event.to_string();
-        let channel_id = b.channel_id.clone();
-        let required = b.required_permissions.clone();
-        let hook = b.post_hook.clone();
-        // The event for one connection: admin or sanitized data, and the hooks' fields.
-        let render = move |c: &Conn, post: Option<String>| -> Arc<str> {
-            let base = if c.admin { &full } else { sanitized.as_ref().unwrap_or(&full) };
-            let mut extra = b.per_user.as_ref().and_then(|f| f(&c.user_id));
-            if let Some(p) = post {
-                extra.get_or_insert_with(serde_json::Map::new).insert("post".into(), Value::String(p));
-            }
-            let Some(extra) = extra else { return base.clone() };
-            let mut d = if c.admin { data.clone() } else { b.sanitized.clone().unwrap_or_else(|| data.clone()) };
-            if let Value::Object(m) = &mut d {
-                m.extend(extra);
-            }
-            prefix(&event, &d, &b)
-        };
-        if !required.is_empty() {
-            // The permissions of each connection's session, off the caller's path.
-            let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
-            tokio::spawn(async move {
-                for c in targets {
-                    let Ok(s) = app.session(&c.token).await else { continue };
-                    let mut ok = true;
-                    for p in &required {
-                        ok = ok && app.has_perm(&s, p).await;
-                    }
-                    if ok {
-                        let post = post_for(&hook, &app, &c).await;
-                        let _ = c.tx.send(Out::Event(render(&c, post)));
-                    }
+                } else if b.omit_users.as_ref().is_some_and(|o| o.contains_key(&c.user_id)) {
+                    continue;
                 }
-            });
-            return;
-        }
-        if channel_id.is_empty() && hook.is_none() {
-            for c in targets {
-                let _ = c.tx.send(Out::Event(render(&c, None)));
+                if c.is_dead() {
+                    continue;
+                }
+                if c.is_stale(now) {
+                    later.push(c.clone());
+                } else {
+                    now_conns.push(c.clone());
+                }
             }
+        }
+        if later.is_empty() && now_conns.is_empty() {
             return;
         }
-        // Membership needs the (cached) channel members of each user, a post hook the app: done off the caller's
-        // path.
-        let Some(app) = self.app.get().and_then(|w| w.upgrade()) else { return };
+        let dl = Delivery {
+            event: event.to_string(),
+            full: prefix(event, &data, &b),
+            sanitized: b.sanitized.as_ref().map(|s| prefix(event, s, &b)),
+            data,
+            b,
+            routed,
+            guest_subject: subject,
+        };
+        for c in now_conns {
+            if !dl.session_allows(&c) {
+                continue;
+            }
+            if dl.is_plain(&c) {
+                let _ = c.tx.send(Out::Event(dl.render(&c, None)));
+            } else {
+                later.push(c);
+            }
+        }
+        if later.is_empty() {
+            return;
+        }
+        let Some(app) = self.app() else { return };
         tokio::spawn(async move {
-            for c in targets {
-                let member = channel_id.is_empty()
-                    || match app.member_roles(&c.user_id, false).await {
-                        Ok(m) => m.contains_key(&channel_id),
-                        Err(_) => false,
-                    };
-                if member {
-                    let post = post_for(&hook, &app, &c).await;
-                    let _ = c.tx.send(Out::Event(render(&c, post)));
+            for c in later {
+                if dl.allows(&app, &c).await {
+                    let post = dl.post_for(&app, &c).await;
+                    let _ = c.tx.send(Out::Event(dl.render(&c, post)));
                 }
             }
         });
@@ -381,15 +557,7 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
     };
     let user_id = session.user_id.clone();
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
-    let conn = Arc::new(Conn {
-        id: app.hub.next.fetch_add(1, Ordering::Relaxed),
-        user_id: user_id.clone(),
-        connection_id: new_id(),
-        token: session.token.clone(),
-        admin: session.is_system_admin(),
-        teams: RwLock::new(session.team_members.iter().map(|t| t.team_id.clone()).collect()),
-        tx,
-    });
+    let conn = Arc::new(Conn::new(app.hub.next.fetch_add(1, Ordering::Relaxed), session.clone(), tx));
     app.hub.add(conn.clone());
 
     let writer = tokio::spawn(async move {
@@ -573,4 +741,48 @@ pub fn publish_typing(app: &State, user_id: &str, channel_id: &str, parent_id: &
         json!({"parent_id": parent_id, "user_id": user_id}),
         Broadcast { channel_id: channel_id.into(), omit_users: Some(omit), ..Default::default() },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(s: Session) -> (Conn, mpsc::UnboundedReceiver<Out>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Conn::new(1, Arc::new(s), tx), rx)
+    }
+
+    #[test]
+    fn stale_after_invalidation_or_expiry() {
+        let now = now_ms();
+        let (c, _rx) = conn(Session { user_id: "u".into(), token: "t".into(), expires_at: now + 60_000, ..Default::default() });
+        assert!(!c.is_stale(now));
+        // InvalidateCache
+        c.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(c.is_stale(now));
+        c.loaded.store(1, Ordering::Release);
+        assert!(!c.is_stale(now));
+        // Past its expiry; 0 never expires.
+        assert!(c.is_stale(now + 120_000));
+        c.expires_at.store(0, Ordering::Relaxed);
+        assert!(!c.is_stale(now + 120_000));
+    }
+
+    #[test]
+    fn session_flags() {
+        let mut s = Session { user_id: "u".into(), roles: "system_user system_admin".into(), ..Default::default() };
+        s.props.0.insert("is_guest".into(), "true".into());
+        let (c, _rx) = conn(s);
+        assert!(c.admin.load(Ordering::Relaxed) && c.guest.load(Ordering::Relaxed));
+        c.set_session(Arc::new(Session { user_id: "u".into(), roles: "system_user".into(), ..Default::default() }));
+        assert!(!c.admin.load(Ordering::Relaxed) && !c.guest.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn guest_subjects() {
+        assert_eq!(guest_subject("user_updated", &json!({"user": {"id": "a"}})).as_deref(), Some("a"));
+        assert_eq!(guest_subject("new_user", &json!({"user_id": "b"})).as_deref(), Some("b"));
+        assert_eq!(guest_subject("user_updated", &json!({})).as_deref(), Some(""));
+        assert_eq!(guest_subject("posted", &json!({"user_id": "b"})), None);
+    }
 }

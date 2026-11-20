@@ -702,6 +702,8 @@ impl App {
     ) -> ApiResult<AccessResponse> {
         let _ = sqlx::query("DELETE FROM Sessions WHERE Id = $1 OR Token = $1").bind(&ad.token).execute(&self.db).await;
         self.caches.session.remove(&ad.token);
+        // The old token's websockets stop getting events (the user's others load their session again).
+        self.hub.invalidate_session(&ad.token);
         self.clear_sessions_for_user(&user.id);
         let s = self.new_oauth_session(app, user).await?;
         ad.token = s.token.clone();
@@ -790,6 +792,8 @@ impl App {
             .map_err(|e| AppError::internal("api.oauth.revoke_access_token.del_token.app_error", e.to_string()))?;
         removed.map_err(|e| AppError::internal("api.oauth.revoke_access_token.del_session.app_error", e.to_string()))?;
         self.caches.session.remove(token);
+        // Its websockets stop getting events, as Go's `InvalidateCache` then `IsBasicAuthenticated` do.
+        self.hub.invalidate_session(token);
         if let Some(s) = session {
             self.clear_sessions_for_user(&s.user_id);
         }

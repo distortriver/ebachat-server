@@ -458,6 +458,7 @@ async fn save(app: &App, bytes: &[u8]) -> ApiResult<License> {
         let _ = sqlx::query("DELETE FROM Systems WHERE Name = 'HostedPurchaseNeedsScreening'").execute(&app.db).await;
     }
     app.caches.clear_all();
+    app.hub.invalidate_all();
     Ok(license)
 }
 
@@ -473,6 +474,7 @@ async fn remove(app: &App) -> ApiResult<()> {
         .map_err(|e| AppError::internal("app.system.save.app_error", e.to_string()))?;
     set_license(app, None);
     app.caches.clear_all();
+    app.hub.invalidate_all();
     Ok(())
 }
 

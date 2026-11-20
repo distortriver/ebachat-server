@@ -275,6 +275,7 @@ async fn audits(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<Res
 async fn invalidate_caches(St(app): St<State>, Auth(s): Auth) -> ApiResult<Response> {
     app.require_unrestricted(&s, "invalidate_caches").await?;
     app.caches.clear_all();
+    app.hub.invalidate_all();
     Ok(([NO_CACHE], ok()).into_response())
 }
 
