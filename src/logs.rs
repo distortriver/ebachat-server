@@ -250,6 +250,26 @@ pub fn debug(msg: &str, fields: &[(&str, Value)]) {
 /// What Go logs while it starts (`NewServer`, `Server.Start`) that an admin sees in `/logs`: a site URL that is not
 /// one, the working directory and the config's source, the SMTP connection test (with email notifications on),
 /// the file storage test, a push server over plain HTTP, then "Starting Server...".
+/// What `platform.New` logs once logging is set up: the runtime, the version and build, the edition. This server
+/// reports the API version it implements (12.1.0, as `X-Version-Id` and the client config do), the build hash of
+/// that release, no build date or enterprise hash, and the Rust compiler where Go names its own.
+pub fn initializing() {
+    info("Server is initializing...", &[("go_version", env!("EBACHAT_RUSTC_VERSION").into())]);
+    let (version, number, date, hash, hash_ee) = (crate::SERVER_VERSION, crate::SERVER_VERSION, "", crate::BUILD_HASH, "");
+    info(
+        &format!("Current version is {version} ({number}/{date}/{hash}/{hash_ee})"),
+        &[
+            ("current_version", version.into()),
+            ("build_number", number.into()),
+            ("build_date", date.into()),
+            ("build_hash", hash.into()),
+            ("build_hash_enterprise", hash_ee.into()),
+            ("service_environment", crate::license::service_environment().into()),
+        ],
+    );
+    info("Team Edition Build", &[("enterprise_build", false.into())]);
+}
+
 pub async fn startup(app: &crate::app::App) {
     if reqwest::Url::parse(app.cfg.str("ServiceSettings.SiteURL")).is_err()
         && std::env::var("IS_CI").as_deref() != Ok("true")
