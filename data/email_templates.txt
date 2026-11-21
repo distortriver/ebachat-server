@@ -1,4 +1,4 @@
-{{/* server/templates/*.html of Mattermost 12.1.0, Copyright (c) 2015-present Mattermost, Inc., Apache-2.0; escaped by html/template (tools/emailtpl) */}}
+{{/* server/templates/*.html of Mattermost 12.1.0, Copyright (c) 2015-present Mattermost, Inc., Apache-2.0; escaped by html/template (tools/emailtpl). Changed for ebachat-server: email_change_verify_body shows its support line only with a SupportEmail, invite_body's "learn more" links to the site instead of mattermost.com (docs/BRANDING.md) */}}
 {{define "deactivate_body"}}
 <html>
 <body>
@@ -240,8 +240,10 @@
                                             <tbody>
                                             <tr>
                                                 <td align="center" class="info" style="font-size:0px;padding:0px;word-break:break-word;">
+                                                    {{if .Props.SupportEmail}}
                                                     <p style="font-family: sans-serif;font-style: normal;font-weight: 600;font-size: 16px; line-height: 24px; margin-top: 56px; margin-bottom: 2px; color: #3F4350;">{{.Props.QuestionTitle | _html_template_htmlescaper}}</p>
                                                     <p style="font-family: sans-serif;font-style: normal;font-weight: 400;font-size: 14px;line-height: 20px;margin-top: 2px; color: #3F4350;">{{.Props.EmailInfo1 | _html_template_htmlescaper}}<a href='mailto:{{.Props.SupportEmail | _html_template_urlnormalizer | _html_template_attrescaper}}' style='text-decoration: none; color:#2389D7;'>{{.Props.SupportEmail | _html_template_htmlescaper}}</a></p>
+                                                    {{end}}
                                                 </td>
                                             </tr>
                                             </tbody>
@@ -886,7 +888,7 @@
                                 </tr>
                                 <tr>
                                   <td align="center" class="footerInfo" style="font-size:0px;padding:4px 0px 0px 0px;word-break:break-word;">
-                                    <div style="font-family: sans-serif; font-weight: 600; text-align: center; font-size: 14px; line-height: 20px; color: #3F4350; padding: 0px 48px 0px 48px;"><a href="mattermost.com" color="#1C58D9" style="text-decoration: none; color: #1C58D9;">
+                                    <div style="font-family: sans-serif; font-weight: 600; text-align: center; font-size: 14px; line-height: 20px; color: #3F4350; padding: 0px 48px 0px 48px;"><a href="{{.Props.SiteURL | _html_template_urlfilter | _html_template_urlnormalizer | _html_template_attrescaper}}" color="#1C58D9" style="text-decoration: none; color: #1C58D9;">
                                         {{.Props.InviteFooterLearnMore | _html_template_htmlescaper}}</a></div>
                                   </td>
                                 </tr>

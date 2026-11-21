@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod bots;
+pub mod brand;
 pub mod bulk_export;
 pub mod bulk_import;
 pub mod import_functions;

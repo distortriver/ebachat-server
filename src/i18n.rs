@@ -1,5 +1,6 @@
 //! Mattermost's English strings (`i18n/en.json`, verbatim from the 12.1.0 server): the messages of API errors,
-//! looked up by error id as Go's `AppError.Translate` does with the default locale.
+//! looked up by error id as Go's `AppError.Translate` does with the default locale. Every text comes out naming
+//! the site instead of Mattermost (`crate::brand`), before its parameters are filled in.
 
 // i18n/en.json: Copyright (c) 2015-present Mattermost, Inc. Licensed under AGPL-3.0.
 
@@ -34,7 +35,7 @@ fn table() -> &'static HashMap<&'static str, String> {
 
 /// The English text of `id`, if it needs no parameters.
 pub fn t(id: &str) -> Option<&'static str> {
-    table().get(id).map(String::as_str).filter(|s| !s.contains("{{"))
+    table().get(id).map(String::as_str).filter(|s| !s.contains("{{")).map(crate::brand::intern)
 }
 
 fn plurals() -> &'static HashMap<&'static str, String> {
@@ -55,7 +56,8 @@ fn plurals() -> &'static HashMap<&'static str, String> {
 
 /// `T(id, count, params)`: English plural forms, "one" for 1 and "other" otherwise.
 pub fn tr_n(id: &str, count: usize, args: &[(&str, &str)]) -> Option<String> {
-    let mut s = if count == 1 { plurals().get(id).or_else(|| table().get(id)) } else { table().get(id) }?.clone();
+    let s = if count == 1 { plurals().get(id).or_else(|| table().get(id)) } else { table().get(id) }?;
+    let mut s = crate::brand::apply(s).into_owned();
     for (k, v) in args {
         s = s.replace(&format!("{{{{.{k}}}}}"), v);
     }
@@ -64,7 +66,7 @@ pub fn tr_n(id: &str, count: usize, args: &[(&str, &str)]) -> Option<String> {
 
 /// The English text of `id` with `{{.Name}}` parameters filled in.
 pub fn tr(id: &str, args: &[(&str, &str)]) -> Option<String> {
-    let mut s = table().get(id)?.clone();
+    let mut s = crate::brand::apply(table().get(id)?).into_owned();
     for (k, v) in args {
         s = s.replace(&format!("{{{{.{k}}}}}"), v);
     }
@@ -208,7 +210,7 @@ pub fn tl(locale_name: &str, id: &str, args: &[(&str, &str)]) -> String {
     };
     let name = if locale(locale_name).is_some() { locale_name } else { "en" };
     let s = lookup(name).or_else(|| lookup("en")).unwrap_or_else(|| id.to_string());
-    fill(s, args)
+    fill(crate::brand::apply(&s).into_owned(), args)
 }
 
 #[cfg(test)]
@@ -227,5 +229,51 @@ mod tests {
         assert_eq!(one, "1 image sent: a");
         assert_eq!(super::plural_category("ru", 5), "many");
         assert_eq!(super::plural_category("ru", 22), "few");
+    }
+
+    /// No locale's text names Mattermost once rendered, but in identifiers and lowercase URLs (docs/BRANDING.md).
+    #[test]
+    fn texts_name_the_site() {
+        let name = crate::brand::name();
+        assert_eq!(super::t("api.templates.post_body.button"), Some(format!("Reply in {name}").as_str()));
+        assert_eq!(
+            super::t("api.bot.teams_channels.add_message_mobile").unwrap(),
+            "Please add me to teams and channels you want me to interact in. To do this, use the browser or the desktop app."
+        );
+        let de = super::tl("de", "api.bot.teams_channels.add_message_mobile", &[]);
+        assert!(de.contains("die Desktop-App") && !de.contains("Mattermost"), "{de}");
+        let msg = super::tr("api.upgrade_to_enterprise.invalid-user.app_error", &[("MattermostUsername", "mm"), ("Path", "/p")]).unwrap();
+        assert!(msg.starts_with(&format!("{name} was unable")) && msg.contains("system user mm "), "{msg}");
+        for f in std::fs::read_dir("i18n").unwrap() {
+            let path = f.unwrap().path();
+            let entries: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for e in entries {
+                let id = e["id"].as_str().unwrap();
+                let texts: Vec<&str> = match &e["translation"] {
+                    serde_json::Value::String(s) => vec![s],
+                    serde_json::Value::Object(m) => m.values().filter_map(|v| v.as_str()).collect(),
+                    _ => vec![],
+                };
+                for s in texts {
+                    let out = crate::brand::apply_with(s, "Acme");
+                    let left = out
+                        .match_indices("Mattermost")
+                        .any(|(i, _)| !out[i + "Mattermost".len()..].starts_with(|c: char| c.is_ascii_uppercase()));
+                    assert!(!left && !out.contains("매터모스트"), "{}: {id}: {out}", path.display());
+                }
+            }
+        }
+    }
+
+    /// An API error's message, as the API sends it.
+    #[test]
+    fn errors_name_the_site() {
+        let name = crate::brand::name();
+        let e = crate::app::AppError::bad_request("ent.elasticsearch.test_config.license.error", "");
+        assert_eq!(e.message, "Your license doesn't support indexed search.");
+        let e = crate::app::AppError::bad_request("web.error.unsupported_browser.no_longer_support", "");
+        assert_eq!(e.message, format!("This browser is no longer supported by {name}"));
+        let e = crate::app::AppError::bad_request("no.such.id", "Mattermost could not do it.");
+        assert_eq!(e.message, format!("{name} could not do it."));
     }
 }

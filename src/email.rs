@@ -46,8 +46,9 @@ pub fn site_url(app: &App) -> String {
     app.cfg.str("ServiceSettings.SiteURL").to_string()
 }
 
-fn site_name(app: &App) -> String {
-    app.cfg.str("TeamSettings.SiteName").to_string()
+/// The site's name in emails: `TeamSettings.SiteName`, or the fallback (`crate::brand`).
+fn site_name(_app: &App) -> String {
+    crate::brand::name().to_string()
 }
 
 /// The locale of `i18n.T` (the server's) when none is given.
@@ -115,14 +116,14 @@ pub fn template_props(app: &App, locale: &str) -> BTreeMap<String, V> {
     let t = |id: &str| tl(&loc, id, &[]);
     let org = app.cfg.str("EmailSettings.FeedbackOrganization");
     let organization = if org.is_empty() { String::new() } else { t("api.templates.email_organization") + org };
-    let year = chrono::Utc::now().format("%Y").to_string();
     let mut p = BTreeMap::new();
     p.insert("EmailInfo1".into(), V::from(t("api.templates.email_info1")));
     p.insert("EmailInfo2".into(), V::from(t("api.templates.email_info2")));
     p.insert("EmailInfo3".into(), V::from(tl(&loc, "api.templates.email_info3", &[("SiteName", &site_name(app))])));
     p.insert("SupportEmail".into(), V::from(app.cfg.str("SupportSettings.SupportEmail")));
     p.insert("Footer".into(), V::from(t("api.templates.email_footer")));
-    p.insert("FooterV2".into(), V::from(tl(&loc, "api.templates.email_footer_v2", &[("CurrentYear", &year)])));
+    // Go's api.templates.email_footer_v2 is Mattermost, Inc.'s copyright and address: none here.
+    p.insert("FooterV2".into(), V::from(""));
     p.insert("Organization".into(), V::from(organization));
     p
 }
@@ -170,9 +171,10 @@ pub async fn send_email_change_verify(app: &App, new_email: &str, locale: &str, 
     p.insert("VerifyButton".into(), V::from(t("api.templates.email_change_verify_body.button")));
     p.insert("QuestionTitle".into(), V::from(t("api.templates.questions_footer.title")));
     p.insert("EmailInfo1".into(), V::from(t("api.templates.email_us_anytime_at")));
-    p.insert("SupportEmail".into(), V::from("feedback@mattermost.com"));
-    let year = chrono::Utc::now().format("%Y").to_string();
-    p.insert("FooterV2".into(), V::from(tl(locale, "api.templates.email_footer_v2", &[("CurrentYear", &year)])));
+    // Go names feedback@mattermost.com here; this server, the site's support address (the template shows the
+    // line only when there is one).
+    p.insert("SupportEmail".into(), V::from(app.cfg.str("SupportSettings.SupportEmail")));
+    p.insert("FooterV2".into(), V::from(""));
     send_mail(app, mail(new_email, subject, render_props("email_change_verify_body", p))).await
 }
 
@@ -1255,5 +1257,32 @@ mod tests {
         assert!(!l.limited("k", 21));
         assert!(l.limited("k", 1));
         assert_eq!(strip_tags("<b>hi</b> & <script>x</script>"), "hi &amp; ");
+    }
+
+    /// Emails name the site, without Mattermost's footer, address or links (docs/BRANDING.md).
+    #[test]
+    fn emails_name_the_site() {
+        let t = |id: &str| V::from(tl("en", id, &[]));
+        let mut p = BTreeMap::new();
+        p.insert("SiteURL".into(), V::from("https://chat.example.com"));
+        p.insert("Title".into(), t("api.templates.invite_body.title"));
+        p.insert("SubTitle".into(), t("api.templates.invite_body.subTitle"));
+        p.insert("InviteFooterTitle".into(), t("api.templates.invite_body_footer.title"));
+        p.insert("InviteFooterInfo".into(), t("api.templates.invite_body_footer.info"));
+        p.insert("InviteFooterLearnMore".into(), t("api.templates.invite_body_footer.learn_more"));
+        p.insert("FooterV2".into(), V::from(""));
+        let html = render_props("invite_body", p);
+        let name = crate::brand::name();
+        assert!(html.contains(&format!("Start collaborating with your team on {name}")), "{html}");
+        assert!(html.contains(&format!("What is {name}?")));
+        assert!(html.contains("href=\"https://chat.example.com\""));
+        assert!(!html.contains("Mattermost") && !html.contains("mattermost.com") && !html.contains("Palo Alto"));
+
+        let mut p = BTreeMap::new();
+        p.insert("QuestionTitle".into(), t("api.templates.questions_footer.title"));
+        p.insert("EmailInfo1".into(), t("api.templates.email_us_anytime_at"));
+        p.insert("SupportEmail".into(), V::from(""));
+        let html = render_props("email_change_verify_body", p);
+        assert!(!html.contains("mailto:") && !html.contains("Mattermost"));
     }
 }

@@ -477,7 +477,7 @@ async fn session_expired_message(app: &App, user_id: &str) -> String {
         _ => "en".to_string(),
     };
     let hours = app.cfg.i64("ServiceSettings.SessionLengthMobileInHours").to_string();
-    crate::i18n::tl(&locale, "api.push_notifications.session.expired", &[("siteName", app.cfg.str("TeamSettings.SiteName")), ("hoursCount", &hours)])
+    crate::i18n::tl(&locale, "api.push_notifications.session.expired", &[("siteName", crate::brand::name()), ("hoursCount", &hours)])
 }
 
 /// The ETag of the last notices fetch and its body (`noticesCache`, `utils.GetURLWithCache`).

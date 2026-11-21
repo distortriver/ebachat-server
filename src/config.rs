@@ -45,6 +45,7 @@ impl Config {
         let src = std::env::var("MM_CONFIG").unwrap_or_else(|_| "config/config.json".into());
         let raw = read_source(&src).await?;
         let cfg = Config::from_raw(raw, src);
+        crate::brand::set(cfg.str("TeamSettings.SiteName"));
         let mut persisted = cfg.raw.lock().unwrap().clone();
         if let Some(m) = persisted.as_object_mut() {
             m.remove("FeatureFlags");
@@ -104,6 +105,7 @@ impl Config {
         *self.env_paths.lock().unwrap() = paths;
         self.cur.store(leak(v), Ordering::Release);
         crate::app::DEVELOPER.store(self.bool("ServiceSettings.EnableDeveloper"), Ordering::Relaxed);
+        crate::brand::set(self.str("TeamSettings.SiteName"));
     }
 
     /// `config.Store.Set`: `new` with defaults where it has none and its masked secrets as they were, checked,

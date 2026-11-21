@@ -729,7 +729,7 @@ async fn generate_mfa(St(app): St<State>, Auth(s): Auth, Path(user_id): Path<Str
     let secret = base32_std(&rand::random::<[u8; 20]>());
     let site = app.cfg.str("ServiceSettings.SiteURL").trim();
     let issuer = if site.is_empty() {
-        "Mattermost".to_string()
+        crate::brand::name().to_string()
     } else {
         let s = site.trim_start_matches("https://").trim_start_matches("http://");
         s.strip_prefix("www.").unwrap_or(s).to_string()

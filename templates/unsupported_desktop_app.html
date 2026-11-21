@@ -1,3 +1,4 @@
+<!-- Changed for ebachat-server: the footer names the site instead of Mattermost Inc. (docs/BRANDING.md) -->
 {{define "unsupported_desktop_app"}}
     <!DOCTYPE html>
     <html>
@@ -159,7 +160,7 @@
                 </div>
             </main>
             <footer class="footer">
-                <span>© {{.Props.CopyrightYear}} Mattermost Inc.</span>
+                <span>© {{.Props.CopyrightYear}} {{.Props.SiteName}}</span>
                 <span class="footer-links">
                     {{if .Props.AboutLink}}<a href="{{.Props.AboutLink}}" target="_blank" rel="noopener noreferrer">{{.Props.FooterAboutLabel}}</a>{{end}}
                     {{if .Props.PrivacyPolicyLink}}<a href="{{.Props.PrivacyPolicyLink}}" target="_blank" rel="noopener noreferrer">{{.Props.FooterPrivacyLabel}}</a>{{end}}

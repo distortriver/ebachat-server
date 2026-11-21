@@ -427,7 +427,8 @@ fn unsupported_browser(app: &App, headers: &HeaderMap, uri: &Uri) -> Response {
             "Title": t("web.error.unsupported_browser.download_the_app"),
             "SupportedVersionString": t(&format!("web.error.unsupported_browser.min_os_version.{os}")),
             "Label": t("web.error.unsupported_browser.download"),
-            "Link": "https://mattermost.com/pl/download-apps",
+            // Go links Mattermost's downloads; this server, the configured app download link.
+            "Link": app.cfg.str("NativeAppSettings.AppDownloadLink"),
             "InstallGuide": t(&format!("web.error.unsupported_browser.install_guide.{os}")),
             "InstallGuideLink": guide,
         })
@@ -473,7 +474,7 @@ fn unsupported_browser(app: &App, headers: &HeaderMap, uri: &Uri) -> Response {
 
 /// `renderUnsupportedDesktopApp`.
 fn unsupported_desktop_app(app: &App, ua: &str) -> Response {
-    let site_name = app.cfg.str("TeamSettings.SiteName");
+    let site_name = crate::brand::name();
     let current = desktop_app_version(ua).unwrap_or_else(|| "unknown".into());
     let min = app.cfg.str("ServiceSettings.MinimumDesktopAppVersion");
     let message = crate::i18n::tr(
