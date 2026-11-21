@@ -245,3 +245,13 @@ on the shared database, with its job schedulers.
     cannot create users past 250 on this database): none for the guest, delivered to a regular user.
   
   `diff.py --writes` 61/61, `routes.py` the 5 known diffs, `caches.py` 43/43; unit tests `hub::tests`.
+
+## Websocket connections that stopped answering were never dropped (fixed)
+
+- **Was:** the socket sent a ping every 60 s but had no read deadline: a client gone without a close (half-open
+  TCP, a suspended phone) or one that never reads kept its connection, its send queue and the user's `online`
+  status for as long as the kernel kept the socket. Many such clients hold memory and file descriptors without
+  bound. Go's `readPump` sets a read deadline of `pongWaitTime` (100 s) that only a pong moves.
+- **Now:** the same deadline: no pong for 100 s ends the connection, which then goes offline as a closed one does.
+  A pong also runs `SetStatusAwayIfNeeded` (non-manual), as Go's pong handler: an idle user goes `away` after
+  `UserStatusAwayTimeout`. Seen with `tools/diff/scen_live.py` (`ws_no_pong`).

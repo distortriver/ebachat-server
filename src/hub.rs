@@ -57,6 +57,10 @@ pub struct Conn {
 /// (`webhub.broadcast: cannot send, closing websocket`); it reconnects and loads what it missed. Without the bound
 /// one stuck client would hold every event sent to it in memory.
 const SEND_QUEUE: usize = 256;
+/// `pongWaitTime`: how long a connection lives without a pong.
+const PONG_WAIT: Duration = Duration::from_secs(100);
+/// `pingInterval`: six tenths of `pongWaitTime`.
+const PING_INTERVAL: Duration = Duration::from_secs(60);
 
 impl Conn {
     fn new(id: u64, session: Arc<Session>, tx: mpsc::Sender<Out>) -> Conn {
@@ -591,7 +595,7 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
     let closing = conn.closing.clone();
     let mut writer = tokio::spawn(async move {
         let mut seq: i64 = 0;
-        let mut ping = tokio::time::interval(Duration::from_secs(60));
+        let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await;
         loop {
             tokio::select! {
@@ -635,15 +639,25 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
     app.touch_session(&session).await;
     app.set_status_online(&user_id, false).await;
 
+    // `WebConn.readPump`: the read deadline is `pongWaitTime` from the connect and moves only with a pong, so a
+    // client that stops answering the pings (gone without a close, or never reading) is dropped and goes offline.
+    let mut deadline = tokio::time::Instant::now() + PONG_WAIT;
     loop {
         // The writer ending (closed, full queue, broken socket) ends the connection without waiting for the
         // client's next frame.
         let m = tokio::select! {
             m = stream.next() => m,
             _ = &mut writer => break,
+            _ = tokio::time::sleep_until(deadline) => break,
         };
         let Some(Ok(m)) = m else { break };
         match m {
+            // The pong handler: a new deadline, and the user goes away once idle past `UserStatusAwayTimeout`.
+            Message::Pong(_) => {
+                deadline = tokio::time::Instant::now() + PONG_WAIT;
+                let (app, user_id) = (app.clone(), user_id.clone());
+                tokio::spawn(async move { app.set_status_away_if_needed(&user_id, false).await });
+            }
             // `ServeWebSocket`: every request gets the session as it is now (cache or database), never the one of
             // the connect: a revoked session fails, a changed one carries its new roles.
             Message::Text(t) => match app.session(&conn.token).await {
@@ -689,6 +703,7 @@ fn is_zero(n: &i64) -> bool {
 enum WsError {
     Param(&'static str),
     Busy,
+    BadAction,
 }
 
 /// `ServeWebSocket` when the connection's session is gone or invalid: the error reply, its detail wiped.
@@ -733,7 +748,8 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
             }
             None => Err(WsError::Param("user_is_active")),
         },
-        "get_statuses" => Ok(Some(json!({}))),
+        // `GetAllStatuses`: every status in the cache, id -> status.
+        "get_statuses" => Ok(Some(Value::Object(app.all_cached_statuses().into_iter().collect()))),
         "get_statuses_by_ids" => {
             let ids: Vec<String> = data["user_ids"]
                 .as_array()
@@ -747,7 +763,8 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
             }
         }
         "ping" => Ok(Some(json!({"text": "pong", "version": crate::SERVER_VERSION_FULL, "server_time": now_ms()}))),
-        _ => Err(WsError::Param("action")),
+        // `WebSocketRouter.ServeWebSocket`: no handler for the action.
+        _ => Err(WsError::BadAction),
     };
     let seq_reply = seq.as_i64().unwrap_or(0);
     let msg = match reply {
@@ -756,6 +773,7 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
             let (id, status_code, args): (&str, u16, &[(&str, &str)]) = match &e {
                 WsError::Param(name) => ("api.websocket_handler.invalid_param.app_error", 400, &[("Name", name)]),
                 WsError::Busy => ("api.websocket_handler.server_busy.app_error", 503, &[]),
+                WsError::BadAction => ("api.web_socket_router.bad_action.app_error", 500, &[]),
             };
             let message = crate::i18n::tr(id, args).unwrap_or_else(|| id.to_string());
             let error = WsReplyError { id: id.to_string(), message, detailed_error: "", status_code };
