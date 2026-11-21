@@ -13,7 +13,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::app::{ApiResult, App};
-use crate::hub::{Broadcast, PerUser};
+use crate::hub::{Broadcast, PerUser, PostedAck};
 use crate::model::post::kind;
 use crate::model::{Channel, Post, PostList, StringMap, User, channel, status};
 use crate::posts::{all_strings, without_code};
@@ -863,11 +863,26 @@ pub async fn send_notifications(
         }
         (!extra.is_empty()).then_some(extra)
     });
+    // shouldAckWebsocketNotification: the members whose desktop notifications fire for every message here.
+    let users = profiles
+        .keys()
+        .filter(|id| {
+            let cl = props.get(*id).and_then(|m| m.0.get("desktop")).map(String::as_str).unwrap_or("");
+            let ul = profiles.get(*id).map_or("", |u| u.notify_prop("desktop"));
+            cl == "all"
+                || (cl == "default" && ul == "all")
+                || (c.r#type == channel::GROUP && ((cl == "default" && ul == "mention") || cl == "mention"))
+        })
+        .cloned()
+        .collect();
+    let posted_ack =
+        Some(Arc::new(PostedAck { poster: post.user_id.clone(), direct: c.r#type == channel::DIRECT, users }));
     let b = if kind::is_add_membership(&post.r#type) && crate::posts::excludes_membership(c) {
         Broadcast {
             user_id: post.prop_str("addedUserId").to_string(),
             per_user: Some(per_user),
             post_hook: post_hook.clone(),
+            posted_ack,
             ..Default::default()
         }
     } else {
@@ -875,6 +890,7 @@ pub async fn send_notifications(
             channel_id: post.channel_id.clone(),
             per_user: Some(per_user),
             post_hook: post_hook.clone(),
+            posted_ack,
             ..Default::default()
         }
     };

@@ -372,13 +372,16 @@ impl App {
             }
             // Go runs each set as its own query and a set whose query fails (a tsquery Postgres rejects, as `-#tag`
             // alone gives) logs it and finds nothing, the other sets still do: here the set's group is dropped.
-            if let Err(e) = sqlx::query("SELECT to_tsquery('english', $1)").bind(&q).execute(&self.db).await {
+            // The database's default_text_search_config, which its full-text indexes are built with.
+            let cfg = crate::file_api::text_search_config(self).await;
+            let check = format!("SELECT to_tsquery('{cfg}', $1)");
+            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(check)).bind(&q).execute(&self.db).await {
                 eprintln!("query error searching posts: {e}");
                 binds.truncate(first);
                 return Ok(None);
             }
             let q = put(Bind::Text(q), binds);
-            conds.push(format!("to_tsvector('english', q2.{search_type}) @@ to_tsquery('english', {q})"));
+            conds.push(format!("to_tsvector('{cfg}', q2.{search_type}) @@ to_tsquery('{cfg}', {q})"));
         }
         if p.is_hashtag {
             // Go keeps a post only if one of its hashtags is one of the terms, case-insensitively (strings.ToUpper);

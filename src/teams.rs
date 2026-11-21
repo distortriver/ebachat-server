@@ -669,6 +669,15 @@ pub fn not_modified(headers: &HeaderMap, etag: &str) -> Option<Response> {
     })
 }
 
+/// The answer with its `ETag`, for the client to send back as `If-None-Match`.
+pub fn with_etag(r: impl IntoResponse, etag: &str) -> Response {
+    let mut r = r.into_response();
+    if let Ok(v) = HeaderValue::from_str(etag) {
+        r.headers_mut().insert(header::ETAG, v);
+    }
+    r
+}
+
 // ---------- members ----------
 
 async fn get_member(

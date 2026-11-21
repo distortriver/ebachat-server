@@ -1056,8 +1056,9 @@ async fn channels_for_team_for_user(
     St(app): St<State>,
     Auth(s): Auth,
     Path((user_id, team_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     q: Q,
-) -> ApiResult<Json<Vec<Channel>>> {
+) -> ApiResult<Response> {
     let user_id = user_param(&s, &user_id)?;
     require_id(&team_id, "team_id")?;
     app.require_user(&s, &user_id).await?;
@@ -1069,8 +1070,26 @@ async fn channels_for_team_for_user(
     let mut list =
         channels_for_team_for_user_list(&app, &team_id, &user_id, parse_bool(q.get("include_deleted")), last_delete_at)
             .await?;
+    let etag = channel_list_etag(&list);
+    if let Some(r) = crate::teams::not_modified(&headers, &etag) {
+        return Ok(r);
+    }
     app.fill_channel_props(&mut list).await?;
-    Ok(Json(list))
+    Ok(crate::teams::with_etag(Json(list), &etag))
+}
+
+/// `ChannelList.Etag`: the channel posted in or updated last, and how many there are.
+fn channel_list_etag(list: &[Channel]) -> String {
+    let (mut id, mut t) = ("0", 0i64);
+    for c in list {
+        if c.last_post_at > t {
+            (id, t) = (&c.id, c.last_post_at);
+        }
+        if c.update_at > t {
+            (id, t) = (&c.id, c.update_at);
+        }
+    }
+    format!("{}.{id}.{t}.0.{}", crate::SERVER_VERSION, list.len())
 }
 
 /// `getChannelsForUser`: every channel of the user, in pages of 100 by id.
@@ -1201,5 +1220,23 @@ async fn channel_members_for_user(
 impl<T: serde::Serialize> serde::Serialize for perm::WithScheme<T> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.0.serialize(s)
+    }
+}
+
+#[cfg(test)]
+mod etag_tests {
+    use crate::model::Channel;
+
+    #[test]
+    fn channel_list_etag() {
+        let v = crate::SERVER_VERSION;
+        let c = |id: &str, post: i64, upd: i64| Channel {
+            id: id.into(),
+            last_post_at: post,
+            update_at: upd,
+            ..Default::default()
+        };
+        assert_eq!(super::channel_list_etag(&[]), format!("{v}.0.0.0.0"));
+        assert_eq!(super::channel_list_etag(&[c("a", 5, 1), c("b", 2, 9), c("c", 9, 0)]), format!("{v}.b.9.0.3"));
     }
 }
