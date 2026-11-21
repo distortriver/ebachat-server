@@ -51,8 +51,21 @@ Differences that remain on purpose (2026-11-21, each confirmed by the project ow
 - Post search pages for real; Go's database search answers the newest 100 on page 0 and nothing after
   (docs/SEARCH.md). Within the first 100 the posts and their order match, apart from posts sharing a `create_at`
   millisecond, whose order Go leaves undefined and Rust fixes by id.
-- Noise: the built-in commands' order in `GET /commands` and autocomplete — Go's follows its map iteration and
-  changes per process, Rust's is by trigger.
+- Guests: Go's `users/stats` counts a guest's users once per shared channel, and a promoted guest joins the
+  default channels as a guest; `analytics/old?name=extra_counts&team_id=` is a 500 in Go (broken SQL). Rust does
+  none of these (docs/USERS.md, docs/ADMIN.md).
+- Build identity: `BuildNumber`, `BuildDate`, `BuildHash*` in `config/client` and `X-Version-Id` are Rust's own; the
+  12.1.0 version clients gate features on is the same.
+- Internal only: MFA (de)activation writes the Users row once (Go twice, same final row); `total_master_db_connections`
+  in analytics is each server's own open pool connections.
+- Noise, shown, not assumed:
+  - Go against Go (`B_IMPL=go sqldiff.sh`, all eleven scenarios) differs on its own in `files_channel_posts`,
+    `adm_team_add_batch`, `adm_users_team_sort_last`, `guests_team2_create` and `p_priority_bad`.
+  - The built-in commands' order in `GET /commands` and autocomplete: Go ranges over a map, so the order changes
+    between two calls to one process; Rust's is by trigger.
+  - Status events and rows in `ws_no_pong`, `import_run`, `export_channel`: the away timer (`UserStatusAwayTimeout`,
+    applied on a pong) fires at a wall-clock time that falls in different steps on the two servers; over a whole
+    run the totals match (jobs), and with a 30 s timeout both turn an idle user away at the same second.
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
   each run's timing; image bytes (encoders differ, sizes and formats match). Adding several members at once: Go
   posts each "added to the channel" message from a goroutine, so a member added later in the same request may or
