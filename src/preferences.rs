@@ -26,7 +26,7 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/users/{user_id}/preferences", get(get_all).put(update))
         .route("/api/v4/users/{user_id}/preferences/delete", post(delete))
         .route("/api/v4/users/{user_id}/preferences/{category}", get(get_category))
-        .route("/api/v4/users/{user_id}/preferences/{category}/name/{name}", get(get_one))
+        .route("/api/v4/users/{user_id}/preferences/{category}/name/{preference_name}", get(get_one))
 }
 
 impl App {
