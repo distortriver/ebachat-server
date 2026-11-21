@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, Body, State, is_valid_id};
 use crate::channels::{self as ch, WithTeam, sanitize_member};
 use crate::db::{self, Table};
-use crate::model::channel::{DIRECT, GROUP, OPEN, PRIVATE};
+use crate::model::channel::{DIRECT, GROUP, OPEN, OPEN_BOARD, PRIVATE};
 use crate::model::{Channel, ChannelMember, Session, Team};
 use crate::perm;
 
@@ -108,6 +108,12 @@ fn string_array(v: Value, sorted: bool) -> ApiResult<Vec<String>> {
 
 async fn create_channel(St(app): St<State>, Auth(s): Auth, Body(c): Body<Option<Channel>>) -> ApiResult<Response> {
     let Some(mut c) = c else { return Err(AppError::invalid_param("channel")) };
+    if c.is_board() {
+        return Err(AppError::invalid_param("type").detail("cannot create board channels via /channels endpoint"));
+    }
+    if c.is_space() {
+        return Err(AppError::invalid_param("type").detail("cannot create space channels via /channels endpoint"));
+    }
     if c.team_id.is_empty() {
         return Err(AppError::invalid_param("team_id").detail("Missing team_id"));
     }
@@ -328,7 +334,8 @@ async fn channels_member_count(
     for c in &found {
         // HasPermissionToChannelMemberCount
         let ok = app.user_has_channel_perm(&user, c, perm::READ_CHANNEL_CONTENT).await?
-            || (c.r#type == OPEN && app.user_has_team_perm(&user, &c.team_id, perm::LIST_TEAM_CHANNELS).await?);
+            || ((c.r#type == OPEN || c.r#type == OPEN_BOARD)
+                && app.user_has_team_perm(&user, &c.team_id, perm::LIST_TEAM_CHANNELS).await?);
         if !ok {
             return Err(AppError::forbidden_perm(perm::LIST_TEAM_CHANNELS));
         }
@@ -368,6 +375,11 @@ async fn view_channel(
     {
         if !id.is_empty() && !is_valid_id(id) {
             return Err(AppError::invalid_param(name));
+        }
+    }
+    for id in [&view.channel_id, &view.prev_channel_id] {
+        if !id.is_empty() {
+            app.reject_board_channel(id).await?;
         }
     }
     // ViewChannel
@@ -843,6 +855,7 @@ async fn update_notify_props(
 ) -> ApiResult<Json<Value>> {
     require_id(&id, "channel_id")?;
     let user_id = user_param(&s, &user_id)?;
+    app.reject_board_or_space_channel(&id).await?;
     let props = props.ok_or_else(|| AppError::invalid_param("notify_props"))?;
     app.require_user(&s, &user_id).await?;
     app.update_member_notify_props(&props, &id, &user_id).await?;
@@ -865,6 +878,7 @@ async fn update_scheme_roles(
 ) -> ApiResult<Json<Value>> {
     require_id(&id, "channel_id")?;
     let user_id = user_param(&s, &user_id)?;
+    app.reject_board_or_space_channel(&id).await?;
     app.require_channel(&s, &id, perm::MANAGE_CHANNEL_ROLES).await?;
     app.update_member_scheme_roles(&id, &user_id, r.scheme_guest, r.scheme_user, r.scheme_admin).await?;
     Ok(status_ok())

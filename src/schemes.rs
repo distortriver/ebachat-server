@@ -193,6 +193,7 @@ async fn update_channel_member_roles(
     if !is_valid_id(&user_id) {
         return Err(AppError::invalid_url_param("user_id"));
     }
+    app.reject_board_or_space_channel(&channel_id).await?;
     let roles = roles_param(&b);
     if !valid_member_roles(&roles, [perm::CHANNEL_GUEST, perm::CHANNEL_USER, perm::CHANNEL_ADMIN]) {
         return Err(AppError::invalid_param("roles"));

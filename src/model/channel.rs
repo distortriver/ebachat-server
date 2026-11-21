@@ -11,6 +11,16 @@ pub const OPEN: &str = "O";
 pub const PRIVATE: &str = "P";
 pub const DIRECT: &str = "D";
 pub const GROUP: &str = "G";
+/// The backing channel of a space (`ChannelTypeSpace`): opaque to the `/channels` API.
+pub const SPACE: &str = "S";
+/// Board channels (`ChannelTypeOpenBoard`, `ChannelTypePrivateBoard`): served by `/boards`, not `/channels`.
+pub const OPEN_BOARD: &str = "BO";
+pub const PRIVATE_BOARD: &str = "BP";
+
+/// The store's `messageChannelTypes`: the types its generic lookups, lists and searches return.
+pub fn is_message_type(t: &str) -> bool {
+    matches!(t, OPEN | PRIVATE | DIRECT | GROUP)
+}
 
 #[model(table = "channels")]
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +68,14 @@ pub struct Channel {
 impl Channel {
     pub fn is_group_or_direct(&self) -> bool {
         self.r#type == DIRECT || self.r#type == GROUP
+    }
+    /// `IsBoard`.
+    pub fn is_board(&self) -> bool {
+        self.r#type == OPEN_BOARD || self.r#type == PRIVATE_BOARD
+    }
+    /// `IsSpace`.
+    pub fn is_space(&self) -> bool {
+        self.r#type == SPACE
     }
     /// The other user of a direct channel named `a__b`.
     pub fn other_user(&self, me: &str) -> Option<String> {

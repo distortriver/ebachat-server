@@ -92,7 +92,8 @@ async fn patch_moderations(_: Auth) -> AppError {
     AppError::new(StatusCode::FORBIDDEN, "api.channel.patch_channel_moderations.license.error", "")
 }
 
-/// Auto-translation needs an enterprise service.
+/// Auto-translation needs an enterprise service. `updateChannelMemberAutotranslation` checks it before its board
+/// and space guards, so they are never reached.
 async fn member_autotranslation(_: Auth) -> AppError {
     AppError::new(
         StatusCode::FORBIDDEN,
@@ -556,6 +557,7 @@ async fn convert_to_channel(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Channel>> {
     require_id(&channel_id, "channel_id")?;
+    app.reject_board_or_space_channel(&channel_id).await?;
     let r: ConvertRequest = match serde_json::from_slice::<Option<ConvertRequest>>(&body) {
         Ok(Some(r)) => r,
         Ok(None) => return Err(AppError::invalid_param("body")),
@@ -683,6 +685,9 @@ async fn move_channel(
     }
 
     // MoveChannel
+    if channel.is_space() {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "app.channel.move_channel.space.app_error", ""));
+    }
     let non_members = app.non_team_members(&channel.id, &team.id).await?;
     if !non_members.is_empty() {
         return Err(AppError::internal("app.channel.move_channel.members_do_not_match.error", ""));
@@ -770,6 +775,7 @@ async fn members_minus_group_members(
     q: Q,
 ) -> ApiResult<Json<UsersWithGroupsAndCount>> {
     require_id(&channel_id, "channel_id")?;
+    app.reject_space_channel(&channel_id).await?;
     let raw = q.get("group_ids").cloned().unwrap_or_default();
     // groupIDsQueryParamRegex removes what is not an id character or a comma.
     let kept: String = raw.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ',').collect();

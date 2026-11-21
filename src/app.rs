@@ -240,8 +240,45 @@ impl App {
         Ok(out)
     }
 
-    /// `ChannelStore.Get` through the channel cache.
+    /// `ChannelStore.Get` through the channel cache: message channels only, as the store's `messageChannelTypes`
+    /// filter; boards and space backing channels are not found.
     pub async fn channel(&self, id: &str) -> ApiResult<Option<Arc<crate::model::Channel>>> {
+        Ok(self.channel_any_type(id).await?.filter(|c| crate::model::channel::is_message_type(&c.r#type)))
+    }
+
+    /// api4 `rejectBoardChannelByID`: 400 when the id is a board channel's. Only a board found rejects; a
+    /// failed lookup lets the request through, as Go's.
+    pub async fn reject_board_channel(&self, id: &str) -> ApiResult<()> {
+        match self.channel_any_type(id).await {
+            Ok(Some(c)) if c.is_board() => Err(board_channel_error()),
+            _ => Ok(()),
+        }
+    }
+
+    /// api4 `rejectSpaceChannelByID`: 400 when the id is a space's backing channel. It fails closed: a lookup
+    /// error other than not-found is returned, as `GetChannelOfType`'s 500. Go reads the primary so a fresh
+    /// space cannot slip through on replica lag; there is one database here, and a cached channel's type never
+    /// becomes a space's, so the cache answers as well.
+    pub async fn reject_space_channel(&self, id: &str) -> ApiResult<()> {
+        match self.channel_any_type(id).await {
+            Ok(Some(c)) if c.is_space() => Err(space_channel_error()),
+            Ok(_) => Ok(()),
+            Err(e) => {
+                Err(AppError::internal("app.channel.get.find.app_error", e.detailed_error).with_param("channel_id", id))
+            }
+        }
+    }
+
+    /// `rejectBoardChannelByID` then `rejectSpaceChannelByID`, Go's order on most guarded endpoints.
+    pub async fn reject_board_or_space_channel(&self, id: &str) -> ApiResult<()> {
+        self.reject_board_channel(id).await?;
+        self.reject_space_channel(id).await
+    }
+
+    /// A channel of any type through the channel cache: the row without `Get`'s type filter, as Go's
+    /// `GetChannelOfType` and `GetBoardChannel` read it. The cache may hold boards and spaces;
+    /// [`App::channel`] filters them out.
+    pub async fn channel_any_type(&self, id: &str) -> ApiResult<Option<Arc<crate::model::Channel>>> {
         if let Some(c) = self.caches.channel.get(id) {
             return Ok(Some(c));
         }
@@ -259,6 +296,18 @@ impl App {
             AppError::new(StatusCode::NOT_FOUND, "app.channel.get.existing.app_error", "Unable to find the existing channel.")
         })
     }
+}
+
+/// api4 `rejectBoardChannelByID`'s error.
+pub fn board_channel_error() -> AppError {
+    AppError::bad_request("api.channel.board_channel.app_error", "")
+        .detail("board channels cannot be accessed via /channels endpoints")
+}
+
+/// api4 `rejectSpaceChannelByID`'s error.
+pub fn space_channel_error() -> AppError {
+    AppError::bad_request("api.channel.space_channel.app_error", "")
+        .detail("space channels cannot be accessed via /channels endpoints")
 }
 
 pub fn now_ms() -> i64 {
@@ -727,4 +776,77 @@ pub fn map_from_json(b: &[u8]) -> std::collections::HashMap<String, String> {
         .next()
         .and_then(Result::ok)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Channel;
+    use crate::model::channel::{OPEN, OPEN_BOARD, PRIVATE_BOARD, SPACE};
+
+    /// An app whose database cannot be reached: lookups that miss the channel cache fail.
+    fn app() -> State {
+        let dir = std::env::temp_dir().join("ebachat-board-guard-test");
+        let cfg = Config::from_value(serde_json::json!({"FileSettings": {"Directory": dir.to_string_lossy()}}));
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .unwrap();
+        App::new(db, cfg).unwrap()
+    }
+
+    fn cache(app: &App, kind: &str) -> String {
+        let id = new_id();
+        app.caches.channel.put(id.clone(), Arc::new(Channel { id: id.clone(), r#type: kind.into(), ..Default::default() }));
+        id
+    }
+
+    #[tokio::test]
+    async fn board_and_space_guards() {
+        let app = app();
+        for kind in [OPEN_BOARD, PRIVATE_BOARD] {
+            let id = cache(&app, kind);
+            let e = app.reject_board_channel(&id).await.unwrap_err();
+            assert_eq!((e.status_code, e.id.as_str()), (400, "api.channel.board_channel.app_error"));
+            assert_eq!(e.detailed_error, "board channels cannot be accessed via /channels endpoints");
+            assert!(e.message.starts_with("Board channels cannot be accessed"), "{}", e.message);
+            assert!(app.reject_space_channel(&id).await.is_ok());
+            assert_eq!(app.reject_board_or_space_channel(&id).await.unwrap_err().id, e.id);
+            assert!(app.channel(&id).await.unwrap().is_none(), "Get leaves boards out");
+            assert!(app.channel_any_type(&id).await.unwrap().is_some());
+        }
+
+        let id = cache(&app, SPACE);
+        assert!(app.reject_board_channel(&id).await.is_ok());
+        let e = app.reject_space_channel(&id).await.unwrap_err();
+        assert_eq!((e.status_code, e.id.as_str()), (400, "api.channel.space_channel.app_error"));
+        assert_eq!(e.detailed_error, "space channels cannot be accessed via /channels endpoints");
+        assert_eq!(app.reject_board_or_space_channel(&id).await.unwrap_err().id, e.id);
+        assert!(app.channel(&id).await.unwrap().is_none(), "Get leaves spaces out");
+
+        let id = cache(&app, OPEN);
+        assert!(app.reject_board_or_space_channel(&id).await.is_ok());
+        assert!(app.channel(&id).await.unwrap().is_some());
+
+        // A failed lookup: the board guard lets the request through, the space guard fails closed.
+        let id = new_id();
+        assert!(app.reject_board_channel(&id).await.is_ok());
+        let e = app.reject_space_channel(&id).await.unwrap_err();
+        assert_eq!((e.status_code, e.id.as_str()), (500, "app.channel.get.find.app_error"));
+        assert!(e.message.contains(&id), "{}", e.message);
+        assert_eq!(app.reject_board_or_space_channel(&id).await.unwrap_err().id, e.id);
+    }
+
+    #[test]
+    fn channel_types() {
+        let c = |t: &str| Channel { r#type: t.into(), ..Default::default() };
+        assert!(c(OPEN_BOARD).is_board() && c(PRIVATE_BOARD).is_board() && !c(SPACE).is_board() && !c(OPEN).is_board());
+        assert!(c(SPACE).is_space() && !c(OPEN_BOARD).is_space());
+        for t in ["O", "P", "D", "G"] {
+            assert!(crate::model::channel::is_message_type(t));
+        }
+        for t in [SPACE, OPEN_BOARD, PRIVATE_BOARD, ""] {
+            assert!(!crate::model::channel::is_message_type(t));
+        }
+    }
 }

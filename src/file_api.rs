@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, State, is_valid_id, new_id, now_ms};
-use crate::model::channel::{DIRECT, GROUP, OPEN};
+use crate::model::channel::{DIRECT, GROUP, OPEN, OPEN_BOARD};
 use crate::model::{Base64, Channel, FileInfo, Session};
 use crate::search_params::{self, SearchParams};
 use crate::{db, images, perm};
@@ -241,7 +241,7 @@ impl App {
         if ok {
             return Ok((true, member));
         }
-        if c.r#type == OPEN && !self.cfg.bool("ComplianceSettings.Enable") {
+        if (c.r#type == OPEN || c.r#type == OPEN_BOARD) && !self.cfg.bool("ComplianceSettings.Enable") {
             return Ok((self.has_team_perm(s, &c.team_id, perm::READ_PUBLIC_CHANNEL).await, false));
         }
         Ok((false, false))
