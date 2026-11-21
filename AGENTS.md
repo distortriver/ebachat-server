@@ -7,8 +7,9 @@ A chat server in Rust that replaces the Mattermost server (Go) for EBAC's intern
 
 - **Same database.** For now the server runs on an existing Mattermost PostgreSQL database without changing its
   schema. The Go server and this one must be able to take turns on the same database: whatever one writes, the
-  other reads correctly. Until we drop compatibility, never add, alter or drop tables, columns or indexes, and
-  never write rows in a shape the Go server would not write.
+  other reads correctly. Until we drop compatibility, never add, alter or drop tables or columns, and never write
+  rows in a shape the Go server would not write. The one exception is what the Go server cannot see: extra indexes
+  (and the like) as our own migrations in `migrations/ebachat/` (see `migrations/README.md`).
 - **Same protocol.** REST API v4 and the websocket events, as the Mattermost server sends them: paths, status codes,
   JSON field names, empty values (`""` vs `null` vs missing), ordering and pagination. EBAChat and the stock
   Mattermost web and mobile clients must work against it unchanged.

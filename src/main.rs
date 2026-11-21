@@ -12,16 +12,18 @@ async fn main() -> anyhow::Result<()> {
         .acquire_timeout(Duration::from_secs(10))
         .connect(&url)
         .await?;
-    cfg.diagnostic_id = sqlx::query_scalar("SELECT Value FROM Systems WHERE Name = 'DiagnosticId'")
-        .fetch_optional(&db)
-        .await?
-        .unwrap_or_default();
     let listen = std::env::var("LISTEN").unwrap_or_else(|_| {
         let l = cfg.str("ServiceSettings.ListenAddress");
         if l.starts_with(':') { format!("0.0.0.0{l}") } else { l.to_string() }
     });
     ebachat_server::logs::configure(cfg.value());
     ebachat_server::logs::initializing();
+    // As Go's store does at startup: pending schema migrations (Mattermost's, then ours) before anything reads.
+    ebachat_server::migrate::run(&db, cfg.i64("SqlSettings.MigrationsStatementTimeoutSeconds")).await?;
+    cfg.diagnostic_id = sqlx::query_scalar("SELECT Value FROM Systems WHERE Name = 'DiagnosticId'")
+        .fetch_optional(&db)
+        .await?
+        .unwrap_or_default();
     let app = App::new(db, cfg)?;
     app.hub.set_app(&app);
     ebachat_server::license::load(&app).await;

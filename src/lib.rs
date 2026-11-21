@@ -41,6 +41,7 @@ pub mod job_workers;
 pub mod jobs;
 pub mod license;
 pub mod logs;
+pub mod migrate;
 pub mod model;
 pub mod notify;
 pub mod oauth;
