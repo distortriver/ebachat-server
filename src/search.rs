@@ -4,7 +4,7 @@
 // public/model/search_params.go and store/sqlstore/post_store.go (search), Copyright (c) 2015-present
 // Mattermost, Inc. Licensed under AGPL-3.0.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use axum::extract::{Path, State as St};
@@ -32,8 +32,14 @@ pub fn routes() -> Router<State> {
 const SEARCH_PER_PAGE: i64 = 60;
 /// The most posts one search page answers.
 const SEARCH_MAX_PER_PAGE: i64 = 1000;
-/// How deep paging goes: the newest this many matches per set of terms.
+/// How deep paging goes: the newest this many matches.
 const SEARCH_MAX_WINDOW: i64 = 10_000;
+
+/// A value bound to the search query, in placeholder order.
+enum Bind {
+    Text(String),
+    Arr(Vec<String>),
+}
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct SearchBody {
@@ -262,8 +268,16 @@ fn drop_symbol_terms(s: &str) -> String {
 }
 
 impl App {
-    /// `SqlPostStore.search` for one set of params.
-    async fn search_one(&self, team_id: &str, user_id: &str, p: &Params, limit: i64) -> ApiResult<Vec<Post>> {
+    /// The `WHERE` group of one set of params (`SqlPostStore.search`), its values pushed to `binds`; None when the set
+    /// asks for nothing. `allowed` keeps the channel permission answers across sets.
+    async fn search_cond(
+        &self,
+        team_id: &str,
+        user_id: &str,
+        p: &Params,
+        binds: &mut Vec<Bind>,
+        allowed: &mut HashMap<String, bool>,
+    ) -> ApiResult<Option<String>> {
         if p.terms.is_empty()
             && p.excluded_terms.is_empty()
             && p.in_channels.is_empty()
@@ -274,26 +288,32 @@ impl App {
             && p.after_date.is_empty()
             && p.before_date.is_empty()
         {
-            return Ok(vec![]);
+            return Ok(None);
         }
+        fn put(b: Bind, binds: &mut Vec<Bind>) -> String {
+            binds.push(b);
+            format!("${}", binds.len())
+        }
+        let first = binds.len();
         let mut conds: Vec<String> = vec![];
-        let mut texts: Vec<String> = vec![user_id.into(), team_id.into()];
-        let mut arrays: Vec<Vec<String>> = vec![];
-        fn arr(v: &[String], arrays: &mut Vec<Vec<String>>) -> String {
-            arrays.push(v.to_vec());
-            format!("${}", 2 + arrays.len())
-        }
+        // The channels searched: the user's (as Go's subquery), then FilterPostsByChannelPermissions, so a page is cut
+        // in SQL from posts the user may read and the OFFSET is exact.
+        let channels = self.searchable_channels(team_id, user_id, p, allowed).await?;
+        conds.push(format!("q2.ChannelId = ANY({})", put(Bind::Arr(channels), binds)));
         if !p.from_users.is_empty() || !p.excluded_users.is_empty() {
             let mut sub = if team_id.is_empty() {
                 "SELECT Id FROM Users WHERE true".to_string()
             } else {
-                "SELECT Users.Id FROM Users, TeamMembers WHERE TeamMembers.TeamId = $2 AND Users.Id = TeamMembers.UserId".to_string()
+                format!(
+                    "SELECT Users.Id FROM Users, TeamMembers WHERE TeamMembers.TeamId = {} AND Users.Id = TeamMembers.UserId",
+                    put(Bind::Text(team_id.into()), binds)
+                )
             };
             if !p.from_users.is_empty() {
-                sub += &format!(" AND Users.Id = ANY({})", arr(&p.from_users, &mut arrays));
+                sub += &format!(" AND Users.Id = ANY({})", put(Bind::Arr(p.from_users.clone()), binds));
             }
             if !p.excluded_users.is_empty() {
-                sub += &format!(" AND NOT (Users.Id = ANY({}))", arr(&p.excluded_users, &mut arrays));
+                sub += &format!(" AND NOT (Users.Id = ANY({}))", put(Bind::Arr(p.excluded_users.clone()), binds));
             }
             conds.push(format!("q2.UserId IN ({sub})"));
         }
@@ -348,57 +368,88 @@ impl App {
             if !ex.is_empty() {
                 q += &format!(" &!({ex})");
             }
-            texts.push(q);
-            conds.push(format!("to_tsvector('english', q2.{search_type}) @@ to_tsquery('english', {{TSQ}})"));
-        }
-        let mut inq = "SELECT Id FROM Channels, ChannelMembers WHERE Id = ChannelId AND ChannelMembers.UserId = $1".to_string();
-        if !p.include_deleted_channels {
-            inq += " AND Channels.DeleteAt = 0";
-        }
-        if !team_id.is_empty() {
-            inq += " AND (TeamId = $2 OR TeamId = '')";
-        }
-        if !p.in_channels.is_empty() {
-            inq += &format!(" AND Id = ANY({})", arr(&p.in_channels, &mut arrays));
-        }
-        if !p.excluded_channels.is_empty() {
-            inq += &format!(" AND NOT (Id = ANY({}))", arr(&p.excluded_channels, &mut arrays));
-        }
-        conds.push(format!("q2.ChannelId IN ({inq})"));
-        // The tsquery text goes after the arrays: renumber its placeholder.
-        let tsq_pos = 2 + arrays.len() + 1;
-        let conds: Vec<String> = conds.into_iter().map(|c| c.replace("{TSQ}", &format!("${tsq_pos}"))).collect();
-        let sql = format!(
-            "SELECT {}, (SELECT COUNT(*) FROM Posts WHERE Posts.RootId = (CASE WHEN q2.RootId = '' THEN q2.Id ELSE q2.RootId END) AND Posts.DeleteAt = 0) AS replycount
-             FROM Posts q2 WHERE q2.DeleteAt = 0 AND q2.Type NOT LIKE 'system_%' AND q2.Type != 'card' AND {}
-             ORDER BY q2.CreateAt DESC, q2.Id LIMIT {limit}",
-            db::cols::<Post>("q2"),
-            conds.join(" AND ")
-        );
-        let mut q = sqlx::query_as::<_, WithCount>(sqlx::AssertSqlSafe(sql)).bind(&texts[0]).bind(&texts[1]);
-        for a in &arrays {
-            q = q.bind(a);
-        }
-        if texts.len() > 2 {
-            q = q.bind(&texts[2]);
-        }
-        let posts = match q.fetch_all(&self.db).await {
-            Ok(p) => p,
-            Err(e) => {
+            // Go runs each set as its own query and a set whose query fails (a tsquery Postgres rejects, as `-#tag`
+            // alone gives) logs it and finds nothing, the other sets still do: here the set's group is dropped.
+            if let Err(e) = sqlx::query("SELECT to_tsquery('english', $1)").bind(&q).execute(&self.db).await {
                 eprintln!("query error searching posts: {e}");
-                return Ok(vec![]);
+                binds.truncate(first);
+                return Ok(None);
             }
-        };
-        let tags: Vec<String> = if p.is_hashtag { p.terms.split(' ').map(str::to_uppercase).collect() } else { vec![] };
-        Ok(posts
-            .into_iter()
-            .map(|w| w.0)
-            .filter(|post| post.r#type != crate::model::post_kind::BURN_ON_READ)
-            .filter(|post| !p.is_hashtag || post.hashtags.split(' ').any(|t| tags.contains(&t.to_uppercase())))
-            .collect())
+            let q = put(Bind::Text(q), binds);
+            conds.push(format!("to_tsvector('english', q2.{search_type}) @@ to_tsquery('english', {q})"));
+        }
+        if p.is_hashtag {
+            // Go keeps a post only if one of its hashtags is one of the terms, case-insensitively (strings.ToUpper);
+            // here Postgres' upper() on both sides. Both split on every space as Go's strings.Split, so "" splits to
+            // [""] (string_to_array gives {} for it).
+            let tags: Vec<String> = p.terms.split(' ').map(str::to_string).collect();
+            conds.push(format!(
+                "EXISTS (SELECT 1 FROM unnest(CASE WHEN q2.Hashtags = '' THEN ARRAY[''] ELSE string_to_array(q2.Hashtags, ' ') END) t \
+                 WHERE upper(t) IN (SELECT upper(x) FROM unnest({}::text[]) x))",
+                put(Bind::Arr(tags), binds)
+            ));
+        }
+        Ok(Some(conds.join(" AND ")))
     }
 
-    /// `SearchPostsForUser`, paged (see below).
+    /// The channels one set of params searches: the user's channels (not archived unless asked, of the team or
+    /// teamless, `in:` and `-in:`), less those the user may not read (`FilterPostsByChannelPermissions`).
+    async fn searchable_channels(
+        &self,
+        team_id: &str,
+        user_id: &str,
+        p: &Params,
+        allowed: &mut HashMap<String, bool>,
+    ) -> ApiResult<Vec<String>> {
+        let mut sql = "SELECT Id FROM Channels, ChannelMembers WHERE Id = ChannelId AND ChannelMembers.UserId = $1".to_string();
+        let mut n = 1;
+        if !p.include_deleted_channels {
+            sql += " AND Channels.DeleteAt = 0";
+        }
+        if !team_id.is_empty() {
+            n += 1;
+            sql += &format!(" AND (TeamId = ${n} OR TeamId = '')");
+        }
+        if !p.in_channels.is_empty() {
+            n += 1;
+            sql += &format!(" AND Id = ANY(${n})");
+        }
+        if !p.excluded_channels.is_empty() {
+            n += 1;
+            sql += &format!(" AND NOT (Id = ANY(${n}))");
+        }
+        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql)).bind(user_id);
+        if !team_id.is_empty() {
+            q = q.bind(team_id);
+        }
+        if !p.in_channels.is_empty() {
+            q = q.bind(&p.in_channels);
+        }
+        if !p.excluded_channels.is_empty() {
+            q = q.bind(&p.excluded_channels);
+        }
+        let ids = q.fetch_all(&self.db).await?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let ok = match allowed.get(&id) {
+                Some(v) => *v,
+                None => {
+                    let v = match self.channel(&id).await? {
+                        Some(c) => self.user_read_channel(user_id, &c).await.0,
+                        None => false,
+                    };
+                    allowed.insert(id.clone(), v);
+                    v
+                }
+            };
+            if ok {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `SearchPostsForUser`, paged for real (see below).
     async fn search_posts(&self, s: &Session, team_id: &str, b: SearchBody) -> ApiResult<PostList> {
         let terms = b.terms.unwrap_or_default();
         let params = parse(terms.trim(), b.time_zone_offset.unwrap_or(0));
@@ -419,10 +470,12 @@ impl App {
         if skip >= SEARCH_MAX_WINDOW {
             return Ok(list);
         }
-        // Each set of terms gives its newest posts up to the end of this page (one more row would not tell more:
-        // the sets are merged and the permission filter can drop rows, so the page is cut after both).
-        let limit = (skip + per_page).min(SEARCH_MAX_WINDOW);
-        let mut found: BTreeMap<String, Post> = BTreeMap::new();
+        let limit = per_page.min(SEARCH_MAX_WINDOW - skip);
+        // Every set of terms is one OR'ed group of a single query, and every filter Go applies after its query
+        // (channel permissions, hashtag match, burn-on-read) is in the query too: the page is cut by LIMIT/OFFSET.
+        let mut binds: Vec<Bind> = vec![];
+        let mut groups: Vec<String> = vec![];
+        let mut allowed: HashMap<String, bool> = HashMap::new();
         for mut p in params {
             if p.terms == "*" {
                 continue;
@@ -434,36 +487,38 @@ impl App {
             p.from_users = self.usernames_to_ids(&p.from_users).await;
             p.excluded_users = self.usernames_to_ids(&p.excluded_users).await;
             p.terms = drop_symbol_terms(&p.terms);
-            for post in self.search_one(team_id, &s.user_id, &p, limit).await? {
-                found.insert(post.id.clone(), post);
+            if let Some(g) = self.search_cond(team_id, &s.user_id, &p, &mut binds, &mut allowed).await? {
+                groups.push(format!("({g})"));
             }
         }
-        let mut posts: Vec<Post> = found.into_values().collect();
-        posts.sort_by(|a, b| b.create_at.cmp(&a.create_at).then_with(|| a.id.cmp(&b.id)));
-        let mut kept = 0i64;
-        // FilterPostsByChannelPermissions
-        let mut allowed: HashMap<String, bool> = HashMap::new();
-        for post in posts {
-            let ok = match allowed.get(&post.channel_id) {
-                Some(v) => *v,
-                None => {
-                    let v = match self.channel(&post.channel_id).await? {
-                        Some(c) => self.user_read_channel(&s.user_id, &c).await.0,
-                        None => false,
-                    };
-                    allowed.insert(post.channel_id.clone(), v);
-                    v
-                }
+        if groups.is_empty() {
+            return Ok(list);
+        }
+        // The reply count only for the page's rows.
+        let sql = format!(
+            "SELECT {}, (SELECT COUNT(*) FROM Posts WHERE Posts.RootId = (CASE WHEN q2.RootId = '' THEN q2.Id ELSE q2.RootId END) AND Posts.DeleteAt = 0) AS replycount
+             FROM (SELECT * FROM Posts q2
+                   WHERE q2.DeleteAt = 0 AND q2.Type NOT LIKE 'system_%' AND q2.Type != 'card' AND q2.Type != '{}' AND ({})
+                   ORDER BY q2.CreateAt DESC, q2.Id LIMIT {limit} OFFSET {skip}) q2
+             ORDER BY q2.CreateAt DESC, q2.Id",
+            db::cols::<Post>("q2"),
+            crate::model::post_kind::BURN_ON_READ,
+            groups.join(" OR ")
+        );
+        let mut q = sqlx::query_as::<_, WithCount>(sqlx::AssertSqlSafe(sql));
+        for b in &binds {
+            q = match b {
+                Bind::Text(t) => q.bind(t),
+                Bind::Arr(a) => q.bind(a),
             };
-            if ok {
-                if kept >= skip && kept < skip + per_page {
-                    list.add_ordered(post);
-                }
-                kept += 1;
-                if kept >= skip + per_page {
-                    break;
+        }
+        match q.fetch_all(&self.db).await {
+            Ok(posts) => {
+                for w in posts {
+                    list.add_ordered(w.0);
                 }
             }
+            Err(e) => eprintln!("query error searching posts: {e}"),
         }
         Ok(list)
     }

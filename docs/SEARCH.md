@@ -12,7 +12,12 @@ for any later page, so older matches cannot be reached. Rust pages for real:
 - `per_page`: default 60 as in Go; `<= 0` means 60; at most 1000.
 - `page`: from 0 (negative means 0); posts `[page * per_page, page * per_page + per_page)` of the matches, newest
   first (ties by id, so pages never overlap or skip).
-- Depth: the newest 10 000 matches per set of terms; a page past that is empty.
+- Depth: the newest 10 000 matches; a page past that is empty.
+- A page is cut in SQL (`ORDER BY CreateAt DESC, Id LIMIT per_page OFFSET page * per_page`): the sets of terms
+  (words and hashtags) are OR'ed groups of one query, and what Go filters after its query is in the query too: the
+  channels are the user's, less those `FilterPostsByChannelPermissions` drops (checked before the query), hashtags
+  match case-insensitively (Postgres `upper()` on both sides, Go's `strings.ToUpper`), burn-on-read posts are left
+  out. The reply count is computed only for the page's rows. `tests/search_paging.rs` checks the pages.
 - The answer keeps Go's shape (`order`, `posts`, `matches` when present; no `has_next`).
 
 The clients page unchanged: the web app (`WEBAPP_SEARCH_PER_PAGE` = 20) asks `page + 1` while a page is not empty,
