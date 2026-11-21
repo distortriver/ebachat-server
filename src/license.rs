@@ -333,7 +333,10 @@ fn set_license(app: &App, license: Option<License>) -> bool {
 pub async fn invalidate_all_caches(app: &App) {
     app.caches.clear_all();
     app.hub.invalidate_all();
-    load(app).await;
+    // load() sets the license without the listeners (it also runs at start, with nobody to tell).
+    if load(app).await {
+        app.hub.publish("license_changed", json!({"license": sanitized_client()}), Default::default());
+    }
 }
 
 /// `InvalidateAllCaches` right after the license was saved or removed: `LoadLicense` would set the same license again.
