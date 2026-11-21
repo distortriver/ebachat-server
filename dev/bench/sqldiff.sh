@@ -8,6 +8,9 @@
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 tag=${1:-main} port=${2:-8065}
+# The away timer (a pong after UserStatusAwayTimeout of idling sets away) fires at a wall-clock time that lands in
+# different steps on the two servers; it has nothing to do with the scenarios, so it is pushed out of their reach.
+export MM_TEAMSETTINGS_USERSTATUSAWAYTIMEOUT=${MM_TEAMSETTINGS_USERSTATUSAWAYTIMEOUT:-86400}
 docker exec bench-db psql -qAt -U mmuser -d mattermost -c "SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'" | grep -q 1 \
   || { PGSS=1 "$BENCH/db.sh" restart; }
 pg() { docker exec bench-db psql -qAt -U mmuser -d postgres -c "$1"; }
