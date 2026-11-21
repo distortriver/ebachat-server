@@ -29,7 +29,7 @@ All seven at once (about ten minutes):
 p=8100; for t in core files posts admin live chan reads; do SQLDIFF_SCENARIO=$t ./dev/bench/sqldiff.sh $t $p > run/$t.txt 2>&1 & p=$((p+2)); done; wait
 ```
 
-Differences that remain on purpose (2026-11-21, each confirmed by the project owner):
+Differences that remain on purpose (2026-11-21, the whole list confirmed by the project owner):
 - Go 12.1 without a license refuses to create or activate users beyond 250 (`user_limit.exceeded`, `limits/server`);
   Rust has no such cap (`core` user_activate, `admin` bot enable, `reads` limits).
 - After a team join, Go sends the default channels' `posted`/`user_added` 0 or 1 times depending on its connection's
