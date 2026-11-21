@@ -265,6 +265,12 @@ impl App {
         if let Some(m) = self.caches.profiles_in_channel.get(channel_id) {
             return Ok(m);
         }
+        // One load per channel at a time (see cache::Flights): posts racing into a big channel after its entry was
+        // dropped would each load every member's profile.
+        let _load = self.caches.profiles_in_channel_loads.begin(channel_id).await;
+        if let Some(m) = self.caches.profiles_in_channel.get(channel_id) {
+            return Ok(m);
+        }
         let users = crate::users::load_users(
             self,
             "u.id IN (SELECT UserId FROM ChannelMembers WHERE ChannelId = ANY($1)) AND u.DeleteAt = 0",

@@ -169,6 +169,7 @@ pub struct Caches {
     pub user: Lru<String, Arc<User>>,
     pub all_profiles: Lru<(), Arc<Vec<Arc<User>>>>,
     pub profiles_in_channel: Lru<String, Arc<HashMap<String, Arc<User>>>>,
+    pub profiles_in_channel_loads: Flights,
     // store: channels
     pub channel: Lru<String, Arc<Channel>>,
     pub channel_by_name: Lru<String, Arc<Channel>>,
@@ -210,6 +211,7 @@ impl Caches {
             user: Lru::new(20000, m(30)),
             all_profiles: Lru::new(1, m(30)),
             profiles_in_channel: Lru::new(CHANNEL_CACHE_SIZE, m(15)),
+            profiles_in_channel_loads: Flights::default(),
             channel: Lru::new(CHANNEL_CACHE_SIZE, m(15)),
             channel_by_name: Lru::new(CHANNEL_CACHE_SIZE, m(15)),
             member_count: Lru::new(CHANNEL_CACHE_SIZE, m(30)),
