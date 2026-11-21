@@ -224,6 +224,24 @@ impl Post {
         let mut seen = std::collections::HashSet::new();
         let ids = std::mem::take(&mut self.file_ids.0).into_iter().filter(|id| seen.insert(id.clone())).collect();
         self.file_ids = FileIds(ids, false);
+        self.strip_nul();
+    }
+
+    /// Postgres text and jsonb cannot hold NUL.
+    pub fn strip_nul(&mut self) {
+        self.message.retain(|c| c != '\0');
+        self.hashtags.retain(|c| c != '\0');
+        let props = std::mem::take(&mut self.props.0);
+        self.props.0 = props.into_iter().map(|(k, v)| (k.replace('\0', ""), strip_nul(v))).collect();
+    }
+}
+
+fn strip_nul(v: Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(s.replace('\0', "")),
+        Value::Array(a) => Value::Array(a.into_iter().map(strip_nul).collect()),
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k.replace('\0', ""), strip_nul(v))).collect()),
+        v => v,
     }
 }
 
@@ -404,5 +422,14 @@ mod tests {
         p.pre_save(1);
         assert_eq!(p.file_ids.0, vec!["a".to_string(), "b".to_string()]);
         assert!(!p.file_ids.1);
+    }
+
+    #[test]
+    fn nul_stripped() {
+        let mut p = Post { message: "a\0b".into(), hashtags: "#a\0".into(), ..Default::default() };
+        p.props.0.insert("k\0".into(), serde_json::json!({"x": ["y\0"]}));
+        p.strip_nul();
+        assert_eq!((p.message.as_str(), p.hashtags.as_str()), ("ab", "#a"));
+        assert_eq!(p.props.0["k"], serde_json::json!({"x": ["y"]}));
     }
 }

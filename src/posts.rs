@@ -1600,59 +1600,61 @@ impl App {
 /// `SqlStore.GetMaxPostSize` on a current schema (Posts.Message is varchar(65535)).
 pub const MAX_POST_SIZE: usize = 16383;
 
+const LOCK_THREAD: &str = "SELECT COALESCE(Participants, '[]'), COALESCE(ReplyCount, 0), COALESCE(LastReplyAt, 0) \
+                           FROM Threads WHERE PostId = $1 FOR UPDATE";
+
 /// `updateThreadsFromPosts` for one reply, in the saving transaction.
 async fn update_thread_from_post(tx: &mut sqlx::PgConnection, post: &Post) -> ApiResult<()> {
-    let found: Option<(sqlx::types::Json<Vec<String>>, i64, i64)> = sqlx::query_as(
-        "SELECT COALESCE(Participants, '[]'), COALESCE(ReplyCount, 0), COALESCE(LastReplyAt, 0) FROM Threads WHERE PostId = $1",
-    )
-    .bind(&post.root_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    match found {
-        None => {
-            let parts: Vec<(String,)> = sqlx::query_as(
-                "SELECT UserId FROM Posts WHERE RootId = $1 AND DeleteAt = 0 GROUP BY UserId ORDER BY MAX(CreateAt) ASC",
-            )
-            .bind(&post.root_id)
-            .fetch_all(&mut *tx)
-            .await?;
-            let (count, last): (i64, i64) = sqlx::query_as(
-                "SELECT COUNT(Id), COALESCE(MAX(CreateAt), 0) FROM Posts WHERE RootId = $1 AND DeleteAt = 0",
-            )
-            .bind(&post.root_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let team: String = sqlx::query_scalar("SELECT COALESCE(TeamId, '') FROM Channels WHERE Id = $1")
-                .bind(&post.channel_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .unwrap_or_default();
-            let parts: Vec<String> = parts.into_iter().map(|p| p.0).collect();
-            sqlx::query(
-                "INSERT INTO Threads (PostId, ChannelId, ReplyCount, LastReplyAt, Participants, ThreadTeamId) VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(&post.root_id)
-            .bind(&post.channel_id)
-            .bind(count)
-            .bind(last)
-            .bind(sqlx::types::Json(parts))
-            .bind(team)
-            .execute(&mut *tx)
-            .await?;
-        }
-        Some((mut parts, count, last)) => {
-            parts.0.retain(|u| *u != post.user_id);
-            parts.0.push(post.user_id.clone());
-            sqlx::query("UPDATE Threads SET ChannelId = $1, ReplyCount = $2, LastReplyAt = $3, Participants = $4 WHERE PostId = $5")
-                .bind(&post.channel_id)
-                .bind(count + 1)
-                .bind(last.max(post.create_at))
-                .bind(parts)
+    let mut found: Option<(sqlx::types::Json<Vec<String>>, i64, i64)> =
+        sqlx::query_as(LOCK_THREAD).bind(&post.root_id).fetch_optional(&mut *tx).await?;
+    if found.is_none() {
+        let parts: Vec<(String,)> = sqlx::query_as(
+            "SELECT UserId FROM Posts WHERE RootId = $1 AND DeleteAt = 0 GROUP BY UserId ORDER BY MAX(CreateAt) ASC",
+        )
+        .bind(&post.root_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let (count, last): (i64, i64) =
+            sqlx::query_as("SELECT COUNT(Id), COALESCE(MAX(CreateAt), 0) FROM Posts WHERE RootId = $1 AND DeleteAt = 0")
                 .bind(&post.root_id)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?;
+        let team: String = sqlx::query_scalar("SELECT COALESCE(TeamId, '') FROM Channels WHERE Id = $1")
+            .bind(&post.channel_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or_default();
+        let parts: Vec<String> = parts.into_iter().map(|p| p.0).collect();
+        let created = sqlx::query(
+            "INSERT INTO Threads (PostId, ChannelId, ReplyCount, LastReplyAt, Participants, ThreadTeamId)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (PostId) DO NOTHING",
+        )
+        .bind(&post.root_id)
+        .bind(&post.channel_id)
+        .bind(count)
+        .bind(last)
+        .bind(sqlx::types::Json(parts))
+        .bind(team)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if created {
+            return Ok(());
         }
+        found = sqlx::query_as(LOCK_THREAD).bind(&post.root_id).fetch_optional(&mut *tx).await?;
     }
+    let Some((mut parts, count, last)) = found else { return Ok(()) };
+    parts.0.retain(|u| *u != post.user_id);
+    parts.0.push(post.user_id.clone());
+    sqlx::query("UPDATE Threads SET ChannelId = $1, ReplyCount = $2, LastReplyAt = $3, Participants = $4 WHERE PostId = $5")
+        .bind(&post.channel_id)
+        .bind(count + 1)
+        .bind(last.max(post.create_at))
+        .bind(parts)
+        .bind(&post.root_id)
+        .execute(&mut *tx)
+        .await?;
     Ok(())
 }
 
@@ -1768,6 +1770,7 @@ impl App {
         // SqlPostStore.Update (PreCommit)
         crate::integrations::generate_action_ids(&mut new.props.0);
         new.update_at = now_ms();
+        new.strip_nul();
         self.validate_post(&new, self.max_post_size().await as usize)?;
         let mut tx = self.db.begin().await?;
         sqlx::query(
