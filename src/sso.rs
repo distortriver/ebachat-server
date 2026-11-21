@@ -284,6 +284,7 @@ impl App {
         // CreateSession
         self.limit_sessions(&user.id).await.map_err(internal)?;
         self.save_session(&mut s).await.map_err(internal)?;
+        self.clear_imported_inactive(user).await;
         sqlx::query("UPDATE Users SET LastLogin = $1 WHERE Id = $2")
             .bind(s.create_at)
             .bind(&user.id)

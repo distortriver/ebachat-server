@@ -211,6 +211,19 @@ pub fn check_password(app: &App, p: &str) -> ApiResult<()> {
 }
 
 impl App {
+    /// `DoLogin`: on a user's first login an imported-inactive user loses the `importedInactive` prop
+    /// (`UpdateUser`, no notification, untrusted); a failure is only logged, as in Go.
+    pub async fn clear_imported_inactive(&self, user: &User) {
+        if user.last_login != 0 || user.props.0.get("importedInactive").map(String::as_str) != Some("true") {
+            return;
+        }
+        let mut u = user.clone();
+        u.props.0.remove("importedInactive");
+        if let Err(e) = self.update_user(u, false, false).await {
+            crate::logs::warn("Failed to clear importedInactive prop on first login", &[("error", json!(e.id))]);
+        }
+    }
+
     /// `UpdateUser` through `SqlUserStore.Update`: what the store keeps from the old row, uniqueness errors,
     /// caches, `user_updated` (with `notify`).
     pub async fn update_user(&self, mut user: User, notify: bool, trusted: bool) -> ApiResult<User> {
