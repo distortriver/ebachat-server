@@ -44,6 +44,15 @@ Differences that remain on purpose (2026-11-21, each confirmed by the project ow
 - Guests (`guests`, the demotion done in the database since neither server demotes without a license): Go counts a
   guest's `users/stats` once per shared channel, and joins a promoted user to the default channels as a guest;
   Rust does neither (docs/USERS.md).
+- Branding: every text a user sees names the site (`TeamSettings.SiteName`, else EBAChat) where Go says
+  Mattermost, and emails have no Mattermost footer (docs/BRANDING.md): command descriptions, emails, some messages.
+- Password reset: the token and email go to a background task and the answer is always 200; Go answers 500 when
+  the mail cannot be sent, which reveals that the address has an account (docs/SECURITY.md).
+- Post search pages for real; Go's database search answers the newest 100 on page 0 and nothing after
+  (docs/SEARCH.md). Within the first 100 the posts and their order match, apart from posts sharing a `create_at`
+  millisecond, whose order Go leaves undefined and Rust fixes by id.
+- Noise: the built-in commands' order in `GET /commands` and autocomplete — Go's follows its map iteration and
+  changes per process, Rust's is by trigger.
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
   each run's timing; image bytes (encoders differ, sizes and formats match). Adding several members at once: Go
   posts each "added to the channel" message from a goroutine, so a member added later in the same request may or
