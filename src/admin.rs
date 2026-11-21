@@ -274,8 +274,7 @@ async fn audits(St(app): St<State>, Auth(s): Auth, Query(q): Q) -> ApiResult<Res
 /// `invalidateCaches`.
 async fn invalidate_caches(St(app): St<State>, Auth(s): Auth) -> ApiResult<Response> {
     app.require_unrestricted(&s, "invalidate_caches").await?;
-    app.caches.clear_all();
-    app.hub.invalidate_all();
+    crate::license::invalidate_all_caches(&app).await;
     Ok(([NO_CACHE], ok()).into_response())
 }
 

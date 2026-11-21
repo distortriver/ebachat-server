@@ -165,6 +165,14 @@ stand's database. Throwaway data was removed afterwards (see the end).
 - `POST /email/test`: Go checks the posted settings (server set, password) but sends with the server's own mail
   settings (`MailServiceConfig()`); Rust sends with the posted ones. That is the notifications area, not changed
   here.
+- `POST /users/password/reset/send` (Go and Rust alike): an unknown email answers 200, a known one 200 too, but
+  when the mail cannot be sent a known email answers 500 (`api.user.send_password_reset.send.app_error`): with
+  mail sending broken or off, the route tells which emails have accounts. The recovery token is written anyway.
+  Kept as Go: hiding the failure would hide a broken mail setup from the user. (`tools/diff/scen_auth.py`)
+- Cookie sessions pass the CSRF check with `X-Requested-With: XMLHttpRequest` alone unless
+  `ExperimentalStrictCSRFEnforcement` is on (Go's deprecated fallback, MM-13657); kept for the clients that rely
+  on it. A session without a `csrf` prop (one not made by a login) passes with no header at all, as in Go; such
+  tokens never come as cookies from the server.
 
 ## Clean-up
 

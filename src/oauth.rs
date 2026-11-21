@@ -341,6 +341,8 @@ async fn delete(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> Ap
         app.caches.session.remove(&t);
         app.hub.close_session(&t);
     }
+    // DeleteOAuthApp: InvalidateAllCaches (with its license_changed to everyone).
+    crate::license::invalidate_all_caches(&app).await;
     crate::audit::log(&app, Some(&s), "success").await;
     Ok(ok())
 }

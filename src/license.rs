@@ -328,17 +328,29 @@ fn set_license(app: &App, license: Option<License>) -> bool {
     ok
 }
 
-/// `LoadLicense`, at start: `MM_LICENSE`, else the active license of the database (or the license file, saved).
+/// `PlatformService.InvalidateAllCaches`: every cache cleared, every websocket's session reloaded, and the license
+/// loaded again (`LoadLicense`, whose `SetLicense` sends `license_changed` to everyone even when nothing changed).
+pub async fn invalidate_all_caches(app: &App) {
+    app.caches.clear_all();
+    app.hub.invalidate_all();
+    load(app).await;
+}
+
+/// `InvalidateAllCaches` right after the license was saved or removed: `LoadLicense` would set the same license again.
+fn reloaded_caches(app: &App) {
+    app.caches.clear_all();
+    app.hub.invalidate_all();
+    set_license(app, current());
+}
+
+/// `LoadLicense`, at start and after every cache invalidation: `MM_LICENSE`, else the active license of the database (or the license file, saved).
 pub async fn load(app: &App) {
     if let Ok(s) = std::env::var("MM_LICENSE")
         && !s.is_empty()
     {
         match license_from_bytes(s.as_bytes()) {
             Ok(l) => {
-                *CURRENT.write().unwrap() = Some(l).map(|mut l| {
-                    l.features.get_or_insert_with(Default::default).set_defaults();
-                    l
-                });
+                set_license(app, Some(l));
                 crate::logs::info("License key from ENV is valid, unlocking enterprise features.", &[]);
             }
             Err(e) => crate::logs::error("Failed to read license set in environment.", &[("error", e.id.into())]),
@@ -368,21 +380,24 @@ pub async fn load(app: &App) {
             },
         }
     }
-    let bytes: Option<String> = sqlx::query_scalar("SELECT Bytes FROM Licenses WHERE Id = $1")
+    let bytes: Option<String> = match sqlx::query_scalar("SELECT Bytes FROM Licenses WHERE Id = $1")
         .bind(&id)
         .fetch_optional(&app.db)
         .await
-        .ok()
-        .flatten();
+    {
+        Ok(b) => b,
+        Err(e) => {
+            // A store failure keeps the license in use (it reruns later).
+            crate::logs::error("Failed to read the license from the database, keeping the current license.", &[("error", e.to_string().into())]);
+            return;
+        }
+    };
     let Some(bytes) = bytes else {
-        *CURRENT.write().unwrap() = None;
+        set_license(app, None);
         return;
     };
     if let Ok(l) = license_from_bytes(bytes.as_bytes()) {
-        *CURRENT.write().unwrap() = Some(l).map(|mut l| {
-            l.features.get_or_insert_with(Default::default).set_defaults();
-            l
-        });
+        set_license(app, Some(l));
         crate::logs::info("License key is valid, unlocking enterprise features.", &[]);
     } else {
         crate::logs::info("License key is invalid.", &[]);
@@ -457,8 +472,8 @@ async fn save(app: &App, bytes: &[u8]) -> ApiResult<License> {
     if !license.is_cloud() {
         let _ = sqlx::query("DELETE FROM Systems WHERE Name = 'HostedPurchaseNeedsScreening'").execute(&app.db).await;
     }
-    app.caches.clear_all();
-    app.hub.invalidate_all();
+    // InvalidateAllCaches; its LoadLicense finds the license just saved (not reloaded here: load can call save).
+    reloaded_caches(app);
     Ok(license)
 }
 
@@ -473,8 +488,7 @@ async fn remove(app: &App) -> ApiResult<()> {
         .await
         .map_err(|e| AppError::internal("app.system.save.app_error", e.to_string()))?;
     set_license(app, None);
-    app.caches.clear_all();
-    app.hub.invalidate_all();
+    reloaded_caches(app);
     Ok(())
 }
 

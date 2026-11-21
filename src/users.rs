@@ -320,12 +320,28 @@ fn login_error(app: &App, e: AppError) -> AppError {
         "api.user.check_user_mfa.bad_code.app_error",
         "api.user.login.blank_pwd.app_error",
         "api.user.login.bot_login_forbidden.app_error",
+        "api.user.login.remote_users.login.error",
+        "api.user.login.client_side_cert.certificate.app_error",
         "api.user.login.inactive.app_error",
         "api.user.login.not_verified.app_error",
         "api.user.check_user_login_attempts.too_many.app_error",
+        "app.team.join_user_to_team.max_accounts.app_error",
+        "store.sql_user.save.max_accounts.app_error",
+        "api.user.check_user_login_attempts.too_many_ldap.app_error",
     ];
     if UNMASKED.contains(&e.id.as_str()) {
         return e;
+    }
+    // Any SSO sign-in offered: the message points at the other methods.
+    if ["SamlSettings", "GitLabSettings", "OpenIdSettings", "GoogleSettings", "Office365Settings"]
+        .iter()
+        .any(|s| app.cfg.bool(&format!("{s}.Enable")))
+    {
+        return AppError::new(
+            StatusCode::UNAUTHORIZED,
+            "api.user.login.invalid_credentials_sso",
+            "Enter a valid email or username and/or password, or sign in using another method.",
+        );
     }
     let (u, m) = (app.cfg.bool("EmailSettings.EnableSignInWithUsername"), app.cfg.bool("EmailSettings.EnableSignInWithEmail"));
     let id = match (u, m) {
@@ -448,12 +464,18 @@ async fn start_session(app: &State, headers: &HeaderMap, b: &LoginBody, user: Us
     sqlx::query("UPDATE Users SET LastLogin = $1 WHERE Id = $2").bind(s.create_at).bind(&user.id).execute(&app.db).await?;
     app.invalidate_user(&user.id);
 
-    let mut out = app.user(&user.id).await?.map(|u| (*u).clone()).unwrap_or(user);
+    // Go answers with the user as read before the checks (FailedAttempts not yet reset, LastLogin not yet set),
+    // with the terms of service the user accepted.
+    let mut out = user;
+    with_terms(app, &mut out).await?;
     out.sanitize_own();
     let mut r = (StatusCode::OK, Json(out)).into_response();
     let h = r.headers_mut();
     h.insert("Token", HeaderValue::from_str(&s.token).unwrap());
-    attach_cookies(app, h, &s, headers);
+    // Cookies only for a browser's XHR (`X-Requested-With: XMLHttpRequest`); other clients keep the Token header.
+    if headers.get("x-requested-with").and_then(|v| v.to_str().ok()) == Some("XMLHttpRequest") {
+        attach_cookies(app, h, &s, headers);
+    }
     Ok((r, s))
 }
 
