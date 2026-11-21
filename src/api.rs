@@ -257,6 +257,28 @@ async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -
     r
 }
 
+/// A path with `.`, `..` or empty segments: a permanent redirect to the cleaned one, query kept.
+async fn clean_path(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let path = req.uri().path();
+    let clean = cleaned_path(path);
+    if clean != path {
+        let location = match req.uri().query() {
+            Some(q) => format!("{clean}?{q}"),
+            None => clean,
+        };
+        return (axum::http::StatusCode::MOVED_PERMANENTLY, [(axum::http::header::LOCATION, location)]).into_response();
+    }
+    next.run(req).await
+}
+
+fn cleaned_path(p: &str) -> String {
+    let mut out = format!("/{}", crate::files::clean(p));
+    if p.ends_with('/') && out != "/" {
+        out.push('/');
+    }
+    out
+}
+
 pub fn router(app: State) -> Router {
     crate::app::DEVELOPER.store(app.cfg.bool("ServiceSettings.EnableDeveloper"), std::sync::atomic::Ordering::Relaxed);
     crate::outgoing::spawn_worker(app.clone());
@@ -267,7 +289,8 @@ pub fn router(app: State) -> Router {
     let r = routes(app.clone())
         .layer(axum::middleware::from_fn_with_state(app, crate::audit::layer))
         .layer(axum::middleware::from_fn(move |req, next| limit_requests(permits.clone(), req, next)))
-        .layer(axum::middleware::from_fn(go_headers));
+        .layer(axum::middleware::from_fn(go_headers))
+        .layer(axum::middleware::from_fn(clean_path));
     // Go wraps its whole handler in rs/cors when AllowCorsFrom is set.
     let r = match cors {
         Some(c) => r.layer(axum::middleware::from_fn(move |req, next| crate::cors::layer(c.clone(), req, next))),
@@ -366,5 +389,16 @@ mod tests {
         assert!(ok("export_name", "x.zip") && !ok("export_name", "x"));
         assert!(ok("syncable_type", "teams") && !ok("syncable_type", "teamsx"));
         assert!(ok("emoji_name", "+1") && ok("username", "a.b-c_d"));
+    }
+
+    #[test]
+    fn cleaned_paths() {
+        use super::cleaned_path as c;
+        assert_eq!(c("/api/v4/users/../system/ping"), "/api/v4/system/ping");
+        assert_eq!(c("/api/v4//users/./me/"), "/api/v4/users/me/");
+        assert_eq!(c("/.."), "/");
+        assert_eq!(c("/a/.."), "/");
+        assert_eq!(c("/api/v4/users/me"), "/api/v4/users/me");
+        assert_eq!(c("/"), "/");
     }
 }
