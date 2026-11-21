@@ -15,6 +15,8 @@ IMPL, OUT = sys.argv[1], sys.argv[2]
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 40
 BASE = "http://localhost:8065/api/v4"
 RUN = "/home/ubuntu/ebachat-server/dev/bench/run"
+# The same moment for both servers (the data are restored from one snapshot), else "now - 60 s".
+SINCE = int(__import__("os").environ.get("SINCE", "0"))
 
 
 def psql(sql):
@@ -59,7 +61,7 @@ OPS = {
     "users_ids": lambda u, t, i: call("POST", "/users/ids", t, users[i + 1:i + 21]),
     "view": lambda u, t, i: call("POST", "/channels/members/me/view", t,
                                  {"channel_id": member[u][0], "prev_channel_id": member[u][1], "collapsed_threads_supported": True}),
-    "posts_since": lambda u, t, i: call("GET", f"/channels/{member[u][0]}/posts?since={int(time.time() * 1000) - 60000}", t),
+    "posts_since": lambda u, t, i: call("GET", f"/channels/{member[u][0]}/posts?since={SINCE or int(time.time() * 1000) - 60000}", t),
     "create_post": lambda u, t, i: call("POST", "/posts", t, {"channel_id": member[u][0], "message": f"perop {IMPL} {i}"}),
     "create_post_public": lambda u, t, i: call("POST", "/posts", t, {"channel_id": public, "message": f"perop public {IMPL} {i}"}),
     "ws_connect": ws_connect,
