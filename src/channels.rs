@@ -63,6 +63,42 @@ fn bad(id: &str, m: &str) -> AppError {
     AppError::bad_request(id, m)
 }
 
+/// `IsChannelMemberNotifyPropsValid(props, allowMissingFields = true)` on the props a notify-props update writes.
+/// Go's `UpdateChannelMemberNotifyProps` merges them unchecked (`notifyprops || $1::jsonb`), so an invalid value
+/// ("mark_unread": "sometimes") is stored and every later `UpdateMember` of that member (roles, scheme roles)
+/// fails `ChannelMember.IsValid` with 400; here the update itself is refused with that error.
+fn validate_member_notify_props(props: &BTreeMap<String, String>) -> ApiResult<()> {
+    const LEVELS: [&str; 4] = ["default", "all", "mention", "none"];
+    let checks: [(&str, usize, &[&str], &str, &str); 6] = [
+        ("desktop", 20, &LEVELS, "notify_level", "Invalid notify level."),
+        ("mark_unread", 20, &["all", "mention"], "unread_level", "Invalid mark unread level."),
+        ("push", 20, &LEVELS, "push_level", "Invalid push notification level."),
+        ("email", 20, &["default", "true", "false"], "email_value", "Invalid email notification value."),
+        (
+            "ignore_channel_mentions",
+            40,
+            &["default", "off", "on"],
+            "ignore_channel_mentions_value",
+            "Invalid ignore channel mentions status.",
+        ),
+        (
+            "channel_auto_follow_threads",
+            3,
+            &["on", "off"],
+            "channel_auto_follow_threads_value",
+            "Invalid channel-auto-follow-threads value.",
+        ),
+    ];
+    for (key, max, valid, id, msg) in checks {
+        if let Some(v) = props.get(key)
+            && (v.len() > max || !valid.contains(&v.as_str()))
+        {
+            return Err(bad(&format!("model.channel_member.is_valid.{id}.app_error"), msg));
+        }
+    }
+    Ok(())
+}
+
 // ---------- model rules ----------
 
 /// `validSimpleAlphaNum`: `^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$`.
@@ -1111,6 +1147,7 @@ impl App {
                 props.insert(k.to_string(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
             }
         }
+        validate_member_notify_props(&props)?;
         let j = serde_json::to_string(&props).unwrap();
         if j.chars().count() > 800 {
             return Err(bad(
