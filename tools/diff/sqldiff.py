@@ -5,7 +5,8 @@ One server at a time on :8065, started from the same data each time (dev/bench/s
 pg_stat_statements loaded. Before every step the statistics are reset; after it (and a pause for the work done after
 the answer) the writes are read back as (operation, table, rows). SQL texts differ between Go and Rust, so the writes
 are compared by what they touch, not by their text. Also kept per step: the status, the answer's top-level keys and
-the websocket events three observers received.
+the websocket events three observers received; and, for the steps that opt in (s.body(call(...))), the answer
+itself, normalized (see normalize), compared by value: the first differing paths are printed.
 
     sqldiff.py run <impl> <out.json>         against SQLDIFF_URL (default :8065); SQLDIFF_SCENARIO=core,... picks
                                              the scenario modules (tools/diff/scen_<name>.py, default core)
@@ -117,6 +118,71 @@ def settle():
     return last
 
 
+IDRE = re.compile(r"(?<![a-z0-9])[a-z0-9]{26}(?![a-z0-9])")
+TS_KEY = re.compile(r"(^|_)at$|^last_|_time$")
+
+
+def normalize(v, unordered=()):
+    """An answer as it can be compared between two servers: 26-character ids become <id1>, <id2>... in order of
+    first appearance (in keys and inside strings too), millisecond timestamps (13 digits, or a nonzero number in a
+    *_at / last_* / *_time field) become <ts>. Object members are visited ids already seen first (a post list's
+    posts after its order), then by key: the order of a JSON object means nothing. Arrays at the paths in
+    unordered ('' the top, 'a.*.b' through arrays) are sorted first, by their items with ids and timestamps blanked,
+    then by the raw items (ids of the snapshot's rows are the same on both sides)."""
+    ids = {}
+
+    def sid(m):
+        return ids.setdefault(m.group(0), f"<id{len(ids) + 1}>")
+
+    def ts(x, key):
+        return isinstance(x, int) and not isinstance(x, bool) and (
+            10**12 <= abs(x) < 10**13 or (x and key and TS_KEY.search(key)))
+
+    def blank(x, key=None):
+        if isinstance(x, list):
+            return [blank(i) for i in x]
+        if isinstance(x, dict):
+            return {IDRE.sub("~", k): blank(x[k], k) for k in x}
+        if isinstance(x, str):
+            return IDRE.sub("~", x)
+        return 0 if ts(x, key) else x
+
+    def order(k):
+        return (0, int(ids[k][3:-1]), "") if k in ids else (1, 0, k)
+
+    def walk(x, path, key):
+        if isinstance(x, list):
+            if path in unordered:
+                x = sorted(x, key=lambda i: (json.dumps(blank(i), sort_keys=True), json.dumps(i, sort_keys=True)))
+            return [walk(i, f"{path}.*".lstrip("."), None) for i in x]
+        if isinstance(x, dict):
+            return {IDRE.sub(sid, k): walk(x[k], f"{path}.{k}".lstrip("."), k) for k in sorted(x, key=order)}
+        if isinstance(x, str):
+            return IDRE.sub(sid, x)
+        return "<ts>" if ts(x, key) else x
+    return walk(v, "", None)
+
+
+def body_diff(a, b, path="", out=None):
+    """Paths where two normalized answers differ, as 'path: go -> rust'."""
+    out = [] if out is None else out
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in list(a) + [k for k in b if k not in a]:
+            if k not in a or k not in b:
+                out.append(f"{path}.{k}: {'missing' if k not in a else json.dumps(a[k])[:80]} -> "
+                           f"{'missing' if k not in b else json.dumps(b[k])[:80]}")
+            else:
+                body_diff(a[k], b[k], f"{path}.{k}", out)
+    elif isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            out.append(f"{path}: {len(a)} items -> {len(b)} items")
+        for i, (x, y) in enumerate(zip(a, b)):
+            body_diff(x, y, f"{path}[{i}]", out)
+    elif a != b or type(a) is not type(b):
+        out.append(f"{path}: {json.dumps(a)[:80]} -> {json.dumps(b)[:80]}")
+    return out
+
+
 class Scenario(types.SimpleNamespace):
     """What a scenario module's register(s) gets: the step decorator, call, keep (remember an id), ctx (ids made
     so far), the logged-in users (u1..u3, spare: tokens and ids), admin, the bench team, bench-public and bench-00,
@@ -165,6 +231,11 @@ def main_run(impl, out_path):
             return fn
         return deco
 
+    def body(r, unordered=()):
+        """Opt-in: record this step's answer body, normalized, to be compared by value."""
+        state["body"] = normalize(r[1], unordered)
+        return r
+
     def keep(k, r):
         s, v, _ = r
         if isinstance(v, dict) and "id" in v and s < 300:
@@ -174,7 +245,7 @@ def main_run(impl, out_path):
     s = Scenario(impl=impl, step=step, call=call, keep=keep, ctx=ctx, u1=u1, u1_id=u1_id, u2=u2, u2_id=u2_id,
                  u3=u3, u3_id=u3_id, admin=admin, admin_id=admin_id, spare=spare, spare_id=spare_id, team=team,
                  public=public, bench00=bench00, base=BASE, password=PASSWORD, psql=psql, login=login,
-                 observers=observers, state=state)
+                 observers=observers, state=state, body=body)
     for name in os.environ.get("SQLDIFF_SCENARIO", "core").split(","):
         importlib.import_module(f"scen_{name}").register(s)
 
@@ -194,6 +265,7 @@ def main_run(impl, out_path):
                 break
             continue
         reset()
+        state.pop("body", None)
         try:
             s, v, _ = fn()
         except Exception as e:  # noqa: BLE001
@@ -201,6 +273,8 @@ def main_run(impl, out_path):
         w = settle()
         results.append({"step": name, "status": s, "keys": keys(v) if s != "error" else v, "writes": w})
         print(f"{impl} {name}: {s} {', '.join(f'{k} {c[1]}' for k, c in sorted(w.items()))}", flush=True)
+        if "body" in state:
+            results[-1]["body"] = state.pop("body")
         if name == upto:
             break
     time.sleep(1)
@@ -232,6 +306,11 @@ def main_compare(go_path, rust_path):
             # mentions, a sidebar delete of nothing) changes nothing the other server missed.
             if a[1] != b[1]:
                 lines.append(f"  {k:34} go {a[0]} stmts {a[1]} rows | rust {b[0]} stmts {b[1]} rows")
+        if "body" in o and "body" in s:
+            d, n = body_diff(o["body"], s["body"]), int(os.environ.get("SQLDIFF_BODY_LINES", "12"))
+            lines += [f"  body     {x}" for x in d[:n]]
+            if len(d) > n:
+                lines.append(f"  body     ... {len(d)} differences")
         for obs, es in sorted(ev.get(name, {}).items()):
             for e, c in sorted(es.items()):
                 if c["go"] != c["rust"]:

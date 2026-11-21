@@ -44,6 +44,7 @@ pub struct Post {
     #[mm(transient)]
     pub last_reply_at: i64,
     #[mm(transient)]
+    #[serde(serialize_with = "serialize_participants_opt")]
     pub participants: Option<Vec<User>>,
     #[mm(transient, omitempty)]
     pub is_following: Option<bool>,
@@ -346,6 +347,7 @@ pub struct ThreadResponse {
     pub reply_count: i64,
     pub last_reply_at: i64,
     pub last_viewed_at: i64,
+    #[serde(serialize_with = "serialize_participants")]
     pub participants: Vec<User>,
     pub post: Option<Post>,
     pub unread_replies: i64,
@@ -361,5 +363,30 @@ pub struct Threads {
     pub total_unread_threads: i64,
     pub total_unread_mentions: i64,
     pub total_unread_urgent_mentions: i64,
-    pub threads: Vec<ThreadResponse>,
+    /// `null` with `totalsOnly` (Go never sets the slice), a list (maybe empty) otherwise.
+    pub threads: Option<Vec<ThreadResponse>>,
+}
+
+/// Thread participants as Go writes them: without `extended` they are `&model.User{Id: id}`, whose nil `Timezone`
+/// is `null` (a loaded user's is an object, `{}` at least). Such a user is told by its missing `CreateAt`.
+fn serialize_participants<S: serde::Serializer>(users: &[User], s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(users.len()))?;
+    for u in users {
+        if u.create_at == 0 && u.timezone.0.is_empty() {
+            let mut v = serde_json::to_value(u).map_err(serde::ser::Error::custom)?;
+            v["timezone"] = Value::Null;
+            seq.serialize_element(&v)?;
+        } else {
+            seq.serialize_element(u)?;
+        }
+    }
+    seq.end()
+}
+
+fn serialize_participants_opt<S: serde::Serializer>(users: &Option<Vec<User>>, s: S) -> Result<S::Ok, S::Error> {
+    match users {
+        Some(u) => serialize_participants(u, s),
+        None => s.serialize_none(),
+    }
 }

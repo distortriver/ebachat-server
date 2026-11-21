@@ -749,7 +749,7 @@ impl App {
             }
         }
         for c in builtins() {
-            if !seen.contains(&c.trigger) {
+            if !seen.contains(&c.trigger) && builtin_autocompletes(self, c) {
                 seen.push(c.trigger.clone());
                 out.push(builtin_listed(c));
             }
@@ -762,7 +762,9 @@ impl App {
         let mut out: Vec<Command> = vec![];
         let mut seen: Vec<String> = vec![];
         for c in builtins() {
-            if c.trigger == "status" && !self.cfg.bool("TeamSettings.EnableCustomUserStatuses") {
+            if c.trigger == "status" && !self.cfg.bool("TeamSettings.EnableCustomUserStatuses")
+                || !builtin_autocompletes(self, c)
+            {
                 continue;
             }
             seen.push(c.trigger.clone());
@@ -780,6 +782,16 @@ impl App {
         }
         Ok(out)
     }
+}
+
+/// Whether a built-in's `GetCommand` sets `AutoComplete`: all do but `/invite_people`
+/// (`InvitePeopleProvider.GetCommand`), which needs email notifications, user creation and email invitations on.
+/// Both lists drop the built-ins that don't.
+fn builtin_autocompletes(app: &App, c: &Command) -> bool {
+    c.trigger != "invite_people"
+        || app.cfg.bool("EmailSettings.SendEmailNotifications")
+            && app.cfg.bool("TeamSettings.EnableUserCreation")
+            && app.cfg.bool("ServiceSettings.EnableEmailInvitations")
 }
 
 fn builtin_listed(c: &Command) -> Command {
