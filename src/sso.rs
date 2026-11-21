@@ -381,6 +381,8 @@ impl App {
     /// `UpdateOAuthUserAttrs`: the username, name and email the provider has now (unless taken), and the account
     /// active again.
     async fn update_oauth_user_attrs(&self, mut user: User, from: User) -> ApiResult<User> {
+        // The stored row as the store reads it before writing: it keeps the columns a profile update never sets.
+        let old = self.user(&user.id).await?.map(|u| (*u).clone()).ok_or_else(crate::users::missing_account)?;
         let mut changed = false;
         if from.username != user.username && self.user_by("u.Username = $1", &from.username).await.is_none() {
             user.username = from.username.clone();
@@ -400,21 +402,17 @@ impl App {
             changed = true;
         }
         if changed {
-            user.update_at = now_ms();
-            sqlx::query(
-                "UPDATE Users SET Username = $1, FirstName = $2, LastName = $3, Email = $4, DeleteAt = $5, UpdateAt = $6
-                 WHERE Id = $7",
-            )
-            .bind(&user.username)
-            .bind(&user.first_name)
-            .bind(&user.last_name)
-            .bind(&user.email)
-            .bind(user.delete_at)
-            .bind(user.update_at)
-            .bind(&user.id)
-            .execute(&self.db)
-            .await
-            .map_err(|e| AppError::internal("app.user.update.finding.app_error", e.to_string()))?;
+            // `Store().User().Update(user, trusted)`: the whole row, so the store's rules apply too (an SSO
+            // account's email marked verified, the mention keys of a renamed user).
+            crate::user_edit::pre_update(&mut user);
+            crate::user_edit::check_user(&user)?;
+            self.store_update_user(&mut user, &old, true).await.map_err(|e| {
+                if e.status_code == 400 && e.id.starts_with("app.user.save.") {
+                    AppError::internal("app.user.update.finding.app_error", e.message)
+                } else {
+                    e
+                }
+            })?;
             self.invalidate_user(&user.id);
             self.clear_sessions_for_user(&user.id);
         }

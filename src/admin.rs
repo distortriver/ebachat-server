@@ -548,34 +548,40 @@ async fn view_notices(St(app): St<State>, Auth(s): Auth, body: Bytes) -> ApiResu
     crate::audit::log(&app, Some(&s), "attempt").await;
     let ids: Vec<String> =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("api.payload.parse.error", ""))?;
-    let fail = |_| AppError::bad_request("api.system.update_viewed_notices.failed", "");
+    view_product_notices(&app, &s.user_id, &ids)
+        .await
+        .map_err(|_| AppError::bad_request("api.system.update_viewed_notices.failed", ""))?;
+    Ok(ok())
+}
+
+/// `ProductNoticesStore.View`: each notice seen once more by the user, now.
+pub async fn view_product_notices(app: &App, user_id: &str, ids: &[String]) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
     let now = chrono::Utc::now().timestamp();
     let mut tx = app.db.begin().await?;
     let seen: Vec<String> =
         sqlx::query_scalar("SELECT NoticeId FROM ProductNoticeViewState WHERE UserId = $1 AND NoticeId = ANY($2)")
-            .bind(&s.user_id)
-            .bind(&ids)
+            .bind(user_id)
+            .bind(ids)
             .fetch_all(&mut *tx)
-            .await
-            .map_err(fail)?;
+            .await?;
     sqlx::query("UPDATE ProductNoticeViewState SET Viewed = Viewed + 1, Timestamp = $3 WHERE UserId = $1 AND NoticeId = ANY($2)")
-        .bind(&s.user_id)
+        .bind(user_id)
         .bind(&seen)
         .bind(now)
         .execute(&mut *tx)
-        .await
-        .map_err(fail)?;
+        .await?;
     for id in ids.iter().filter(|i| !seen.contains(i)) {
         sqlx::query("INSERT INTO ProductNoticeViewState (UserId, NoticeId, Viewed, Timestamp) VALUES ($1, $2, 1, $3)")
-            .bind(&s.user_id)
+            .bind(user_id)
             .bind(id)
             .bind(now)
             .execute(&mut *tx)
-            .await
-            .map_err(fail)?;
+            .await?;
     }
-    tx.commit().await?;
-    Ok(ok())
+    tx.commit().await
 }
 
 /// `getProductNotices`: notices come from the notices URL, which this server does not fetch: none.

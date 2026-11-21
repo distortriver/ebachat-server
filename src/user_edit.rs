@@ -138,7 +138,7 @@ pub(crate) fn mention_keys(s: &str) -> Vec<String> {
 }
 
 /// `User.PreUpdate`.
-fn pre_update(u: &mut User) {
+pub(crate) fn pre_update(u: &mut User) {
     u.username = sanitize_unicode(&u.username).to_lowercase();
     u.first_name = sanitize_unicode(&u.first_name);
     u.last_name = sanitize_unicode(&u.last_name);
@@ -246,6 +246,41 @@ impl App {
                 user.email = old.email.clone();
             }
         }
+        self.store_update_user(&mut user, &old, trusted).await?;
+        self.invalidate_user(&user.id);
+        if user.username != old.username && user.last_picture_update <= 0 {
+            let _ = self.update_default_profile_image(&user).await;
+        }
+        let mut fresh = self.user(&user.id).await?.map(|u| (*u).clone()).unwrap_or(user);
+        if notify {
+            if fresh.email != old.email || !new_email.is_empty() {
+                let (u, old_email) = (fresh.clone(), old.email.clone());
+                if self.cfg.bool("EmailSettings.RequireEmailVerification") {
+                    crate::email::go(self, "email verification", move |app| async move {
+                        crate::email::send_email_verification(&app, &u, &new_email, "").await.map_err(|e| e.message)
+                    });
+                } else {
+                    crate::email::go(self, "email change email", move |app| async move {
+                        crate::email::send_email_change(&app, &old_email, &u.email, &u.locale).await
+                    });
+                }
+            }
+            if fresh.username != old.username {
+                let u = fresh.clone();
+                crate::email::go(self, "change username email", move |app| async move {
+                    crate::email::send_change_username(&app, &u.username, &u.email, &u.locale).await
+                });
+            }
+            self.send_updated_user_event(&fresh);
+        }
+        fresh.sanitize_own();
+        Ok(fresh)
+    }
+
+    /// `SqlUserStore.Update`: the columns it keeps from the old row (and, untrusted, the roles, the deactivation
+    /// and an OAuth account's email), an SSO account's email always verified, the mention keys after a rename, and
+    /// the uniqueness errors.
+    pub async fn store_update_user(&self, user: &mut User, old: &User, trusted: bool) -> ApiResult<()> {
         user.auth_data = old.auth_data.clone();
         user.auth_service = old.auth_service.clone();
         user.password = old.password.clone();
@@ -261,9 +296,17 @@ impl App {
         if !trusted {
             user.roles = old.roles.clone();
             user.delete_at = old.delete_at;
+            if matches!(user.auth_service.as_str(), "gitlab" | "google" | "office365" | "openid") {
+                user.email = old.email.clone();
+            }
             if user.email != old.email {
                 user.email_verified = false;
             }
+        }
+        // Go: "In the past, changing the email of a SSO user would mark the email as unverified. This is a lazy
+        // migration to fix broken records."
+        if !user.auth_service.is_empty() && user.auth_service != "email" {
+            user.email_verified = true;
         }
         if user.username != old.username {
             // UpdateMentionKeysFromUsername
@@ -322,34 +365,7 @@ impl App {
             }
             return Err(AppError::internal("app.user.update.finding.app_error", m));
         }
-        self.invalidate_user(&user.id);
-        if user.username != old.username && user.last_picture_update <= 0 {
-            let _ = self.update_default_profile_image(&user).await;
-        }
-        let mut fresh = self.user(&user.id).await?.map(|u| (*u).clone()).unwrap_or(user);
-        if notify {
-            if fresh.email != old.email || !new_email.is_empty() {
-                let (u, old_email) = (fresh.clone(), old.email.clone());
-                if self.cfg.bool("EmailSettings.RequireEmailVerification") {
-                    crate::email::go(self, "email verification", move |app| async move {
-                        crate::email::send_email_verification(&app, &u, &new_email, "").await.map_err(|e| e.message)
-                    });
-                } else {
-                    crate::email::go(self, "email change email", move |app| async move {
-                        crate::email::send_email_change(&app, &old_email, &u.email, &u.locale).await
-                    });
-                }
-            }
-            if fresh.username != old.username {
-                let u = fresh.clone();
-                crate::email::go(self, "change username email", move |app| async move {
-                    crate::email::send_change_username(&app, &u.username, &u.email, &u.locale).await
-                });
-            }
-            self.send_updated_user_event(&fresh);
-        }
-        fresh.sanitize_own();
-        Ok(fresh)
+        Ok(())
     }
 
     /// `sendUpdatedUserEvent`: admins get the full profile, others the sanitized one, the user their own.
@@ -891,6 +907,8 @@ async fn create_user(
         last_name: nu.last_name,
         position: nu.position,
         locale: nu.locale,
+        // `SanitizeInput`: an empty remote id, not NULL (the users SSO, a magic link or an import create keep NULL).
+        remote_id: Some(String::new()),
         ..Default::default()
     };
     u.props.0 = nu.props;
@@ -1080,7 +1098,26 @@ impl App {
             u.mfa_used_timestamps = sqlx::types::Json(Some(vec![]));
         }
         self.save_user_row(&mut u).await?;
+        if u.email_verified {
+            // `UserService.createUser`: `VerifyEmail` once more after the save (a failure only logged).
+            let r = sqlx::query("UPDATE Users SET Email = lower($1), EmailVerified = true, UpdateAt = $2 WHERE Id = $3")
+                .bind(&u.email)
+                .bind(now_ms())
+                .bind(&u.id)
+                .execute(&self.db)
+                .await;
+            if let Err(e) = r {
+                eprintln!("Failed to set email verified: {e}");
+            }
+        }
         self.invalidate_user(&u.id);
+        // `createUserOrGuest`: a user created verified (SSO, invitation token, magic link) is announced with
+        // `user_updated` too.
+        if u.email_verified
+            && let Some(n) = self.user(&u.id).await?
+        {
+            self.send_updated_user_event(&n);
+        }
         let prefs = [
             ("recommended_next_steps", "hide", "false".to_string()),
             ("tutorial_step", u.id.as_str(), "0".to_string()),
@@ -1097,6 +1134,17 @@ impl App {
             .bind(v)
             .execute(&self.db)
             .await;
+        }
+        // `UpdateViewedProductNoticesForNewUser`: every notice of the last fetch seen once, so a new user is never
+        // shown the notices that came before them (by Go, when it runs on these rows).
+        if let Some(app) = self.hub.app() {
+            let id = u.id.clone();
+            tokio::spawn(async move {
+                let ids = crate::job_workers::cached_notice_ids();
+                if let Err(e) = crate::admin::view_product_notices(&app, &id, &ids).await {
+                    eprintln!("Cannot update product notices viewed state for user {id}: {e}");
+                }
+            });
         }
         self.hub.publish("new_user", json!({ "user_id": u.id }), Broadcast::default());
         let mut out = self.user(&u.id).await?.map(|x| (*x).clone()).unwrap_or(u);
@@ -1127,10 +1175,6 @@ impl App {
         u.update_at = u.create_at;
         u.last_password_update = u.create_at;
         u.mfa_active = false;
-        // SanitizeInput: Go saves an empty remote id, not NULL.
-        if u.remote_id.is_none() {
-            u.remote_id = Some(String::new());
-        }
         if u.locale.is_empty() {
             u.locale = "en".into();
         }
