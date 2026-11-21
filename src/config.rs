@@ -948,7 +948,8 @@ const FULL_FIXED: &[(&str, &str)] = &[
     ("LockProfileFieldsForEmailUsers", "none"),
     ("ExperimentalEnablePostMetadata", "true"),
     ("ExperimentalTimezone", "true"),
-    ("CWSMock", ""),
+    // model.MockCWS: a release build sets it to "false" through ldflags (a source build leaves it empty).
+    ("CWSMock", "false"),
     ("ExperimentalEnableAuthenticationTransfer", "true"),
     ("LdapNicknameAttributeSet", "false"),
     ("LdapFirstNameAttributeSet", "false"),
