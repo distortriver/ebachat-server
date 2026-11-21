@@ -483,6 +483,13 @@ async fn session_expired_message(app: &App, user_id: &str) -> String {
 /// The ETag of the last notices fetch and its body (`noticesCache`, `utils.GetURLWithCache`).
 static NOTICES_CACHE: std::sync::Mutex<Option<(String, bytes::Bytes)>> = std::sync::Mutex::new(None);
 
+/// The ids of the notices of the last fetch (`cachedNotices`): a new user is marked as having seen them.
+static NOTICE_IDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn cached_notice_ids() -> Vec<String> {
+    NOTICE_IDS.lock().unwrap().clone()
+}
+
 /// An error of `UpdateProductNotices`, as its text.
 pub struct NoticesError(String);
 
@@ -512,6 +519,7 @@ pub async fn update_product_notices(app: &App) -> Result<(), NoticesError> {
     let notices: Vec<serde_json::Map<String, Value>> =
         serde_json::from_slice(&data).map_err(|e| err("api.system.update_notices.parse_failed", e.to_string()))?;
     let ids: Vec<String> = notices.iter().filter_map(|n| n.get("id").and_then(Value::as_str).map(str::to_string)).collect();
+    *NOTICE_IDS.lock().unwrap() = ids.clone();
     // ClearOldNotices: NotEq with no ids is "IS NOT NULL", every row.
     let q = if ids.is_empty() {
         sqlx::query("DELETE FROM ProductNoticeViewState WHERE NoticeId IS NOT NULL")

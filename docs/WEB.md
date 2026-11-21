@@ -104,6 +104,20 @@ elsewhere (`app::MaybeAuth`, `app::error_response`).
   - Range and conditional requests on a static file.
 - **Result:** answers, redirects, cookies, session props and rows are the same, apart from ids, times, signatures
   and the differences above.
+- **`tools/diff/scen_sso.py`** (sqldiff, a fake GitLab per server): email to GitLab and back through
+  `/users/login/switch`, web, mobile (with and without `redirect_to`) and repeated logins, attributes GitLab changed
+  (rename, name, taken username/email), bad states (garbage, unknown token, other action, no cookie), a missing code,
+  `access_denied`, a failed code exchange (web and mobile), a GitLab user without email, sign-ups refused by
+  `RestrictCreationToDomains` or an email already taken, new accounts (sign-up, login, mobile, a taken username), GitLab
+  disabled. Same statuses, redirects, cookies, rows, audits and events, except Go's 250-user cap. It found:
+  - `UpdateOAuthUserAttrs` goes through the store's `Update`, which marks an SSO account's email verified and
+    rewrites the mention keys of a renamed user; Rust wrote only the changed columns (now `store_update_user`, the
+    store part of `update_user`, which also keeps an OAuth account's email on an untrusted update as Go's store does);
+  - a user created verified (SSO, invitation token, magic link) gets `VerifyEmail` once more and a `user_updated`
+    to everyone (`createUserOrGuest`); every new user is marked as having seen the last fetched product notices
+    (`UpdateViewedProductNoticesForNewUser`), so Go does not show them those notices later;
+  - only the API's `createUser` (`SanitizeInput`) stores an empty `RemoteId`; SSO, magic-link and imported users
+    keep NULL (no `remote_id` in their JSON), as in Go.
 
 ## CORS and method fallthrough
 
