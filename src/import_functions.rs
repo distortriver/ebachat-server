@@ -2407,7 +2407,7 @@ impl Ctx {
                 warn(&format!("Error while permanently deleting file info file_id={old} err={e}"));
             }
         }
-        post.file_ids = crate::model::JsonText(ids);
+        post.file_ids = crate::model::FileIds(ids, false);
     }
 
     /// `updateFileInfoWithPostId`.

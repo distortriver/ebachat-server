@@ -1273,7 +1273,7 @@ impl App {
                         None => self.single_post(&id, false).await.map(|p| (p, true)),
                     };
                     match found {
-                        Ok((p, _)) => return Ok(self.prepare_post(&p, Prep { is_edit: true, ..Default::default() }).await),
+                        Ok((p, _)) => return Ok(Post { metadata: None, ..p }),
                         Err(e) if e.status_code == 403 => {}
                         Err(e) => {
                             return Err(AppError::internal("api.post.deduplicate_create_post.failed_to_get", e.detailed_error));
@@ -1391,9 +1391,9 @@ impl App {
         if !file_ids.is_empty() {
             let attached = self.attach_files_to_post(&post.id, &post.channel_id, &post.user_id, &file_ids).await?;
             if attached.len() != file_ids.len() && !post.is_remote() {
-                post.file_ids = crate::model::JsonText(attached.clone());
+                post.file_ids = crate::model::FileIds(attached.clone(), attached.is_empty());
                 sqlx::query("UPDATE Posts SET FileIds = $1 WHERE Id = $2")
-                    .bind(crate::model::JsonText(attached))
+                    .bind(&post.file_ids)
                     .bind(&post.id)
                     .execute(&self.db)
                     .await?;
@@ -1756,7 +1756,7 @@ impl App {
         if !added.is_empty() || !removed.is_empty() {
             self.caches.file_infos.remove(&new.id);
         }
-        new.file_ids = crate::model::JsonText(file_ids);
+        new.file_ids = crate::model::FileIds(file_ids, false);
         if new.edit_at == old.edit_at && (old.file_ids != new.file_ids || old.prop("attachments") != new.prop("attachments")) {
             new.edit_at = now;
         }
@@ -1851,7 +1851,7 @@ impl App {
             post.props = sqlx::types::Json(v);
         }
         if let Some(v) = patch.file_ids.take() {
-            post.file_ids = crate::model::JsonText(v);
+            post.file_ids = crate::model::FileIds(v, false);
         }
         if let Some(v) = patch.has_reactions {
             post.has_reactions = v;

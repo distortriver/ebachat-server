@@ -7,7 +7,7 @@ use ebachat_macros::model;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Emoji, FileInfo, Reaction, StringArray, StringInterface, User, is_zero};
+use super::{Emoji, FileIds, FileInfo, Reaction, StringArray, StringInterface, User, is_zero};
 
 #[model(table = "posts")]
 #[derive(Debug, Clone, PartialEq)]
@@ -32,7 +32,7 @@ pub struct Post {
     pub hashtags: String,
     #[mm(skip_json)]
     pub filenames: StringArray,
-    pub file_ids: StringArray,
+    pub file_ids: FileIds,
     #[mm(transient)]
     pub pending_post_id: String,
     #[mm(omitempty)]
@@ -221,6 +221,9 @@ impl Post {
             self.create_at = now;
         }
         self.update_at = self.create_at;
+        let mut seen = std::collections::HashSet::new();
+        let ids = std::mem::take(&mut self.file_ids.0).into_iter().filter(|id| seen.insert(id.clone())).collect();
+        self.file_ids = FileIds(ids, false);
     }
 }
 
@@ -388,5 +391,18 @@ fn serialize_participants_opt<S: serde::Serializer>(users: &Option<Vec<User>>, s
     match users {
         Some(u) => serialize_participants(u, s),
         None => s.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_save_drops_repeated_file_ids() {
+        let mut p = Post { file_ids: FileIds(vec!["a".into(), "b".into(), "a".into()], true), ..Default::default() };
+        p.pre_save(1);
+        assert_eq!(p.file_ids.0, vec!["a".to_string(), "b".to_string()]);
+        assert!(!p.file_ids.1);
     }
 }

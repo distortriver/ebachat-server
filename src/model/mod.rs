@@ -19,7 +19,7 @@ pub use post::{Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, 
 pub use session::Session;
 pub use status::Status;
 pub use team::{Team, TeamMember};
-pub use types::{JsonText, Spaced, StringArray, StringInterface, StringMap};
+pub use types::{FileIds, JsonText, Spaced, StringArray, StringInterface, StringMap};
 pub use user::{Show, User};
 
 use serde::{Deserialize, Deserializer};
