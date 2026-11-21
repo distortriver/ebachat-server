@@ -328,8 +328,17 @@ fn set_license(app: &App, license: Option<License>) -> bool {
     ok
 }
 
+/// `InvalidateAllCaches` → `LoadLicense`: the license read again, and `license_changed` from `SetLicense`'s
+/// listener whenever it ran (also when nothing changed, as in Go).
+pub async fn reload(app: &App) {
+    if load(app).await {
+        app.hub.publish("license_changed", json!({"license": sanitized_client()}), Default::default());
+    }
+}
+
 /// `LoadLicense`, at start: `MM_LICENSE`, else the active license of the database (or the license file, saved).
-pub async fn load(app: &App) {
+/// Whether a license (or none) was set, which is when Go's `SetLicense` runs its listeners.
+pub async fn load(app: &App) -> bool {
     if let Ok(s) = std::env::var("MM_LICENSE")
         && !s.is_empty()
     {
@@ -340,10 +349,11 @@ pub async fn load(app: &App) {
                     l
                 });
                 crate::logs::info("License key from ENV is valid, unlocking enterprise features.", &[]);
+                return true;
             }
             Err(e) => crate::logs::error("Failed to read license set in environment.", &[("error", e.id.into())]),
         }
-        return;
+        return false;
     }
     let mut id: String = sqlx::query_scalar("SELECT Value FROM Systems WHERE Name = 'ActiveLicenseId'")
         .fetch_optional(&app.db)
@@ -376,7 +386,7 @@ pub async fn load(app: &App) {
         .flatten();
     let Some(bytes) = bytes else {
         *CURRENT.write().unwrap() = None;
-        return;
+        return true;
     };
     if let Ok(l) = license_from_bytes(bytes.as_bytes()) {
         *CURRENT.write().unwrap() = Some(l).map(|mut l| {
@@ -384,8 +394,10 @@ pub async fn load(app: &App) {
             l
         });
         crate::logs::info("License key is valid, unlocking enterprise features.", &[]);
+        true
     } else {
         crate::logs::info("License key is invalid.", &[]);
+        false
     }
 }
 

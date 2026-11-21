@@ -63,7 +63,30 @@ These answer with Go's license or "not available" error:
   cookie, `bearer` with two spaces, a non-OAuth token in the query (API and web route), logout and a PUT with a
   failed CSRF check, with `X-Requested-With`, logout without a session; PUT and PATCH of another user by an admin.
 
+## Guests
+
+- **Demotion** needs a license on Go (501), so it is answered so here too. Promotion does not: `promote` ports
+  `PromoteGuestToUser`, including `UpdateSessionsIsGuest` (the sessions' `Roles`, then `Props.is_guest`) and
+  `ClearSessionCacheForUser`, so the promoted user's open sessions stop being guest sessions at once.
+- **Guest restricted domains** (`GuestAccountsSettings.RestrictCreationToDomains`): a guest's new email is checked
+  against them on update (`accepted_guest_domain`), a user's against `TeamSettings.RestrictCreationToDomains`, LDAP
+  and SAML users against neither; joining a team checks a guest against the guests' list only, not the team's
+  `allowed_domains` (`IsTeamEmailAllowed`).
+- **A guest's counts:** `GET /teams/{id}/stats` counts only the members it can see (`GetViewUsersRestrictions`).
+- **Checked** against Go with `tools/diff/scen_guests.py`: a user in two teams made a guest the way Go's store does
+  it (straight in the database, then `POST /caches/invalidate`), its view of users, teams and channels, the events
+  it gets about others, being added to and removed from channels and teams, domains, promotion.
+
 ## Go bugs fixed, not reproduced
+
+- **`GET /users/stats` for a restricted viewer** (a guest): Go counts `COUNT(*)` over the join with the viewer's
+  channels without `DISTINCT`, so a user sharing several channels with the viewer is counted once per channel.
+  Rust counts each user once.
+- **Promotion joins the default channels as a guest on Go:** `PromoteGuestToUser` passes the user object read
+  before the promotion to `JoinDefaultChannels`, so the new town-square and off-topic memberships get
+  `SchemeGuest = true` (the promoted user stays a guest there) and the message is "added to the channel as a
+  guest" (`system_add_guest_to_chan`, which also bumps `TotalMsgCount` and mentions no one). Rust joins with the
+  promoted user: regular memberships, `system_add_to_channel` with its mention of the added user.
 
 - **View restrictions in team member lists** combine the teams and channels the viewer may see with OR, as
   `UserCanSeeOtherUser` does; Go's SQL filter joins both, which needs a user to be in a permitted team and a

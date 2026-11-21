@@ -255,3 +255,16 @@ on the shared database, with its job schedulers.
 - **Now:** the same deadline: no pong for 100 s ends the connection, which then goes offline as a closed one does.
   A pong also runs `SetStatusAwayIfNeeded` (non-manual), as Go's pong handler: an idle user goes `away` after
   `UserStatusAwayTimeout`. Seen with `tools/diff/scen_live.py` (`ws_no_pong`).
+
+## Guests: accepted domains and team counts (fixed)
+
+- **Was:**
+  - a guest could change its email (or an admin change it) to any domain: the update checked only
+    `TeamSettings.RestrictCreationToDomains`, which guests are exempt from, never the guests' list
+    (`GuestAccountsSettings.RestrictCreationToDomains`); Go refuses with `accepted_guest_domain` (`UpdateUser`).
+  - joining a team checked a guest against the team's `allowed_domains` and the users' list, so a guest outside
+    the guests' domains got in when its email matched the team's (and one inside them was refused). Go's
+    `IsTeamEmailAllowed` checks a guest against the guests' list only.
+  - `GET /teams/{id}/stats` gave a guest the team's full member count; Go counts only the members it can see.
+  - after a promotion the user's cached sessions stayed guest sessions (roles and `is_guest`) until they expired.
+- **Now:** as Go (`docs/USERS.md`, Guests). Checked with `tools/diff/scen_guests.py`.

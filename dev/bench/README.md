@@ -37,5 +37,8 @@ Differences that remain on purpose (2026-11-21):
   (docs/CHANNELS.md). A PUT with no display name: Go posts a "display name changed" message for a name it keeps.
 - Files of a post: the released Go binary returns them in a changing order; Rust keeps the post's `file_ids` order,
   as the 12.1.0 source's `orderFileInfosByID` does.
+- Guests (`guests`, the demotion done in the database since neither server demotes without a license): Go counts a
+  guest's `users/stats` once per shared channel, and joins a promoted user to the default channels as a guest;
+  Rust does neither (docs/USERS.md).
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
   each run's timing; image bytes (encoders differ, sizes and formats match).
