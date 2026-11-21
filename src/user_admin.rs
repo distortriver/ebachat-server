@@ -1475,12 +1475,12 @@ impl App {
             return Err(too_many_attempts());
         }
         // checkUserPassword: a wrong (or empty) password keeps the slot.
-        match crate::password::check(&user.password, password) {
+        match crate::password::check(&user.password, password).await {
             crate::password::Check::Mismatch => {
                 return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_password.invalid.app_error", ""));
             }
             crate::password::Check::MatchOld => {
-                if let Err(e) = self.store_password(&user.id, &crate::password::hash(password)).await {
+                if let Err(e) = self.store_password(&user.id, &crate::password::hash(password).await).await {
                     self.refund_attempt(&user.id).await;
                     return Err(AppError::internal("app.user.check_user_password.failed_update", e.message));
                 }

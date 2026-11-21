@@ -379,11 +379,11 @@ impl App {
         if !claimed {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_login_attempts.too_many.app_error", ""));
         }
-        match password::check(&u.password, password) {
+        match password::check(&u.password, password).await {
             password::Check::Mismatch => {
                 return Err(AppError::new(StatusCode::UNAUTHORIZED, "api.user.check_user_password.invalid.app_error", ""));
             }
-            password::Check::MatchOld => self.store_password(&u.id, &password::hash(password)).await?,
+            password::Check::MatchOld => self.store_password(&u.id, &password::hash(password).await).await?,
             password::Check::Match => {}
         }
         sqlx::query("UPDATE Users SET FailedAttempts = 0 WHERE Id = $1").bind(&u.id).execute(&self.db).await?;
@@ -413,7 +413,7 @@ impl App {
         if u.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
             return Err(AppError::internal("api.user.update_password.failed.app_error", "remote user"));
         }
-        self.store_password(&u.id, &password::hash(new)).await?;
+        self.store_password(&u.id, &password::hash(new).await).await?;
         if self.cfg.bool("ServiceSettings.TerminateSessionsOnPasswordChange") {
             let keep = current_session.filter(|s| s.user_id == u.id).map(|s| s.id.clone()).unwrap_or_default();
             let sessions: Vec<(String, String)> =
@@ -1135,7 +1135,7 @@ impl App {
                 .collect();
         }
         if !u.password.is_empty() {
-            u.password = password::hash(&u.password);
+            u.password = password::hash(&u.password).await;
         }
         if let Some(mut cs) = custom_status_of(u) {
             cs.pre_save();

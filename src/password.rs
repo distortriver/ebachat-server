@@ -10,8 +10,20 @@ use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 const WORK: u32 = 600_000;
 const KEY_LEN: usize = 32;
 
-/// `hashers.Hash`: PBKDF2-SHA256.
-pub fn hash(password: &str) -> String {
+/// `hashers.Hash`: PBKDF2-SHA256, off the async workers: 600,000 rounds are a fifth of a second of CPU, which on a
+/// runtime thread would hold up every request and websocket queued behind it (Go's scheduler preempts instead).
+pub async fn hash(password: &str) -> String {
+    let p = password.to_string();
+    tokio::task::spawn_blocking(move || hash_now(&p)).await.expect("password hash task")
+}
+
+/// [`check`] off the async workers, for the same reason as [`hash`].
+pub async fn check(stored: &str, password: &str) -> Check {
+    let (s, p) = (stored.to_string(), password.to_string());
+    tokio::task::spawn_blocking(move || check_now(&s, &p)).await.expect("password check task")
+}
+
+fn hash_now(password: &str) -> String {
     let salt: [u8; 16] = rand::random();
     let mut key = [0u8; KEY_LEN];
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, WORK, &mut key);
@@ -25,7 +37,7 @@ pub enum Check {
     Mismatch,
 }
 
-pub fn check(stored: &str, password: &str) -> Check {
+fn check_now(stored: &str, password: &str) -> Check {
     if stored.is_empty() || password.is_empty() || password.len() > 72 && !stored.starts_with("$pbkdf2$") {
         return Check::Mismatch;
     }
@@ -61,8 +73,8 @@ mod tests {
     use super::*;
     #[test]
     fn pbkdf2_round_trip() {
-        let h = hash("Secret-123");
-        assert!(matches!(check(&h, "Secret-123"), Check::Match));
-        assert!(matches!(check(&h, "secret-123"), Check::Mismatch));
+        let h = hash_now("Secret-123");
+        assert!(matches!(check_now(&h, "Secret-123"), Check::Match));
+        assert!(matches!(check_now(&h, "secret-123"), Check::Mismatch));
     }
 }

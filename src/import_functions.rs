@@ -988,7 +988,7 @@ impl Ctx {
             "UPDATE Users SET Password = $1, LastPasswordUpdate = $2, UpdateAt = $2, AuthData = NULL, AuthService = '',
                  FailedAttempts = 0 WHERE Id = $3",
         )
-        .bind(crate::password::hash(password))
+        .bind(crate::password::hash(password).await)
         .bind(now)
         .bind(&user.id)
         .execute(&self.app.db)
