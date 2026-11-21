@@ -19,7 +19,7 @@ use sqlx::types::Json;
 use crate::app::{ApiResult, App, AppError, is_valid_id, new_id, now_ms};
 use crate::db::{self, Table};
 use crate::hub::Broadcast;
-use crate::model::channel::{self, DIRECT, GROUP, OPEN, PRIVATE};
+use crate::model::channel::{self, DIRECT, GROUP, OPEN, OPEN_BOARD, PRIVATE, PRIVATE_BOARD, SPACE};
 use crate::model::{Channel, ChannelMember, Post, Session, Team, User};
 use crate::perm::{self, WithScheme};
 
@@ -123,7 +123,7 @@ pub(crate) fn validate(c: &Channel) -> ApiResult<()> {
             "Name must be 1 or more lowercase alphanumeric character.",
         );
     }
-    if ![OPEN, PRIVATE, DIRECT, GROUP].contains(&c.r#type.as_str()) {
+    if ![OPEN, PRIVATE, DIRECT, GROUP, SPACE, OPEN_BOARD, PRIVATE_BOARD].contains(&c.r#type.as_str()) {
         return invalid("model.channel.is_valid.type.app_error", "Invalid type.");
     }
     if c.header.chars().count() > 1024 {
@@ -315,8 +315,10 @@ impl App {
             }
         }
         if !misses.is_empty() {
-            let sql =
-                format!("{} WHERE (teamid = $1 OR teamid = '') AND name = ANY($2) AND deleteat = 0", Channel::SELECT);
+            let sql = format!(
+                "{} WHERE (teamid = $1 OR teamid = '') AND name = ANY($2) AND type IN {MESSAGE_TYPES} AND deleteat = 0",
+                Channel::SELECT
+            );
             let found: Vec<Channel> =
                 sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(team_id).bind(&misses).fetch_all(&self.db).await?;
             for c in found {
@@ -568,6 +570,10 @@ impl App {
     /// `SqlChannelStore.Update` + `UpdateChannel`: saved, caches dropped, `channel_updated` to its members.
     pub async fn update_channel(&self, c: &mut Channel) -> ApiResult<()> {
         self.store_update_channel(c).await?;
+        // Space backing channels are internal: no `channel_updated`.
+        if c.is_space() {
+            return Ok(());
+        }
         self.hub.publish(
             "channel_updated",
             json!({"channel": json_string(c)}),
@@ -703,6 +709,12 @@ impl App {
                 "api.channel.create_channel.direct_channel.app_error",
                 "Must use createDirectChannel API service for direct message channel creation.",
             ));
+        }
+        if c.is_board() {
+            return Err(bad("app.channel.create_channel.board_type.app_error", "").detail("use CreateBoardChannel instead"));
+        }
+        if c.is_space() {
+            return Err(bad("app.channel.create_channel.space_type.app_error", "").detail("use CreateChannel instead"));
         }
         if c.team_id.is_empty() {
             return Err(bad(
@@ -893,7 +905,7 @@ impl App {
 
     /// `addUserToChannel`: the membership, history and caches.
     async fn add_user_to_channel_row(&self, user: &User, channel: &Channel) -> ApiResult<ChannelMember> {
-        if channel.r#type != OPEN && channel.r#type != PRIVATE {
+        if channel.r#type != OPEN && channel.r#type != PRIVATE && !channel.is_space() {
             return Err(bad("api.channel.add_user_to_channel.type.app_error", "Cannot add user to this channel type."));
         }
         if let Some(m) = self.channel_member(&channel.id, &user.id).await? {
@@ -941,6 +953,9 @@ impl App {
             }
         }
         let m = self.add_user_to_channel_row(user, channel).await?;
+        if channel.is_space() {
+            return Ok(m);
+        }
         let mut omit = BTreeMap::new();
         omit.insert(user.id.clone(), true);
         let data = json!({"user_id": user.id, "team_id": channel.team_id});
@@ -982,6 +997,9 @@ impl App {
             return Err(crate::users::missing_account());
         }
         let m = self.add_user_to_channel(&user, channel, false).await?;
+        if channel.is_space() {
+            return Ok(m);
+        }
         if actor_id.is_empty() || actor_id == user_id {
             self.post_join_message(&user, channel).await;
         } else if let Some(actor) = actor {
@@ -1062,6 +1080,10 @@ impl App {
         self.invalidate_channel_cache_for_user(&user.id);
         self.invalidate_channel_members_cache(&channel.id);
         self.caches.members_notify_props.remove(&channel.id);
+        // Space backing channels are internal: no `user_removed`.
+        if channel.is_space() {
+            return Ok(());
+        }
         self.hub.publish(
             "user_removed",
             json!({"user_id": user.id, "remover_id": remover_id}),
@@ -1079,6 +1101,10 @@ impl App {
     pub async fn remove_user_from_channel(&self, user_id: &str, remover_id: &str, channel: &Channel) -> ApiResult<()> {
         let user = self.user(user_id).await?.ok_or_else(crate::users::missing_account)?;
         self.remove_user_from_channel_row(&user, remover_id, channel).await?;
+        // Space backing channels are internal: no leave or remove system message.
+        if channel.is_space() {
+            return Ok(());
+        }
         if user_id == remover_id {
             self.post_leave_message(&user, channel).await;
         } else {
@@ -1456,6 +1482,9 @@ impl App {
 
     /// `UpdateChannelPrivacy`: the new type saved, the system message, `channel_converted` to the team.
     pub async fn update_channel_privacy(&self, mut c: Channel, user: &User) -> ApiResult<Channel> {
+        if c.is_space() {
+            return Err(bad("app.channel.update_channel_privacy.space.app_error", ""));
+        }
         if c.r#type == OPEN {
             c.discoverable = false;
         }
@@ -1500,7 +1529,8 @@ impl App {
         let delete_at = now_ms();
         self.set_delete_at(&c.id, delete_at, delete_at).await?;
         self.invalidate_channel_cache(c);
-        if let Some(user) = user {
+        // Space backing channels are internal: no archive system message.
+        if let Some(user) = user.filter(|_| !c.is_space()) {
             // With the channel as it was before the archive, as Go's CreatePost gets it: SendNotifications sends
             // nothing in an archived channel, so a reloaded channel would leave the members without `posted`.
             let p = system_post(
@@ -1535,6 +1565,9 @@ impl App {
         .execute(&self.db)
         .await?;
         self.invalidate_channel_cache(c);
+        if c.is_space() {
+            return Ok(());
+        }
         let b = if c.r#type == OPEN {
             Broadcast { team_id: c.team_id.clone(), ..Default::default() }
         } else {
@@ -1555,6 +1588,10 @@ impl App {
         self.set_delete_at(&c.id, 0, now_ms()).await?;
         c.delete_at = 0;
         self.invalidate_channel_cache(&c);
+        // Space backing channels are internal: no `channel_restored` and no system message.
+        if c.is_space() {
+            return Ok(c);
+        }
         let b = if c.r#type == OPEN {
             Broadcast { team_id: c.team_id.clone(), ..Default::default() }
         } else {

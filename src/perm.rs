@@ -516,7 +516,8 @@ impl App {
     /// `HasPermissionToResolveChannelMention`: read content, or a public channel of a team the user may read.
     pub async fn user_resolve_mention(&self, user_id: &str, channel_id: &str, kind: &str, team_id: &str) -> bool {
         self.user_channel_perm(user_id, channel_id, READ_CHANNEL_CONTENT).await.0
-            || (kind == crate::model::channel::OPEN || kind == "BO") && self.user_team_perm(user_id, team_id, READ_PUBLIC_CHANNEL).await
+            || (kind == crate::model::channel::OPEN || kind == crate::model::channel::OPEN_BOARD)
+                && self.user_team_perm(user_id, team_id, READ_PUBLIC_CHANNEL).await
     }
 
     /// `HasPermissionToReadChannel`: read content, or a public channel of a team the user may read.
@@ -525,7 +526,9 @@ impl App {
         if ok {
             return (true, member);
         }
-        if c.r#type == crate::model::channel::OPEN && !self.cfg.bool("ComplianceSettings.Enable") {
+        if (c.r#type == crate::model::channel::OPEN || c.r#type == crate::model::channel::OPEN_BOARD)
+            && !self.cfg.bool("ComplianceSettings.Enable")
+        {
             return (self.user_team_perm(user_id, &c.team_id, READ_PUBLIC_CHANNEL).await, false);
         }
         (false, false)
