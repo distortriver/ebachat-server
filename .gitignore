@@ -5,3 +5,5 @@
 __pycache__/
 /dev/webapp
 /dev/client
+/dev/bench/run
+/dev/bench/go
