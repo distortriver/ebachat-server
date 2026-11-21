@@ -158,7 +158,17 @@ async fn get_me(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<User>> {
     one_user(&app, &s, u).await
 }
 
-async fn get_user(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<User>> {
+/// `getUser`: the session's activity recorded on success, as Go does (`UpdateLastActivityAtIfNeeded`), which the idle
+/// session timeout and the last-activity column of the system console read.
+async fn get_user(St(app): St<State>, Auth(s): Auth, id: Path<String>) -> ApiResult<Json<User>> {
+    let r = get_user_inner(St(app.clone()), Auth(s.clone()), id).await;
+    if r.is_ok() {
+        app.touch_session(&s).await;
+    }
+    r
+}
+
+async fn get_user_inner(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<User>> {
     let id = s.resolve(&id);
     if !is_valid_id(&id) {
         return Err(AppError::invalid_url_param("user_id"));

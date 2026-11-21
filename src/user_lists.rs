@@ -97,7 +97,16 @@ fn like_escape(term: &str, esc: char) -> String {
 }
 
 /// `getUsers`.
-async fn get_users(St(app): St<State>, Auth(s): Auth, Query(q): Query<UsersQuery>) -> ApiResult<Json<Vec<User>>> {
+/// `getUsers`: the session's activity recorded on success, as Go does (`UpdateLastActivityAtIfNeeded`).
+async fn get_users(St(app): St<State>, Auth(s): Auth, q: Query<UsersQuery>) -> ApiResult<Json<Vec<User>>> {
+    let r = get_users_inner(St(app.clone()), Auth(s.clone()), q).await;
+    if r.is_ok() {
+        app.touch_session(&s).await;
+    }
+    r
+}
+
+async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<UsersQuery>) -> ApiResult<Json<Vec<User>>> {
     if !q.not_in_channel.is_empty() && q.in_team.is_empty() {
         return Err(AppError::invalid_url_param("team_id"));
     }
