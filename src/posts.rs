@@ -5,7 +5,7 @@
 // store/sqlstore/post_store.go and store/localcachelayer/post_layer.go, Copyright (c) 2015-present
 // Mattermost, Inc. Licensed under AGPL-3.0.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock};
 
 use axum::extract::{Path, State as St};
@@ -206,21 +206,21 @@ fn markdown_images(s: &str) -> Vec<String> {
 /// `model.ParseHashtags`.
 pub fn parse_hashtags(text: &str) -> String {
     let mut out = String::new();
-    let mut seen = HashSet::new();
     for word in text.split_whitespace() {
         let w = word.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '#');
         let w = w.trim_end_matches(|c: char| !c.is_alphanumeric());
-        if w.len() > 3 && HASHTAG.is_match(w) && seen.insert(w.to_string()) {
-            if out.len() + w.len() + 1 > 1000 {
-                break;
-            }
-            if !out.is_empty() {
-                out.push(' ');
-            }
+        let pounds = w.len() - w.trim_start_matches('#').len();
+        let w = if pounds > 1 { &w[pounds - 1..] } else { w };
+        if HASHTAG.is_match(w) {
+            out.push(' ');
             out.push_str(w);
         }
     }
-    out
+    if out.len() > 1000 {
+        let cut = out.as_bytes()[..999].iter().rposition(|&b| b == b' ').unwrap_or(0);
+        out.truncate(cut);
+    }
+    out.trim_start().to_string()
 }
 
 /// `Post.AllStrings` without interactive blocks: the message and the attachments' texts.
@@ -3015,4 +3015,25 @@ async fn test_notification(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<
         .await
         .map_err(|e| AppError::internal("app.notifications.send_test_message.errors.create_post", e.detailed_error))?;
     Ok(ok())
+}
+
+#[cfg(test)]
+mod hashtag_tests {
+    use super::parse_hashtags;
+
+    #[test]
+    fn hashtags() {
+        for (text, want) in [
+            ("#ab #a1 #Ab #тег", "#ab #a1 #Ab #тег"),
+            ("##double (#ab) [#ab] #ab. #ab, #ab!", "#double #ab #ab #ab #ab #ab"),
+            ("#a #12ab #_x # foo#bar", ""),
+            ("#tag #tag #TAG", "#tag #tag #TAG"),
+        ] {
+            assert_eq!(parse_hashtags(text), want, "{text}");
+        }
+        let many: Vec<String> = (0..150).map(|i| format!("#tag{i:03}")).collect();
+        let out = parse_hashtags(&many.join(" "));
+        assert_eq!(out.len(), 991);
+        assert!(out.ends_with("#tag123"));
+    }
 }
