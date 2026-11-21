@@ -102,6 +102,93 @@ async fn head_as_go(req: axum::extract::Request, next: axum::middleware::Next) -
     next.run(req).await
 }
 
+const ID: &str = "[A-Za-z0-9]+";
+
+static PARAM_PATTERNS: std::sync::LazyLock<std::collections::HashMap<&'static str, regex::Regex>> =
+    std::sync::LazyLock::new(|| {
+        [
+            ("action_id", "[A-Za-z0-9_-]+"),
+            ("app_id", ID),
+            ("bookmark_id", ID),
+            ("bot_user_id", ID),
+            ("category", "[A-Za-z0-9_]+"),
+            ("category_id", "[A-Za-z0-9_-]+"),
+            ("channel_id", ID),
+            ("channel_name", "[A-Za-z0-9_-]+"),
+            ("command_id", ID),
+            ("content_reviewer_id", ID),
+            ("email", ".+"),
+            ("emoji_id", ID),
+            ("emoji_name", "[A-Za-z0-9_+-]+"),
+            ("export_name", r".+\.zip"),
+            ("field_id", ID),
+            ("file_id", ID),
+            ("fingerprint", "[a-f0-9]{32}"),
+            ("group_id", ID),
+            ("group_name", "[a-z][a-z0-9_]*"),
+            ("hook_id", ID),
+            ("import_name", r".+\.zip"),
+            ("invite_id", ID),
+            ("invoice_id", "[_A-Za-z0-9]+"),
+            ("job_id", ID),
+            ("job_type", "[A-Za-z0-9_-]+"),
+            ("object_type", "[a-z]+"),
+            ("other_user_id", ID),
+            ("outgoing_oauth_connection_id", ID),
+            ("plugin_id", "[A-Za-z0-9_.-]+"),
+            ("policy_id", ID),
+            ("post_id", ID),
+            ("preference_name", "[A-Za-z0-9_]+"),
+            ("recap_id", ID),
+            ("remote_id", ID),
+            ("report_id", ID),
+            ("request_id", ID),
+            ("restore_version_id", ID),
+            ("role_id", ID),
+            ("role_name", "[a-z0-9_]+"),
+            ("scheduled_post_id", ID),
+            ("scheduled_recap_id", ID),
+            ("scheme_id", ID),
+            ("syncable_id", ID),
+            ("syncable_type", "teams|channels"),
+            ("target_id", ID),
+            ("team_id", ID),
+            ("team_name", "[A-Za-z0-9_-]+"),
+            ("thread_id", ID),
+            ("timestamp", "[0-9]+"),
+            ("token_id", ID),
+            ("upload_id", ID),
+            ("user_id", ID),
+            ("username", "[A-Za-z0-9_.-]+"),
+            ("view_id", ID),
+        ]
+        .into_iter()
+        .filter_map(|(name, p)| regex::Regex::new(&format!("^(?:{p})$")).ok().map(|r| (name, r)))
+        .collect()
+    });
+
+/// A path parameter its route's pattern does not take: no route.
+async fn param_patterns(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::extract::FromRequestParts;
+    use axum::extract::rejection::RawPathParamsRejection;
+    let (mut parts, body) = req.into_parts();
+    // LDAP routes take any parameter.
+    if parts.uri.path().starts_with("/api/v4/") && !parts.uri.path().starts_with("/api/v4/ldap/") {
+        match axum::extract::RawPathParams::from_request_parts(&mut parts, &()).await {
+            Ok(params) => {
+                if params.iter().any(|(k, v)| PARAM_PATTERNS.get(k).is_some_and(|r| !r.is_match(v))) {
+                    return route_not_found(parts.uri.path()).into_response();
+                }
+            }
+            Err(RawPathParamsRejection::InvalidUtf8InPathParam(_)) => {
+                return route_not_found(parts.uri.path()).into_response();
+            }
+            Err(_) => {}
+        }
+    }
+    next.run(axum::extract::Request::from_parts(parts, body)).await
+}
+
 /// `LOG_REQUESTS=1`: one line per request on stderr (method, path, status, ms), to watch a real client.
 async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let (method, uri, t) = (req.method().clone(), req.uri().clone(), std::time::Instant::now());
@@ -246,6 +333,7 @@ fn routes(app: State) -> Router {
     let r = if gzip { r.layer(axum::middleware::from_fn(crate::compress::layer)) } else { r };
     let r = r
         .layer(axum::middleware::from_fn(head_as_go))
+        .layer(axum::middleware::from_fn(param_patterns))
         .fallback(not_found_marked)
         .method_not_allowed_fallback(method_mismatch)
         .with_state(app);
@@ -263,4 +351,20 @@ async fn not_found_marked(
     let mut res = not_found(state, method, headers, uri).await;
     res.extensions_mut().insert(Rerouted);
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PARAM_PATTERNS;
+
+    #[test]
+    fn param_patterns() {
+        assert_eq!(PARAM_PATTERNS.len(), 54);
+        let ok = |k: &str, v: &str| PARAM_PATTERNS[k].is_match(v);
+        assert!(ok("user_id", "me") && ok("user_id", "abc123"));
+        assert!(!ok("user_id", "ж") && !ok("user_id", " ") && !ok("user_id", "a.b") && !ok("user_id", ""));
+        assert!(ok("export_name", "x.zip") && !ok("export_name", "x"));
+        assert!(ok("syncable_type", "teams") && !ok("syncable_type", "teamsx"));
+        assert!(ok("emoji_name", "+1") && ok("username", "a.b-c_d"));
+    }
 }
