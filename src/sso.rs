@@ -303,9 +303,10 @@ impl App {
         self.limit_sessions(&user.id).await.map_err(internal)?;
         self.save_session(&mut s).await.map_err(internal)?;
         self.clear_imported_inactive(user).await;
-        sqlx::query("UPDATE Users SET LastLogin = $1 WHERE Id = $2")
+        sqlx::query("UPDATE Users SET LastLogin = $1, UpdateAt = $3 WHERE Id = $2")
             .bind(s.create_at)
             .bind(&user.id)
+            .bind(now_ms())
             .execute(&self.db)
             .await
             .map_err(|e| AppError::internal("app.login.doLogin.updateLastLogin.error", e.to_string()))?;

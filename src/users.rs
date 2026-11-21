@@ -519,9 +519,10 @@ async fn start_session(app: &State, headers: &HeaderMap, b: &LoginBody, user: Us
     }
     app.save_session(&mut s).await?;
     app.clear_imported_inactive(&user).await;
-    sqlx::query("UPDATE Users SET LastLogin = $1 WHERE Id = $2")
+    sqlx::query("UPDATE Users SET LastLogin = $1, UpdateAt = $3 WHERE Id = $2")
         .bind(s.create_at)
         .bind(&user.id)
+        .bind(now_ms())
         .execute(&app.db)
         .await?;
     app.invalidate_user(&user.id);
