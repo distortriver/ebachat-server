@@ -212,7 +212,8 @@ impl Config {
             ("BuildNumber", crate::SERVER_VERSION),
             ("BuildDate", ""),
             ("BuildHash", crate::BUILD_HASH),
-            ("BuildHashEnterprise", ""),
+            // The Makefile's BUILD_HASH_ENTERPRISE of a Team Edition build.
+            ("BuildHashEnterprise", "none"),
             ("BuildEnterpriseReady", "false"),
             ("IsFipsEnabled", "false"),
         ] {

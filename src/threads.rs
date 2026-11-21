@@ -370,7 +370,7 @@ impl App {
                 }
             }
             let users = self.participants(&ids, o.extended).await?;
-            out.threads = rows.into_iter().map(|j| self.to_response(j, &users)).collect();
+            out.threads = Some(rows.into_iter().map(|j| self.to_response(j, &users)).collect());
         }
         if o.unread {
             out.total = out.total_unread_threads;
