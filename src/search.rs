@@ -27,6 +27,13 @@ pub fn routes() -> Router<State> {
         .route("/api/v4/teams/{team_id}/posts/search", post(search_team))
 }
 
+
+/// Go's default `per_page` for post search.
+const SEARCH_PER_PAGE: i64 = 60;
+/// The most posts one search page answers.
+const SEARCH_MAX_PER_PAGE: i64 = 1000;
+/// How deep paging goes: the newest this many matches per set of terms.
+const SEARCH_MAX_WINDOW: i64 = 10_000;
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct SearchBody {
@@ -256,7 +263,7 @@ fn drop_symbol_terms(s: &str) -> String {
 
 impl App {
     /// `SqlPostStore.search` for one set of params.
-    async fn search_one(&self, team_id: &str, user_id: &str, p: &Params) -> ApiResult<Vec<Post>> {
+    async fn search_one(&self, team_id: &str, user_id: &str, p: &Params, limit: i64) -> ApiResult<Vec<Post>> {
         if p.terms.is_empty()
             && p.excluded_terms.is_empty()
             && p.in_channels.is_empty()
@@ -364,7 +371,7 @@ impl App {
         let sql = format!(
             "SELECT {}, (SELECT COUNT(*) FROM Posts WHERE Posts.RootId = (CASE WHEN q2.RootId = '' THEN q2.Id ELSE q2.RootId END) AND Posts.DeleteAt = 0) AS replycount
              FROM Posts q2 WHERE q2.DeleteAt = 0 AND q2.Type NOT LIKE 'system_%' AND q2.Type != 'card' AND {}
-             ORDER BY q2.CreateAt DESC LIMIT 100",
+             ORDER BY q2.CreateAt DESC, q2.Id LIMIT {limit}",
             db::cols::<Post>("q2"),
             conds.join(" AND ")
         );
@@ -391,7 +398,7 @@ impl App {
             .collect())
     }
 
-    /// `SearchPostsForUser`.
+    /// `SearchPostsForUser`, paged (see below).
     async fn search_posts(&self, s: &Session, team_id: &str, b: SearchBody) -> ApiResult<PostList> {
         let terms = b.terms.unwrap_or_default();
         let params = parse(terms.trim(), b.time_zone_offset.unwrap_or(0));
@@ -399,9 +406,22 @@ impl App {
             return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "store.sql_post.search.disabled", "Searching has been disabled on this server."));
         }
         let mut list = PostList::default();
-        if b.page.unwrap_or(0) > 0 {
+        // Pages for real, unlike Go's database search (LIMIT 100 whatever per_page asks, and nothing at all past
+        // page 0), so matches older than the newest hundred can be reached. The answer keeps Go's shape and the
+        // clients' paging works unchanged: the web app asks page+1 until a page comes back empty, EBAChat until one
+        // is shorter than per_page (docs/SEARCH.md).
+        let page = b.page.unwrap_or(0).max(0);
+        let per_page = match b.per_page.unwrap_or(SEARCH_PER_PAGE) {
+            n if n <= 0 => SEARCH_PER_PAGE,
+            n => n.min(SEARCH_MAX_PER_PAGE),
+        };
+        let skip = page.saturating_mul(per_page);
+        if skip >= SEARCH_MAX_WINDOW {
             return Ok(list);
         }
+        // Each set of terms gives its newest posts up to the end of this page (one more row would not tell more:
+        // the sets are merged and the permission filter can drop rows, so the page is cut after both).
+        let limit = (skip + per_page).min(SEARCH_MAX_WINDOW);
         let mut found: BTreeMap<String, Post> = BTreeMap::new();
         for mut p in params {
             if p.terms == "*" {
@@ -414,12 +434,13 @@ impl App {
             p.from_users = self.usernames_to_ids(&p.from_users).await;
             p.excluded_users = self.usernames_to_ids(&p.excluded_users).await;
             p.terms = drop_symbol_terms(&p.terms);
-            for post in self.search_one(team_id, &s.user_id, &p).await? {
+            for post in self.search_one(team_id, &s.user_id, &p, limit).await? {
                 found.insert(post.id.clone(), post);
             }
         }
         let mut posts: Vec<Post> = found.into_values().collect();
-        posts.sort_by_key(|p| std::cmp::Reverse(p.create_at));
+        posts.sort_by(|a, b| b.create_at.cmp(&a.create_at).then_with(|| a.id.cmp(&b.id)));
+        let mut kept = 0i64;
         // FilterPostsByChannelPermissions
         let mut allowed: HashMap<String, bool> = HashMap::new();
         for post in posts {
@@ -435,7 +456,13 @@ impl App {
                 }
             };
             if ok {
-                list.add_ordered(post);
+                if kept >= skip && kept < skip + per_page {
+                    list.add_ordered(post);
+                }
+                kept += 1;
+                if kept >= skip + per_page {
+                    break;
+                }
             }
         }
         Ok(list)
