@@ -116,6 +116,39 @@ const CHANNEL_CACHE_SIZE: usize = 25000;
 /// A user's channel memberships: channel id → roles (`GetAllChannelMembersForUser`).
 pub type MemberRoles = Arc<HashMap<String, String>>;
 
+/// One load at a time per key: callers that miss while a load is under way wait for it and read what it put,
+/// instead of each asking the database. Without it a slow database turns every miss into one more query (each
+/// `posted` delivery checks the recipient's memberships), and the queries that pile up keep it slow: the members
+/// cache never filled again at 800 req/s once Postgres had stalled. Go loads memberships once per connection in
+/// its hub, so it has no such pile-up.
+#[derive(Default)]
+pub struct Flights(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+pub struct Flight<'a> {
+    flights: &'a Flights,
+    key: String,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Flights {
+    /// Waits for any load of `key` under way, then holds the key until the returned flight is dropped.
+    pub async fn begin(&self, key: &str) -> Flight<'_> {
+        let lock = self.0.lock().unwrap().entry(key.to_string()).or_default().clone();
+        let _guard = lock.lock_owned().await;
+        Flight { flights: self, key: key.to_string(), _guard }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut m = self.flights.0.lock().unwrap();
+        // The map's and this guard's references only: nobody waits, the key can go.
+        if m.get(&self.key).is_some_and(|l| Arc::strong_count(l) <= 2) {
+            m.remove(&self.key);
+        }
+    }
+}
+
 pub struct Caches {
     // platform
     pub session: Lru<String, Arc<Session>>,
@@ -135,6 +168,7 @@ pub struct Caches {
     pub guest_count: Lru<String, i64>,
     pub pinned_count: Lru<String, i64>,
     pub members_for_user: Lru<String, MemberRoles>,
+    pub members_for_user_loads: Flights,
     pub members_notify_props: Lru<String, Arc<HashMap<String, StringMap>>>,
     // store: posts
     pub last_post_time: Lru<String, i64>,
@@ -174,6 +208,7 @@ impl Caches {
             guest_count: Lru::new(CHANNEL_CACHE_SIZE, m(30)),
             pinned_count: Lru::new(CHANNEL_CACHE_SIZE, m(30)),
             members_for_user: Lru::new(SESSION_CACHE_SIZE, m(15)),
+            members_for_user_loads: Flights::default(),
             members_notify_props: Lru::new(SESSION_CACHE_SIZE, m(30)),
             last_post_time: Lru::new(25000, m(15)),
             last_posts: Lru::new(20000, m(30)),

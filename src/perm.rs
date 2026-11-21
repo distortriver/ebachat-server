@@ -326,6 +326,11 @@ impl App {
         if let Some(m) = self.caches.members_for_user.get(&key) {
             return Ok(m);
         }
+        let _load = self.caches.members_for_user_loads.begin(&key).await;
+        // Loaded by the flight this one waited for.
+        if let Some(m) = self.caches.members_for_user.get(&key) {
+            return Ok(m);
+        }
         let mut sql = format!(
             "SELECT cm.channelid, cm.roles, cm.schemeguest, cm.schemeuser, cm.schemeadmin, {CHANNEL_SCHEME_COLS}
              FROM ChannelMembers cm JOIN Channels c ON cm.channelid = c.id {CHANNEL_SCHEME_JOINS} WHERE cm.userid = $1"
