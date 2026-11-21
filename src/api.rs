@@ -110,6 +110,34 @@ async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) 
     r
 }
 
+/// At most this many API requests at once; the next one is answered 503 `api.context.server_busy.app_error` at
+/// once. Go has no such bound: past what it can serve, every request waits, for a pool connection or a CPU, and
+/// memory grows with the queue (5 GB at twice its capacity in the bench, docs/BENCH.md). The websocket (held for the
+/// whole connection), `system/ping` and files outside `/api` do not count. `EBACHAT_MAX_REQUESTS`, by default eight
+/// per database connection and at least 256.
+fn request_limit(db_connections: u32) -> usize {
+    std::env::var("EBACHAT_MAX_REQUESTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| (db_connections as usize * 8).max(256))
+}
+
+async fn limit_requests(
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let p = req.uri().path();
+    if !p.starts_with("/api/") || p == "/api/v4/websocket" || p == "/api/v4/system/ping" {
+        return next.run(req).await;
+    }
+    let Ok(_permit) = permits.try_acquire_owned() else {
+        return AppError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "api.context.server_busy.app_error", "")
+            .into_response();
+    };
+    next.run(req).await
+}
+
 /// The headers `web.Handler` puts on every API answer.
 async fn go_headers(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use axum::http::HeaderValue;
@@ -148,8 +176,10 @@ pub fn router(app: State) -> Router {
     crate::push::spawn(app.clone());
     crate::email::spawn_batching(app.clone());
     let cors = crate::cors::Cors::from_config(&app.cfg);
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(request_limit(app.db.options().get_max_connections())));
     let r = routes(app.clone())
         .layer(axum::middleware::from_fn_with_state(app, crate::audit::layer))
+        .layer(axum::middleware::from_fn(move |req, next| limit_requests(permits.clone(), req, next)))
         .layer(axum::middleware::from_fn(go_headers));
     // Go wraps its whole handler in rs/cors when AllowCorsFrom is set.
     let r = match cors {
