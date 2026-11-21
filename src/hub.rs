@@ -48,11 +48,18 @@ pub struct Conn {
     /// Go's cleared session token: the session could not be loaded again (or was revoked), nothing more is sent.
     dead: AtomicBool,
     teams: RwLock<HashSet<String>>,
-    tx: mpsc::UnboundedSender<Out>,
+    tx: mpsc::Sender<Out>,
+    /// Wakes the writer to close the socket: a full queue cannot take `Out::Close`.
+    closing: Arc<tokio::sync::Notify>,
 }
 
+/// `sendQueueSize`: events a connection may have waiting. A client that lets it fill is closed, as Go's hub does
+/// (`webhub.broadcast: cannot send, closing websocket`); it reconnects and loads what it missed. Without the bound
+/// one stuck client would hold every event sent to it in memory.
+const SEND_QUEUE: usize = 256;
+
 impl Conn {
-    fn new(id: u64, session: Arc<Session>, tx: mpsc::UnboundedSender<Out>) -> Conn {
+    fn new(id: u64, session: Arc<Session>, tx: mpsc::Sender<Out>) -> Conn {
         let c = Conn {
             id,
             user_id: session.user_id.clone(),
@@ -67,6 +74,7 @@ impl Conn {
             dead: AtomicBool::new(false),
             teams: RwLock::new(HashSet::new()),
             tx,
+            closing: Arc::new(tokio::sync::Notify::new()),
         };
         c.set_session(session);
         c
@@ -83,6 +91,25 @@ impl Conn {
 
     fn session(&self) -> Arc<Session> {
         self.session.read().unwrap().clone()
+    }
+
+    /// Queues a frame for the writer; a full queue closes the connection (Go's `closeAndRemoveConn`).
+    fn send(&self, out: Out) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.tx.try_send(out)
+            && !self.dead.swap(true, Ordering::Relaxed)
+        {
+            crate::logs::error(
+                "webhub.broadcast: cannot send, closing websocket for user",
+                &[("user_id", json!(self.user_id)), ("conn_id", json!(self.connection_id))],
+            );
+            self.closing.notify_one();
+        }
+    }
+
+    /// Closes the socket; nothing more is sent to it meanwhile.
+    fn close(&self) {
+        self.dead.store(true, Ordering::Relaxed);
+        self.closing.notify_one();
     }
 
     fn is_dead(&self) -> bool {
@@ -117,7 +144,7 @@ impl Conn {
             Err(e) => {
                 self.dead.store(true, Ordering::Relaxed);
                 if e.status_code >= 500 {
-                    let _ = self.tx.send(Out::Close);
+                    self.closing.notify_one();
                 }
                 false
             }
@@ -130,7 +157,6 @@ enum Out {
     Event(Arc<str>),
     /// A reply to the client's action: not numbered.
     Reply(String),
-    Close,
 }
 
 /// `model.WebsocketBroadcast`: the part clients see, and how recipients are chosen.
@@ -309,8 +335,7 @@ impl Hub {
     /// Closes the connections of a revoked session; nothing more is sent to them meanwhile.
     pub fn close_session(&self, token: &str) {
         for c in self.conns.read().unwrap().iter().filter(|c| c.token == token) {
-            c.dead.store(true, Ordering::Relaxed);
-            let _ = c.tx.send(Out::Close);
+            c.close();
         }
     }
 
@@ -396,7 +421,7 @@ impl Hub {
                 continue;
             }
             if dl.is_plain(&c) {
-                let _ = c.tx.send(Out::Event(dl.render(&c, None)));
+                c.send(Out::Event(dl.render(&c, None)));
             } else {
                 later.push(c);
             }
@@ -409,7 +434,7 @@ impl Hub {
             for c in later {
                 if dl.allows(&app, &c).await {
                     let post = dl.post_for(&app, &c).await;
-                    let _ = c.tx.send(Out::Event(dl.render(&c, post)));
+                    c.send(Out::Event(dl.render(&c, post)));
                 }
             }
         });
@@ -556,11 +581,12 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
         return;
     };
     let user_id = session.user_id.clone();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+    let (tx, mut rx) = mpsc::channel::<Out>(SEND_QUEUE);
     let conn = Arc::new(Conn::new(app.hub.next.fetch_add(1, Ordering::Relaxed), session.clone(), tx));
     app.hub.add(conn.clone());
 
-    let writer = tokio::spawn(async move {
+    let closing = conn.closing.clone();
+    let mut writer = tokio::spawn(async move {
         let mut seq: i64 = 0;
         let mut ping = tokio::time::interval(Duration::from_secs(60));
         ping.tick().await;
@@ -575,7 +601,7 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
                             }
                             continue;
                         }
-                        _ => break,
+                        None => break,
                     };
                     let mut s = String::with_capacity(p.len() + 24);
                     s.push_str(&p);
@@ -591,6 +617,7 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
                         break;
                     }
                 }
+                _ = closing.notified() => break,
             }
         }
         let _ = sink.close().await;
@@ -605,10 +632,14 @@ async fn serve(app: State, socket: WebSocket, mut token: Option<String>) {
     app.touch_session(&session).await;
     app.set_status_online(&user_id, false).await;
 
-    while let Some(Ok(m)) = stream.next().await {
-        if writer.is_finished() {
-            break;
-        }
+    loop {
+        // The writer ending (closed, full queue, broken socket) ends the connection without waiting for the
+        // client's next frame.
+        let m = tokio::select! {
+            m = stream.next() => m,
+            _ = &mut writer => break,
+        };
+        let Some(Ok(m)) = m else { break };
         match m {
             // `ServeWebSocket`: every request gets the session as it is now (cache or database), never the one of
             // the connect: a revoked session fails, a changed one carries its new roles.
@@ -662,7 +693,7 @@ fn session_error_reply(conn: &Conn, text: &str, e: crate::app::AppError) {
     let seq_reply = serde_json::from_str::<Value>(text).ok().and_then(|v| v["seq"].as_i64()).unwrap_or(0);
     let error = WsReplyError { id: e.id, message: e.message, detailed_error: "", status_code: e.status_code };
     let msg = WsReply { status: "FAIL", seq_reply, data: None, error: Some(error) };
-    let _ = conn.tx.send(Out::Reply(serde_json::to_string(&msg).unwrap_or_default()));
+    conn.send(Out::Reply(serde_json::to_string(&msg).unwrap_or_default()));
 }
 
 /// A client's request on the socket (`wsapi`), answered with `{"status","seq_reply"}`.
@@ -729,7 +760,7 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, text: &str) {
         }
     };
     let msg = serde_json::to_string(&msg).unwrap_or_default();
-    let _ = conn.tx.send(Out::Reply(msg));
+    conn.send(Out::Reply(msg));
 }
 
 /// `PublishUserTyping`.
@@ -747,8 +778,8 @@ pub fn publish_typing(app: &State, user_id: &str, channel_id: &str, parent_id: &
 mod tests {
     use super::*;
 
-    fn conn(s: Session) -> (Conn, mpsc::UnboundedReceiver<Out>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn conn(s: Session) -> (Conn, mpsc::Receiver<Out>) {
+        let (tx, rx) = mpsc::channel(SEND_QUEUE);
         (Conn::new(1, Arc::new(s), tx), rx)
     }
 
