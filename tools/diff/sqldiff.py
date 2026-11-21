@@ -7,14 +7,17 @@ the answer) the writes are read back as (operation, table, rows). SQL texts diff
 are compared by what they touch, not by their text. Also kept per step: the status, the answer's top-level keys and
 the websocket events three observers received.
 
-    sqldiff.py run <impl> <out.json>         against the server on :8065
+    sqldiff.py run <impl> <out.json>         against SQLDIFF_URL (default :8065); SQLDIFF_SCENARIO=core,... picks
+                                             the scenario modules (tools/diff/scen_<name>.py, default core)
     sqldiff.py compare <go.json> <rust.json> the differences, step by step
 
 Stdlib and websocket-client only.
 """
 
+import importlib
 import json
 import os
+import types
 import re
 import subprocess
 import sys
@@ -25,14 +28,17 @@ import urllib.request
 
 BASE = os.environ.get("SQLDIFF_URL", "http://localhost:8065")
 PG = os.environ.get("SQLDIFF_PG", "bench-db")
+# The database this server runs on: two servers can run side by side on two copies, and pg_stat_statements is read
+# and reset per database.
+DB = os.environ.get("SQLDIFF_DB", "mattermost")
 PASSWORD = "Bench-pass-123"
 # Writes that come from timers rather than from the step (Go's job scheduler, cluster and status flushes).
-BACKGROUND = {"jobs", "systems", "clusterdiscovery", "pluginkeyvaluestore"}
+BACKGROUND = {"jobs", "systems", "clusterdiscovery", "pluginkeyvaluestore", "postreminders"}
 
 
 def psql(sql):
     return subprocess.check_output(
-        ["docker", "exec", PG, "psql", "-U", "mmuser", "-d", "mattermost", "-AtF\t", "-c", sql]).decode()
+        ["docker", "exec", PG, "psql", "-U", "mmuser", "-d", DB, "-AtF\t", "-c", sql]).decode()
 
 
 def call(token, method, path, body=None, raw=None, ctype=None):
@@ -74,7 +80,9 @@ WRITE = re.compile(r"\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+\"?([A-Za-z_]+)", 
 def writes():
     """(operation, table) -> [calls, rows] for every statement that writes, since the last reset."""
     out = {}
-    for line in psql("SELECT calls, rows, query FROM pg_stat_statements WHERE query NOT ILIKE '%pg_stat_statements%'").splitlines():
+    for line in psql("SELECT calls, rows, regexp_replace(query, '\\s+', ' ', 'g') FROM pg_stat_statements "
+                     "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+                     "AND query NOT ILIKE '%pg_stat_statements%'").splitlines():
         calls, rows, q = line.split("\t", 2)
         found = set()
         for m in WRITE.finditer(q):
@@ -91,6 +99,30 @@ def writes():
     return out
 
 
+def reset():
+    psql("SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)")
+
+
+def settle():
+    """The step's writes once they stop changing: the work a server does after its answer (notifications, status
+    flushes) lands within a few hundred milliseconds; at most 3 s."""
+    time.sleep(0.3)
+    last, t0 = writes(), time.time()
+    while time.time() - t0 < 3:
+        time.sleep(0.25)
+        cur = writes()
+        if cur == last:
+            return cur
+        last = cur
+    return last
+
+
+class Scenario(types.SimpleNamespace):
+    """What a scenario module's register(s) gets: the step decorator, call, keep (remember an id), ctx (ids made
+    so far), the logged-in users (u1..u3, spare: tokens and ids), admin, the bench team, bench-public and bench-00,
+    the base URL, psql and login."""
+
+
 class Observer:
     """A websocket that records the events it gets, tagged with the step running when they came."""
 
@@ -98,7 +130,7 @@ class Observer:
         import websocket
         self.name, self.state, self.events = name, state, []
         self.ws = websocket.create_connection(BASE.replace("http", "ws") + "/api/v4/websocket",
-                                              header=["Authorization: Bearer " + token])
+                                              header=["Authorization: Bearer " + token], suppress_origin=True)
         threading.Thread(target=self.read, daemon=True).start()
 
     def read(self):
@@ -139,168 +171,38 @@ def main_run(impl, out_path):
             ctx[k] = v["id"]
         return r
 
-    # ---- session and the first load ----
-    step("login")(lambda: call(None, "POST", "/users/login", {"login_id": "bench0105", "password": PASSWORD}))
-    step("users_me")(lambda: call(u1, "GET", "/users/me"))
-    step("my_teams")(lambda: call(u1, "GET", "/users/me/teams"))
-    step("my_team_members")(lambda: call(u1, "GET", "/users/me/teams/members"))
-    step("my_teams_unread")(lambda: call(u1, "GET", "/users/me/teams/unread"))
-    step("my_channels")(lambda: call(u1, "GET", f"/users/me/teams/{team}/channels"))
-    step("my_channel_members")(lambda: call(u1, "GET", f"/users/me/teams/{team}/channels/members"))
-    step("preferences")(lambda: call(u1, "GET", "/users/me/preferences"))
-    step("categories")(lambda: call(u1, "GET", f"/users/{u1_id}/teams/{team}/channels/categories"))
-    step("status_ids")(lambda: call(u1, "POST", "/users/status/ids", [u1_id, u2_id, u3_id]))
-    step("users_ids")(lambda: call(u1, "POST", "/users/ids", [u2_id, u3_id]))
-    step("users_usernames")(lambda: call(u1, "POST", "/users/usernames", ["bench0102", "bench0103"]))
-    step("get_user")(lambda: call(u1, "GET", f"/users/{u2_id}"))
-    step("users_in_channel")(lambda: call(u1, "GET", f"/users?in_channel={bench00}&page=0&per_page=60"))
-    step("users_in_team")(lambda: call(u1, "GET", f"/users?in_team={team}&page=0&per_page=60"))
-    step("autocomplete")(lambda: call(u1, "GET", f"/users/autocomplete?in_team={team}&name=bench01"))
-    step("channel_posts")(lambda: call(u1, "GET", f"/channels/{public}/posts?page=0&per_page=30"))
-    step("posts_unread")(lambda: call(u1, "GET", f"/users/{u1_id}/channels/{public}/posts/unread?limit_before=30&limit_after=30"))
-    step("view")(lambda: call(u1, "POST", "/channels/members/me/view", {"channel_id": public, "prev_channel_id": bench00}))
-    step("channel_stats")(lambda: call(u1, "GET", f"/channels/{public}/stats"))
-    step("channel_member_me")(lambda: call(u1, "GET", f"/channels/{public}/members/me"))
-    step("threads")(lambda: call(u1, "GET", f"/users/{u1_id}/teams/{team}/threads?per_page=25"))
-
-    # ---- preferences and status ----
-    step("pref_save")(lambda: call(u1, "PUT", f"/users/{u1_id}/preferences",
-                                   [{"user_id": u1_id, "category": "display_settings", "name": "use_military_time", "value": "true"}]))
-    step("pref_delete")(lambda: call(u1, "POST", f"/users/{u1_id}/preferences/delete",
-                                     [{"user_id": u1_id, "category": "display_settings", "name": "use_military_time", "value": "true"}]))
-    step("status_away")(lambda: call(u1, "PUT", f"/users/{u1_id}/status", {"user_id": u1_id, "status": "away"}))
-    step("status_dnd")(lambda: call(u1, "PUT", f"/users/{u1_id}/status",
-                                    {"user_id": u1_id, "status": "dnd", "dnd_end_time": int(time.time()) + 3600}))
-    step("status_online")(lambda: call(u1, "PUT", f"/users/{u1_id}/status", {"user_id": u1_id, "status": "online"}))
-    step("custom_status")(lambda: call(u1, "PUT", f"/users/{u1_id}/status/custom", {"emoji": "calendar", "text": "meeting"}))
-    step("custom_status_clear")(lambda: call(u1, "DELETE", f"/users/{u1_id}/status/custom"))
-
-    # ---- channels ----
-    step("channel_create")(lambda: keep("ch", call(u1, "POST", "/channels",
-                                                    {"team_id": team, "name": f"sqldiff-{impl}", "display_name": "SQL diff", "type": "O"})))
-    step("channel_patch")(lambda: call(u1, "PUT", f"/channels/{ctx['ch']}/patch", {"header": "a header", "purpose": "a purpose"}))
-    step("channel_add_member")(lambda: call(u1, "POST", f"/channels/{ctx['ch']}/members", {"user_id": u2_id}))
-    step("channel_add_members")(lambda: call(u1, "POST", f"/channels/{ctx['ch']}/members", {"user_ids": [u3_id, spare_id]}))
-    step("channel_member_roles")(lambda: call(u1, "PUT", f"/channels/{ctx['ch']}/members/{u2_id}/schemeRoles",
-                                              {"scheme_user": True, "scheme_admin": True}))
-    step("channel_notify_props")(lambda: call(u2, "PUT", f"/channels/{ctx['ch']}/members/{u2_id}/notify_props",
-                                              {"channel_id": ctx["ch"], "user_id": u2_id, "desktop": "all", "mark_unread": "all"}))
-    step("channel_remove_member")(lambda: call(u1, "DELETE", f"/channels/{ctx['ch']}/members/{spare_id}"))
-    step("channel_leave")(lambda: call(u3, "DELETE", f"/channels/{ctx['ch']}/members/{u3_id}"))
-    step("channel_join")(lambda: call(u3, "POST", f"/channels/{ctx['ch']}/members", {"user_id": u3_id}))
-    step("channel_privacy")(lambda: call(admin, "PUT", f"/channels/{ctx['ch']}/privacy", {"privacy": "P"}))
-    step("channel_privacy_back")(lambda: call(admin, "PUT", f"/channels/{ctx['ch']}/privacy", {"privacy": "O"}))
-    step("dm_create")(lambda: keep("dm", call(u1, "POST", "/channels/direct", [u1_id, u2_id])))
-    step("gm_create")(lambda: keep("gm", call(u1, "POST", "/channels/group", [u1_id, u2_id, u3_id])))
-
-    # ---- posts ----
-    step("post")(lambda: keep("p1", call(u1, "POST", "/posts", {"channel_id": ctx["ch"], "message": "hello #tag"})))
-    step("post_mention")(lambda: keep("p2", call(u1, "POST", "/posts", {"channel_id": ctx["ch"], "message": "@bench0102 look"})))
-    step("post_channel_mention")(lambda: call(u1, "POST", "/posts", {"channel_id": ctx["ch"], "message": "@channel all of you"}))
-    step("post_reply")(lambda: keep("r1", call(u2, "POST", "/posts", {"channel_id": ctx["ch"], "root_id": ctx["p1"], "message": "a reply"})))
-    step("post_reply_mention")(lambda: call(u3, "POST", "/posts",
-                                            {"channel_id": ctx["ch"], "root_id": ctx["p1"], "message": "@bench0101 in thread"}))
-    step("post_dm")(lambda: call(u2, "POST", "/posts", {"channel_id": ctx["dm"], "message": "direct"}))
-    step("post_gm")(lambda: call(u3, "POST", "/posts", {"channel_id": ctx["gm"], "message": "group"}))
-    step("post_public")(lambda: call(u2, "POST", "/posts", {"channel_id": public, "message": "public hello"}))
-    step("post_get")(lambda: call(u1, "GET", f"/posts/{ctx['p1']}"))
-    step("post_thread")(lambda: call(u1, "GET", f"/posts/{ctx['p1']}/thread"))
-    step("post_patch")(lambda: call(u1, "PUT", f"/posts/{ctx['p1']}/patch", {"message": "hello edited #tag"}))
-    step("post_pin")(lambda: call(u1, "POST", f"/posts/{ctx['p1']}/pin"))
-    step("pinned")(lambda: call(u1, "GET", f"/channels/{ctx['ch']}/pinned"))
-    step("post_unpin")(lambda: call(u1, "POST", f"/posts/{ctx['p1']}/unpin"))
-    step("reaction_add")(lambda: call(u2, "POST", "/reactions", {"user_id": u2_id, "post_id": ctx["p1"], "emoji_name": "smile"}))
-    step("reactions")(lambda: call(u1, "GET", f"/posts/{ctx['p1']}/reactions"))
-    step("reaction_remove")(lambda: call(u2, "DELETE", f"/users/{u2_id}/posts/{ctx['p1']}/reactions/smile"))
-    step("flag")(lambda: call(u1, "PUT", f"/users/{u1_id}/preferences",
-                              [{"user_id": u1_id, "category": "flagged_post", "name": ctx["p2"], "value": "true"}]))
-    step("flagged")(lambda: call(u1, "GET", f"/users/{u1_id}/posts/flagged"))
-    step("set_unread")(lambda: call(u2, "POST", f"/users/{u2_id}/posts/{ctx['p1']}/set_unread"))
-    step("view_after_unread")(lambda: call(u2, "POST", "/channels/members/me/view", {"channel_id": ctx["ch"]}))
-    step("search")(lambda: call(u1, "POST", f"/teams/{team}/posts/search", {"terms": "hello", "is_or_search": False, "page": 0, "per_page": 20}))
-    step("hashtag_search")(lambda: call(u1, "POST", f"/teams/{team}/posts/search", {"terms": "#tag", "page": 0, "per_page": 20}))
-
-    # ---- threads ----
-    step("thread_follow")(lambda: call(u2, "PUT", f"/users/{u2_id}/teams/{team}/threads/{ctx['p1']}/following"))
-    step("thread_read")(lambda: call(u1, "PUT", f"/users/{u1_id}/teams/{team}/threads/{ctx['p1']}/read/{int(time.time() * 1000)}"))
-    step("thread_unread")(lambda: call(u1, "POST", f"/users/{u1_id}/teams/{team}/threads/{ctx['p1']}/set_unread/{ctx['r1']}"))
-    step("thread_unfollow")(lambda: call(u2, "DELETE", f"/users/{u2_id}/teams/{team}/threads/{ctx['p1']}/following"))
-    step("threads_read_all")(lambda: call(u1, "PUT", f"/users/{u1_id}/teams/{team}/threads/read"))
-
-    # ---- files, drafts ----
-    step("file_upload")(lambda: keep_file(call(u1, "POST", f"/files?channel_id={ctx['ch']}&filename=note.txt",
-                                                raw=b"a small text file\n", ctype="text/plain")))
-
-    def keep_file(r):
-        s, v, _ = r
-        if s < 300 and v and v.get("file_infos"):
-            ctx["file"] = v["file_infos"][0]["id"]
-        return r
-
-    step("post_with_file")(lambda: call(u1, "POST", "/posts", {"channel_id": ctx["ch"], "message": "file", "file_ids": [ctx.get("file", "")]}))
-    step("file_info")(lambda: call(u1, "GET", f"/files/{ctx.get('file', 'x' * 26)}/info"))
-    step("draft_save")(lambda: call(u1, "POST", "/drafts", {"user_id": u1_id, "channel_id": ctx["ch"], "root_id": "", "message": "draft"}))
-    step("drafts")(lambda: call(u1, "GET", f"/users/{u1_id}/teams/{team}/drafts"))
-    step("draft_delete")(lambda: call(u1, "DELETE", f"/users/{u1_id}/channels/{ctx['ch']}/drafts"))
-
-    # ---- sidebar ----
-    step("category_create")(lambda: keep("cat", call(u1, "POST", f"/users/{u1_id}/teams/{team}/channels/categories",
-                                                      {"user_id": u1_id, "team_id": team, "display_name": "Mine", "channel_ids": [ctx["ch"]]})))
-    step("category_order")(lambda: call(u1, "GET", f"/users/{u1_id}/teams/{team}/channels/categories/order"))
-    step("category_delete")(lambda: call(u1, "DELETE", f"/users/{u1_id}/teams/{team}/channels/categories/{ctx.get('cat', 'x' * 26)}"))
-
-    # ---- commands and webhooks ----
-    step("cmd_away")(lambda: call(u1, "POST", "/commands/execute", {"channel_id": ctx["ch"], "command": "/away"}))
-    step("cmd_online")(lambda: call(u1, "POST", "/commands/execute", {"channel_id": ctx["ch"], "command": "/online"}))
-    step("cmd_me")(lambda: call(u1, "POST", "/commands/execute", {"channel_id": ctx["ch"], "command": "/me waves"}))
-    step("cmd_shrug")(lambda: call(u1, "POST", "/commands/execute", {"channel_id": ctx["ch"], "command": "/shrug ok"}))
-    step("hook_create")(lambda: keep("hook", call(admin, "POST", "/hooks/incoming", {"channel_id": ctx["ch"], "display_name": "sqldiff"})))
-    step("hook_post")(lambda: incoming(ctx.get("hook", "x" * 26)))
-
-    def incoming(hook):
-        req = urllib.request.Request(BASE + "/hooks/" + hook, data=json.dumps({"text": "from a hook"}).encode(),
-                                     method="POST", headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return r.status, None, r.headers
-        except urllib.error.HTTPError as e:
-            return e.code, None, e.headers
-
-    step("hook_delete")(lambda: call(admin, "DELETE", f"/hooks/incoming/{ctx.get('hook', 'x' * 26)}"))
-
-    # ---- deleting, archiving ----
-    step("post_delete")(lambda: call(u1, "DELETE", f"/posts/{ctx['p2']}"))
-    step("channel_archive")(lambda: call(u1, "DELETE", f"/channels/{ctx['ch']}"))
-    step("channel_restore")(lambda: call(admin, "POST", f"/channels/{ctx['ch']}/restore"))
-
-    # ---- users and teams ----
-    step("user_patch")(lambda: call(u1, "PUT", f"/users/{u1_id}/patch", {"nickname": "sqldiff", "position": "tester"}))
-    step("user_notify_props")(lambda: call(u1, "PUT", f"/users/{u1_id}/patch", {"notify_props": {"email": "false", "push": "mention", "desktop": "all"}}))
-    step("user_roles")(lambda: call(admin, "PUT", f"/users/{spare_id}/roles", {"roles": "system_user system_user_manager"}))
-    step("user_roles_back")(lambda: call(admin, "PUT", f"/users/{spare_id}/roles", {"roles": "system_user"}))
-    step("user_deactivate")(lambda: call(admin, "PUT", f"/users/{spare_id}/active", {"active": False}))
-    step("user_activate")(lambda: call(admin, "PUT", f"/users/{spare_id}/active", {"active": True}))
-    step("team_remove_member")(lambda: call(admin, "DELETE", f"/teams/{team}/members/{spare_id}"))
-    step("team_add_member")(lambda: call(admin, "POST", f"/teams/{team}/members", {"team_id": team, "user_id": spare_id}))
-    step("team_member_roles")(lambda: call(admin, "PUT", f"/teams/{team}/members/{spare_id}/schemeRoles",
-                                           {"scheme_user": True, "scheme_admin": False}))
-    step("team_stats")(lambda: call(u1, "GET", f"/teams/{team}/stats"))
-    step("password")(lambda: call(u3, "PUT", f"/users/{u3_id}/password", {"current_password": PASSWORD, "new_password": PASSWORD}))
-    step("sessions")(lambda: call(u1, "GET", f"/users/{u1_id}/sessions"))
-    step("logout")(lambda: call(u3, "POST", "/users/logout"))
+    s = Scenario(impl=impl, step=step, call=call, keep=keep, ctx=ctx, u1=u1, u1_id=u1_id, u2=u2, u2_id=u2_id,
+                 u3=u3, u3_id=u3_id, admin=admin, admin_id=admin_id, spare=spare, spare_id=spare_id, team=team,
+                 public=public, bench00=bench00, base=BASE, password=PASSWORD, psql=psql, login=login,
+                 observers=observers, state=state)
+    for name in os.environ.get("SQLDIFF_SCENARIO", "core").split(","):
+        importlib.import_module(f"scen_{name}").register(s)
 
     results = []
+    # SQLDIFF_ONLY=prefix,prefix records only the matching steps; the others still run (later steps need what they
+    # make), just without the pause and the statistics. SQLDIFF_UPTO=step stops after that step.
+    only = [p for p in os.environ.get("SQLDIFF_ONLY", "").split(",") if p]
+    upto = os.environ.get("SQLDIFF_UPTO", "")
     for name, fn in steps:
         state["step"] = name
-        psql("SELECT pg_stat_statements_reset()")
+        if only and not any(name.startswith(p) for p in only):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+            if name == upto:
+                break
+            continue
+        reset()
         try:
             s, v, _ = fn()
         except Exception as e:  # noqa: BLE001
             s, v = "error", repr(e)[:200]
-        time.sleep(1.2)
-        w = writes()
+        w = settle()
         results.append({"step": name, "status": s, "keys": keys(v) if s != "error" else v, "writes": w})
         print(f"{impl} {name}: {s} {', '.join(f'{k} {c[1]}' for k, c in sorted(w.items()))}", flush=True)
+        if name == upto:
+            break
     time.sleep(1)
     events = {o.name: o.events for o in observers}
     json.dump({"steps": results, "events": events}, open(out_path, "w"), indent=1)
@@ -326,7 +228,9 @@ def main_compare(go_path, rust_path):
             if k.split()[1] in BACKGROUND:
                 continue
             a, b = o["writes"].get(k, [0, 0]), s["writes"].get(k, [0, 0])
-            if a[1] != b[1] or (a[0] == 0) != (b[0] == 0):
+            # Rows, not statements: a statement one server runs on an empty set (Go's mention update with no
+            # mentions, a sidebar delete of nothing) changes nothing the other server missed.
+            if a[1] != b[1]:
                 lines.append(f"  {k:34} go {a[0]} stmts {a[1]} rows | rust {b[0]} stmts {b[1]} rows")
         for obs, es in sorted(ev.get(name, {}).items()):
             for e, c in sorted(es.items()):
