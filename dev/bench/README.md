@@ -21,6 +21,8 @@ body with ids and times masked for steps that ask for it), the rows written per 
 (pg_stat_statements), and the websocket events three observers got. Scenarios are `tools/diff/scen_<name>.py`
 (`SQLDIFF_SCENARIO=name`): `core`, `files`, `posts`, `admin`, `live`, `chan`, `reads`. Several runs can go at once
 with different tags and ports. `SQLDIFF_ONLY=prefix,...` records only matching steps, `SQLDIFF_UPTO=step` stops.
+`notify` (search and notifications) runs an SMTP sink and needs email on: a module's `SERVER_ENV` reaches the servers'
+environment (`sqldiff.py env`, `server.sh` `SERVER_ENV`), since env.sh's `MM_*` overrides beat `PUT /config`.
 
 All seven at once (about ten minutes):
 ```sh
@@ -38,4 +40,6 @@ Differences that remain on purpose (2026-11-21):
 - Files of a post: the released Go binary returns them in a changing order; Rust keeps the post's `file_ids` order,
   as the 12.1.0 source's `orderFileInfosByID` does.
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
-  each run's timing; image bytes (encoders differ, sizes and formats match).
+  each run's timing; image bytes (encoders differ, sizes and formats match). Adding several members at once: Go
+  posts each "added to the channel" message from a goroutine, so a member added later in the same request may or
+  may not get the `posted` of an earlier one (`notify` notify_search_setup).
