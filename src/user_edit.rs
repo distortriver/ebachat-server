@@ -1184,30 +1184,36 @@ async fn send_password_reset(St(app): St<State>, MaybeAuth(s): MaybeAuth, Body(b
     let hardened = app.cfg.bool("ServiceSettings.EnableHardenedMode");
     let user: Option<User> = crate::db::one(&app.db, "email = $1", &email).await?;
     let Some(u) = user else { return Ok(ok()) };
-    let r = async {
-        if u.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
-            return Err(AppError::bad_request("api.user.send_password_reset.send.app_error", ""));
-        }
-        if u.auth_data.as_deref().is_some_and(|a| !a.is_empty()) {
-            return Err(AppError::bad_request("api.user.send_password_reset.sso.app_error", ""));
-        }
-        if u.auth_service == "magic_link" && u.is_guest() {
-            return Err(AppError::bad_request("api.user.send_password_reset.guest_magic_link.app_error", ""));
-        }
-        let token = crate::email::create_password_recovery_token(&app, &u.id, &u.email).await?;
-        crate::email::send_password_reset(&app, &u.email, &token, &u.locale)
-            .await
-            .map_err(|e| AppError::internal("api.user.send_password_reset.send.app_error", e))
+    // Go's account checks, answered as Go does (outside hardened mode they tell an SSO or remote user to sign in
+    // another way).
+    let refused = if u.remote_id.as_deref().is_some_and(|r| !r.is_empty()) {
+        Some(AppError::bad_request("api.user.send_password_reset.send.app_error", ""))
+    } else if u.auth_data.as_deref().is_some_and(|a| !a.is_empty()) {
+        Some(AppError::bad_request("api.user.send_password_reset.sso.app_error", ""))
+    } else if u.auth_service == "magic_link" && u.is_guest() {
+        Some(AppError::bad_request("api.user.send_password_reset.guest_magic_link.app_error", ""))
+    } else {
+        None
+    };
+    if let Some(e) = refused {
+        return if hardened { Ok(ok()) } else { Err(e) };
     }
-    .await;
-    match r {
-        Ok(()) => {
-            crate::audit::log(&app, s.as_deref(), &format!("sent={email}")).await;
-            Ok(ok())
+    // The token and the email off the request (deliberately unlike Go, which answers 500 when the mail cannot be
+    // sent): a known address and an unknown one answer the same 200 at the same speed, so a failing mail server or
+    // SMTP's latency cannot tell anyone which addresses have accounts (docs/SECURITY.md).
+    let session = s.clone();
+    tokio::spawn(async move {
+        let sent = async {
+            let token = crate::email::create_password_recovery_token(&app, &u.id, &u.email).await.map_err(|e| e.detailed_error)?;
+            crate::email::send_password_reset(&app, &u.email, &token, &u.locale).await
         }
-        Err(e) if !hardened => Err(e),
-        Err(_) => Ok(ok()),
-    }
+        .await;
+        match sent {
+            Ok(()) => crate::audit::log(&app, session.as_deref(), &format!("sent={email}")).await,
+            Err(e) => crate::logs::error("Failed to send the password reset email", &[("user_id", json!(u.id)), ("error", json!(e))]),
+        }
+    });
+    Ok(ok())
 }
 
 /// `sendVerificationEmail`: always OK, whether or not the address is known and the email went out.

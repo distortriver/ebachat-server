@@ -283,3 +283,11 @@ variable never holds a `/`. Fixed: a name with `/`, `\` or `..` answers the rout
   - `GET /teams/{id}/stats` gave a guest the team's full member count; Go counts only the members it can see.
   - after a promotion the user's cached sessions stayed guest sessions (roles and `is_guest`) until they expired.
 - **Now:** as Go (`docs/USERS.md`, Guests). Checked with `tools/diff/scen_guests.py`.
+
+## Password reset no longer tells which addresses have accounts (2026-11-21)
+
+`POST /users/password/reset/send` answered 200 for an unknown address but 500 for a known one when the email could
+not be sent (Go does the same), and a known address also answered later, after the SMTP round trip. Now, after the
+account checks Go makes (an SSO, remote or magic-link guest account still gets its 400 hint outside hardened mode,
+as in Go), the token and the email go to a background task and the answer is 200 at once; a failure is logged
+(`Failed to send the password reset email`). Deliberately unlike Go.
