@@ -328,17 +328,15 @@ fn set_license(app: &App, license: Option<License>) -> bool {
     ok
 }
 
-/// `LoadLicense`, at start: `MM_LICENSE`, else the active license of the database (or the license file, saved).
+/// `LoadLicense`, at start and on `caches/invalidate` (each sets the license, so connected clients get
+/// `license_changed`): `MM_LICENSE`, else the active license of the database (or the license file, saved).
 pub async fn load(app: &App) {
     if let Ok(s) = std::env::var("MM_LICENSE")
         && !s.is_empty()
     {
         match license_from_bytes(s.as_bytes()) {
             Ok(l) => {
-                *CURRENT.write().unwrap() = Some(l).map(|mut l| {
-                    l.features.get_or_insert_with(Default::default).set_defaults();
-                    l
-                });
+                set_license(app, Some(l));
                 crate::logs::info("License key from ENV is valid, unlocking enterprise features.", &[]);
             }
             Err(e) => crate::logs::error("Failed to read license set in environment.", &[("error", e.id.into())]),
@@ -375,14 +373,11 @@ pub async fn load(app: &App) {
         .ok()
         .flatten();
     let Some(bytes) = bytes else {
-        *CURRENT.write().unwrap() = None;
+        set_license(app, None);
         return;
     };
     if let Ok(l) = license_from_bytes(bytes.as_bytes()) {
-        *CURRENT.write().unwrap() = Some(l).map(|mut l| {
-            l.features.get_or_insert_with(Default::default).set_defaults();
-            l
-        });
+        set_license(app, Some(l));
         crate::logs::info("License key is valid, unlocking enterprise features.", &[]);
     } else {
         crate::logs::info("License key is invalid.", &[]);

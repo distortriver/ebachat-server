@@ -276,6 +276,8 @@ async fn invalidate_caches(St(app): St<State>, Auth(s): Auth) -> ApiResult<Respo
     app.require_unrestricted(&s, "invalidate_caches").await?;
     app.caches.clear_all();
     app.hub.invalidate_all();
+    // InvalidateAllCachesSkipSend ends with LoadLicense.
+    crate::license::load(&app).await;
     Ok(([NO_CACHE], ok()).into_response())
 }
 
