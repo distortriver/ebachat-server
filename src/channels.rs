@@ -1464,14 +1464,19 @@ impl App {
         self.set_delete_at(&c.id, delete_at, delete_at).await?;
         self.invalidate_channel_cache(c);
         if let Some(user) = user {
-            self.post_system(system_post(
+            // With the channel as it was before the archive, as Go's CreatePost gets it: SendNotifications sends
+            // nothing in an archived channel, so a reloaded channel would leave the members without `posted`.
+            let p = system_post(
                 &c.id,
                 user_id,
                 "system_channel_deleted",
                 format!("{} archived the channel.", user.username),
                 json!({"username": user.username}),
-            ))
-            .await;
+            );
+            let flags = crate::posts::CreateFlags { set_online: true, ..Default::default() };
+            if let Err(e) = self.create_post_in(p, c, flags, None).await {
+                eprintln!("failed to post the archive message: {} {}", e.id, e.detailed_error);
+            }
         }
         let now = now_ms();
         sqlx::query("UPDATE IncomingWebhooks SET DeleteAt = $1, UpdateAt = $1 WHERE ChannelId = $2 AND DeleteAt = 0")
