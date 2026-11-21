@@ -187,6 +187,7 @@ def register(s):
                                     {"target_time": int(time.time()) + 3600}))
     step("p_reminder_past")(lambda: call(u1, "POST", f"/users/{u1_id}/posts/{ctx['r2']}/reminder",
                                          {"target_time": int(time.time()) - 3600}))
+    step("p_reminder_zero")(lambda: call(u1, "POST", f"/users/{u1_id}/posts/{ctx['r2']}/reminder", {"target_time": 0}))
     step("p_reminder_other")(lambda: call(u2, "POST", f"/users/{u1_id}/posts/{ctx['r2']}/reminder",
                                           {"target_time": int(time.time()) + 3600}))
     step("p_flag")(lambda: pref(u3, u3_id, "flagged_post", ctx["r1"], "true"))
