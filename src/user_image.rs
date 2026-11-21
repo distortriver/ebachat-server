@@ -75,8 +75,8 @@ pub fn initials_image(username: &str, user_id: &str) -> Vec<u8> {
                 return;
             }
             let p = img.get_pixel_mut(px as u32, py as u32);
-            for i in 0..3 {
-                p.0[i] = (p.0[i] as f32 * (1.0 - cov) + 255.0 * cov).round() as u8;
+            for c in p.0.iter_mut().take(3) {
+                *c = (*c as f32 * (1.0 - cov) + 255.0 * cov).round() as u8;
             }
         });
     }
