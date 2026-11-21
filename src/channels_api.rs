@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use axum::extract::{Path, State as St};
 use crate::app::Query;
+use axum::extract::{Path, State as St};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::app::{ApiResult, App, AppError, Auth, BusyAuth, Body, State, is_valid_id};
+use crate::app::{ApiResult, App, AppError, Auth, Body, BusyAuth, State, is_valid_id};
 use crate::channels::{self as ch, WithTeam, sanitize_member};
 use crate::db::{self, Table};
 use crate::model::channel::{DIRECT, GROUP, OPEN, OPEN_BOARD, PRIVATE};
@@ -32,14 +32,20 @@ pub fn routes() -> Router<State> {
         .route(&format!("{c}/stats/member_count"), post(channels_member_count))
         .route(&format!("{c}/members/{{user_id}}/view"), post(view_channel))
         .route(&format!("{c}/members/{{user_id}}/mark_read"), post(read_multiple))
-        .route(&format!("{c}/{{channel_id}}"), get(get_channel).delete(delete_channel).put(crate::channel_admin::update_channel))
+        .route(
+            &format!("{c}/{{channel_id}}"),
+            get(get_channel).delete(delete_channel).put(crate::channel_admin::update_channel),
+        )
         .route(&format!("{c}/{{channel_id}}/patch"), put(patch_channel))
         .route(&format!("{c}/{{channel_id}}/privacy"), put(update_privacy))
         .route(&format!("{c}/{{channel_id}}/restore"), post(restore_channel))
         .route(&format!("{c}/{{channel_id}}/stats"), get(channel_stats))
         .route(&format!("{c}/{{channel_id}}/timezones"), get(channel_timezones))
         .route(&format!("{c}/{{channel_id}}/common_teams"), get(common_teams))
-        .route(&format!("{c}/{{channel_id}}/members"), post(add_member).get(crate::channel_admin::get_members).put(crate::channel_admin::set_members))
+        .route(
+            &format!("{c}/{{channel_id}}/members"),
+            post(add_member).get(crate::channel_admin::get_members).put(crate::channel_admin::set_members),
+        )
         .route(&format!("{c}/{{channel_id}}/members/ids"), post(members_by_ids))
         .route(&format!("{c}/{{channel_id}}/members/{{user_id}}"), get(get_member).delete(remove_member))
         .route(&format!("{c}/{{channel_id}}/members/{{user_id}}/notify_props"), put(update_notify_props))

@@ -376,7 +376,8 @@ fn sanitize_dsn(dsn: &str) -> String {
     let Ok(mut u) = reqwest::Url::parse(dsn) else { return String::new() };
     let _ = u.set_username("****");
     let _ = u.set_password(Some("****"));
-    let mut q: Vec<(String, String)> = u.query_pairs().filter(|(k, _)| k != "user" && k != "password").map(|(k, v)| (k.into(), v.into())).collect();
+    let mut q: Vec<(String, String)> =
+        u.query_pairs().filter(|(k, _)| k != "user" && k != "password").map(|(k, v)| (k.into(), v.into())).collect();
     q.sort();
     if q.is_empty() {
         u.set_query(None);
@@ -411,7 +412,10 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let b = s.as_bytes();
     let digit = |i: usize| -> Result<u8, String> {
         let c = b[i];
-        (c as char).to_digit(16).map(|d| d as u8).ok_or_else(|| format!("encoding/hex: invalid byte: U+{:04X} {:?}", c, c as char))
+        (c as char)
+            .to_digit(16)
+            .map(|d| d as u8)
+            .ok_or_else(|| format!("encoding/hex: invalid byte: U+{:04X} {:?}", c, c as char))
     };
     let mut out = Vec::with_capacity(b.len() / 2);
     let mut i = 0;
@@ -609,7 +613,9 @@ pub fn conform(schema: &Value, v: &Value, lenient: bool) -> Result<Value, String
                 return Ok(Some(Value::Object(out)));
             }
             (Value::Object(_), Value::Object(_)) | (Value::Null, _) => true,
-            (Value::Bool(_), Value::Bool(_)) | (Value::String(_), Value::String(_)) | (Value::Array(_), Value::Array(_)) => true,
+            (Value::Bool(_), Value::Bool(_))
+            | (Value::String(_), Value::String(_))
+            | (Value::Array(_), Value::Array(_)) => true,
             // Go's settings are integers.
             (Value::Number(_), Value::Number(n)) => n.is_i64() || n.is_u64(),
             _ => false,
@@ -936,14 +942,8 @@ const FULL: &[(&str, &str)] = &[
     ("WranglerMoveThreadMaxCount", "WranglerSettings.MoveThreadMaxCount"),
     ("WranglerMoveThreadToAnotherTeamEnable", "WranglerSettings.MoveThreadToAnotherTeamEnable"),
     ("WranglerMoveThreadFromPrivateChannelEnable", "WranglerSettings.MoveThreadFromPrivateChannelEnable"),
-    (
-        "WranglerMoveThreadFromDirectMessageChannelEnable",
-        "WranglerSettings.MoveThreadFromDirectMessageChannelEnable",
-    ),
-    (
-        "WranglerMoveThreadFromGroupMessageChannelEnable",
-        "WranglerSettings.MoveThreadFromGroupMessageChannelEnable",
-    ),
+    ("WranglerMoveThreadFromDirectMessageChannelEnable", "WranglerSettings.MoveThreadFromDirectMessageChannelEnable"),
+    ("WranglerMoveThreadFromGroupMessageChannelEnable", "WranglerSettings.MoveThreadFromGroupMessageChannelEnable"),
 ];
 
 const FULL_FIXED: &[(&str, &str)] = &[
@@ -1007,7 +1007,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json").to_string_lossy().into_owned();
         let stored = || serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap();
-        std::fs::write(&path, r#"{"ServiceSettings": {"SiteURL": ""}, "FileSettings": {"PublicLinkSalt": ""}}"#).unwrap();
+        std::fs::write(&path, r#"{"ServiceSettings": {"SiteURL": ""}, "FileSettings": {"PublicLinkSalt": ""}}"#)
+            .unwrap();
         let c = Config::from_raw(read_source(&path).await.unwrap(), path.clone());
         c.reload().await.unwrap();
         assert!(ok(&salt(&stored())));
@@ -1024,7 +1025,8 @@ mod tests {
 
     #[test]
     fn env_overrides_by_section_and_type() {
-        let mut v = serde_json::json!({"ServiceSettings": {"SiteURL": "", "EnableDeveloper": true, "WebsocketPort": 80}});
+        let mut v =
+            serde_json::json!({"ServiceSettings": {"SiteURL": "", "EnableDeveloper": true, "WebsocketPort": 80}});
         let _ = apply_env(
             &mut v,
             [

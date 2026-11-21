@@ -99,7 +99,8 @@ fn pick<'a>(channel: &'a str, team: &'a str) -> &'a str {
 impl WithScheme<ChannelMember> {
     pub fn into_member(self) -> ChannelMember {
         let WithScheme(mut m, d) = self;
-        let defaults = [pick(&d.channel[0], &d.team[0]), pick(&d.channel[1], &d.team[1]), pick(&d.channel[2], &d.team[2])];
+        let defaults =
+            [pick(&d.channel[0], &d.team[0]), pick(&d.channel[1], &d.team[1]), pick(&d.channel[2], &d.team[2])];
         let (f, roles, explicit) = derive(
             [m.scheme_guest, m.scheme_user, m.scheme_admin],
             [CHANNEL_GUEST, CHANNEL_USER, CHANNEL_ADMIN],
@@ -391,10 +392,18 @@ impl App {
 
     /// The channel permission or 403.
     pub async fn require_channel(&self, s: &Session, channel_id: &str, permission: &str) -> ApiResult<()> {
-        if self.channel_perm(s, channel_id, permission).await?.0 { Ok(()) } else { Err(AppError::forbidden_perm(permission)) }
+        if self.channel_perm(s, channel_id, permission).await?.0 {
+            Ok(())
+        } else {
+            Err(AppError::forbidden_perm(permission))
+        }
     }
     pub async fn require_team(&self, s: &Session, team_id: &str, permission: &str) -> ApiResult<()> {
-        if self.has_team_perm(s, team_id, permission).await { Ok(()) } else { Err(AppError::forbidden_perm(permission)) }
+        if self.has_team_perm(s, team_id, permission).await {
+            Ok(())
+        } else {
+            Err(AppError::forbidden_perm(permission))
+        }
     }
     pub async fn require(&self, s: &Session, permission: &str) -> ApiResult<()> {
         if self.has_perm(s, permission).await { Ok(()) } else { Err(AppError::forbidden_perm(permission)) }
@@ -508,7 +517,9 @@ impl App {
             }
         }
         match self.channel(channel_id).await {
-            Ok(Some(c)) if !c.team_id.is_empty() => (self.user_team_perm(user_id, &c.team_id, permission).await, is_member),
+            Ok(Some(c)) if !c.team_id.is_empty() => {
+                (self.user_team_perm(user_id, &c.team_id, permission).await, is_member)
+            }
             _ => (self.user_has_perm(user_id, permission).await, is_member),
         }
     }

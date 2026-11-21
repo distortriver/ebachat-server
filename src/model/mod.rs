@@ -12,10 +12,12 @@ mod user;
 
 pub use channel::{Channel, ChannelMember};
 pub use misc::{
-    Base64, Bot, Draft, Emoji, FileInfo, Preference, Reaction, Role, Scheme, SidebarCategory, Thread,
-    ThreadMembership, category,
+    Base64, Bot, Draft, Emoji, FileInfo, Preference, Reaction, Role, Scheme, SidebarCategory, Thread, ThreadMembership,
+    category,
 };
-pub use post::{Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, ThreadResponse, Threads, kind as post_kind};
+pub use post::{
+    Post, PostAcknowledgement, PostList, PostMetadata, PostPriority, ThreadResponse, Threads, kind as post_kind,
+};
 pub use session::Session;
 pub use status::Status;
 pub use team::{Team, TeamMember};

@@ -711,7 +711,9 @@ impl App {
             ));
         }
         if c.is_board() {
-            return Err(bad("app.channel.create_channel.board_type.app_error", "").detail("use CreateBoardChannel instead"));
+            return Err(
+                bad("app.channel.create_channel.board_type.app_error", "").detail("use CreateBoardChannel instead")
+            );
         }
         if c.is_space() {
             return Err(bad("app.channel.create_channel.space_type.app_error", "").detail("use CreateChannel instead"));
@@ -926,7 +928,9 @@ impl App {
             Err(e) if e.id == "app.channel.save_member.exists.app_error" => {
                 return Ok((self.channel_member_or_404(&channel.id, &user.id).await?, false));
             }
-            Err(e) => return Err(AppError::internal("api.channel.add_user.to.channel.failed.app_error", e.detailed_error)),
+            Err(e) => {
+                return Err(AppError::internal("api.channel.add_user.to.channel.failed.app_error", e.detailed_error));
+            }
         };
         self.log_join(&user.id, &channel.id).await?;
         self.invalidate_channel_cache_for_user(&user.id);
@@ -1062,7 +1066,12 @@ impl App {
     }
 
     /// `removeUserFromChannel`: membership, thread memberships, history, caches and `user_removed`.
-    pub(crate) async fn remove_user_from_channel_row(&self, user: &User, remover_id: &str, channel: &Channel) -> ApiResult<()> {
+    pub(crate) async fn remove_user_from_channel_row(
+        &self,
+        user: &User,
+        remover_id: &str,
+        channel: &Channel,
+    ) -> ApiResult<()> {
         if channel.name == DEFAULT_CHANNEL && !user.is_guest() {
             return Err(bad(
                 "api.channel.remove.default.app_error",
@@ -1262,7 +1271,12 @@ impl App {
     // ---------- viewing ----------
 
     /// `MarkChannelsAsViewed` with `collapsed_threads_supported` (contract: posts call it for the poster).
-    pub async fn mark_viewed(&self, ids: &[String], user_id: &str, session_id: &str) -> ApiResult<BTreeMap<String, i64>> {
+    pub async fn mark_viewed(
+        &self,
+        ids: &[String],
+        user_id: &str,
+        session_id: &str,
+    ) -> ApiResult<BTreeMap<String, i64>> {
         let crt = self.is_crt_enabled(user_id).await;
         self.mark_channels_viewed(ids, user_id, session_id, true, crt).await
     }

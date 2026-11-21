@@ -9,9 +9,9 @@
 
 use std::sync::OnceLock;
 
+use crate::app::Query;
 use axum::body::Bytes;
 use axum::extract::{Path, State as St};
-use crate::app::Query;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -156,7 +156,8 @@ fn with_trigger(mut e: AppError, trigger: &str) -> AppError {
 
 /// `GetProtocol` + host: the site URL a request came through (`GetSiteURLHeader`).
 fn site_url_header(h: &HeaderMap) -> String {
-    let proto = if h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https") { "https" } else { "http" };
+    let proto =
+        if h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https") { "https" } else { "http" };
     let host = h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
     format!("{proto}://{host}")
 }
@@ -306,7 +307,9 @@ impl App {
         if !self.untrusted_url_allowed(&url) {
             return Err(failed("address forbidden".into()));
         }
-        let timeout = std::time::Duration::from_secs(self.cfg.i64("ServiceSettings.OutgoingIntegrationRequestsTimeout").max(1) as u64);
+        let timeout = std::time::Duration::from_secs(
+            self.cfg.i64("ServiceSettings.OutgoingIntegrationRequestsTimeout").max(1) as u64,
+        );
         let client = self.integration_client();
         let mut req = if cmd.method == "G" {
             let q = match url.query() {
@@ -327,7 +330,8 @@ impl App {
         let ctype = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let body = read_limited(resp, 1024 * 1024).await;
         if !status.is_success() {
-            let mut e = AppError::internal("api.command.execute_command.failed_resp.app_error", String::from_utf8_lossy(&body));
+            let mut e =
+                AppError::internal("api.command.execute_command.failed_resp.app_error", String::from_utf8_lossy(&body));
             let st = format!("{} {}", status.as_u16(), status.canonical_reason().unwrap_or(""));
             if let Some(m) = crate::i18n::tr(&e.id, &[("Trigger", &cmd.trigger), ("Status", &st)]) {
                 e.message = m;
@@ -459,7 +463,8 @@ impl App {
         post.message = if r.skip_slack_parsing { r.text.clone() } else { parse_slack_links_to_markdown(&r.text) };
         post.create_at = now_ms();
         if post.r#type.starts_with("system_") {
-            return Err(AppError::bad_request("api.context.invalid_param.app_error", "").with_id("api.context.invalid_param.app_error"));
+            return Err(AppError::bad_request("api.context.invalid_param.app_error", "")
+                .with_id("api.context.invalid_param.app_error"));
         }
         // Go converts the response's own attachments (shared pointers): the answer shows them converted too.
         if let Some(a) = r.attachments.take() {
@@ -493,7 +498,8 @@ impl App {
             };
             return self.create_post_in(post, &c, flags, None).await;
         }
-        if (r.response_type.is_empty() || r.response_type == EPHEMERAL) && (!r.text.is_empty() || r.attachments.is_some())
+        if (r.response_type.is_empty() || r.response_type == EPHEMERAL)
+            && (!r.text.is_empty() || r.attachments.is_some())
         {
             let user = post.user_id.clone();
             return Ok(self.send_ephemeral(&user, post).await);
@@ -553,10 +559,7 @@ impl App {
 fn form_encode(p: &[(String, String)]) -> String {
     let mut p: Vec<&(String, String)> = p.iter().collect();
     p.sort_by(|a, b| a.0.cmp(&b.0));
-    p.iter()
-        .map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v)))
-        .collect::<Vec<_>>()
-        .join("&")
+    p.iter().map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v))).collect::<Vec<_>>().join("&")
 }
 
 /// Go's `url.QueryEscape`.
@@ -605,8 +608,19 @@ fn response_from_body(ctype: &str, body: &[u8]) -> Result<CommandResponse, Strin
 /// `StringifyMessageAttachmentFieldValue` (a field value that is not a string becomes one, `%v`).
 fn stringify_field_values(attachments: Vec<Value>) -> Vec<Value> {
     const STRINGS: [&str; 13] = [
-        "fallback", "color", "pretext", "author_name", "author_link", "author_icon", "title", "title_link", "text",
-        "image_url", "thumb_url", "footer", "footer_icon",
+        "fallback",
+        "color",
+        "pretext",
+        "author_name",
+        "author_link",
+        "author_icon",
+        "title",
+        "title_link",
+        "text",
+        "image_url",
+        "thumb_url",
+        "footer",
+        "footer_icon",
     ];
     attachments
         .into_iter()
@@ -855,7 +869,11 @@ async fn list_commands(St(app): St<State>, Auth(s): Auth, Query(q): Query<ListQu
 }
 
 /// `listAutocompleteCommands`.
-async fn list_autocomplete(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<String>) -> ApiResult<Json<Vec<Command>>> {
+async fn list_autocomplete(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(team_id): Path<String>,
+) -> ApiResult<Json<Vec<Command>>> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
@@ -1031,7 +1049,12 @@ fn parse_argument(arg: &Value, parsed: &str, to_parse: &str) -> Parsed {
             let hint = arg["Data"]["Hint"].as_str().unwrap_or("").to_string();
             let help = s(arg, "HelpText");
             let unfinished = || {
-                (true, format!("{parsed}{to_parse}"), String::new(), vec![sug(format!("{parsed}{to_parse}"), String::new(), hint.clone(), help.clone())])
+                (
+                    true,
+                    format!("{parsed}{to_parse}"),
+                    String::new(),
+                    vec![sug(format!("{parsed}{to_parse}"), String::new(), hint.clone(), help.clone())],
+                )
             };
             if input.is_empty() {
                 return unfinished();
@@ -1042,7 +1065,12 @@ fn parse_argument(arg: &Value, parsed: &str, to_parse: &str) -> Parsed {
                 if input.as_bytes().get(second + 2) == Some(&b' ') {
                     offset += 1;
                 }
-                return (false, format!("{parsed}{}", &input[..second + offset]), input[second + offset..].to_string(), vec![]);
+                return (
+                    false,
+                    format!("{parsed}{}", &input[..second + offset]),
+                    input[second + offset..].to_string(),
+                    vec![],
+                );
             }
             match input.find(' ') {
                 None => unfinished(),
@@ -1065,7 +1093,12 @@ fn parse_list_items(items: &[Value], parsed: &str, to_parse: &str) -> Parsed {
         }
     }
     if !max_prefix.is_empty() {
-        return (false, format!("{parsed}{}", &input[..max_prefix.len()]), input[max_prefix.len()..].to_string(), vec![]);
+        return (
+            false,
+            format!("{parsed}{}", &input[..max_prefix.len()]),
+            input[max_prefix.len()..].to_string(),
+            vec![],
+        );
     }
     let out = items
         .iter()
@@ -1097,7 +1130,8 @@ async fn command_webhook(St(app): St<State>, Path(id): Path<String>, headers: He
     let response = match response_from_body(ctype, &body) {
         Ok(r) => r,
         Err(e) => {
-            return hook_msg(AppError::bad_request("web.command_webhook.parse.app_error", "").detail(e)).into_response();
+            return hook_msg(AppError::bad_request("web.command_webhook.parse.app_error", "").detail(e))
+                .into_response();
         }
     };
     let hook: Option<(String, String, String, String)> = match sqlx::query_as(
@@ -1148,9 +1182,11 @@ mod tests {
 
     #[test]
     fn suggestions_for_text_argument() {
-        let data = vec![json!({"Trigger": "rename", "Hint": "[text]", "HelpText": "Rename the channel", "RoleID": "system_user",
+        let data = vec![
+            json!({"Trigger": "rename", "Hint": "[text]", "HelpText": "Rename the channel", "RoleID": "system_user",
             "Arguments": [{"Name": "", "HelpText": "[text]", "Type": "TextInput", "Required": true, "Data": {"Hint": "[text]", "Pattern": ""}}],
-            "SubCommands": []})];
+            "SubCommands": []}),
+        ];
         let s = suggest(&data, "", "rename ", "system_user");
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].complete, "rename ");

@@ -287,7 +287,8 @@ pub struct Broadcast {
 pub type PerUser = Arc<dyn Fn(&str) -> Option<serde_json::Map<String, Value>> + Send + Sync>;
 
 /// The `post` of an event for one recipient (by user id), when it differs from the shared one.
-pub type PostHook = Arc<dyn Fn(State, String) -> futures_util::future::BoxFuture<'static, Option<String>> + Send + Sync>;
+pub type PostHook =
+    Arc<dyn Fn(State, String) -> futures_util::future::BoxFuture<'static, Option<String>> + Send + Sync>;
 
 /// The event as JSON without its closing `"seq":N}`: `{"event":..,"data":..,"broadcast":..,"seq":`.
 fn prefix(event: &str, data: &Value, b: &Broadcast) -> Arc<str> {
@@ -382,7 +383,8 @@ impl Delivery {
             extra.get_or_insert_with(serde_json::Map::new).insert("post".into(), Value::String(p));
         }
         let Some(extra) = extra else { return base.clone() };
-        let mut d = if admin { self.data.clone() } else { self.b.sanitized.clone().unwrap_or_else(|| self.data.clone()) };
+        let mut d =
+            if admin { self.data.clone() } else { self.b.sanitized.clone().unwrap_or_else(|| self.data.clone()) };
         if let Value::Object(m) = &mut d {
             m.extend(extra);
         }
@@ -518,7 +520,8 @@ impl Hub {
     pub fn publish(&self, event: &str, data: Value, b: Broadcast) {
         let now = now_ms();
         let routed = !b.connection_id.is_empty() || !b.user_id.is_empty();
-        let subject = if !routed && b.channel_id.is_empty() && b.team_id.is_empty() { guest_subject(event, &data) } else { None };
+        let subject =
+            if !routed && b.channel_id.is_empty() && b.team_id.is_empty() { guest_subject(event, &data) } else { None };
         let mut later: Vec<Arc<Conn>> = Vec::new();
         let mut now_conns: Vec<Arc<Conn>> = Vec::new();
         {
@@ -613,7 +616,12 @@ pub async fn connect(St(app): St<State>, req: axum::extract::Request) -> Respons
         return upgrade_error(status, origin.as_deref().unwrap_or(""));
     }
     let query = |name: &str| {
-        parts.uri.query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=').map(str::to_string))
+        parts
+            .uri
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=').map(str::to_string))
     };
     let resume = query("connection_id").filter(|c| !c.is_empty()).map(|c| (c, query("sequence_number")));
     match WebSocketUpgrade::from_request_parts(&mut parts, &app).await {
@@ -625,7 +633,9 @@ pub async fn connect(St(app): St<State>, req: axum::extract::Request) -> Respons
 /// gorilla's `tokenListContainsValue`: one of the header's comma-separated tokens, any case.
 fn header_has_token(parts: &Parts, name: &str, value: &str) -> bool {
     parts.headers.get_all(name).iter().any(|v| {
-        String::from_utf8_lossy(v.as_bytes()).split(',').any(|t| t.trim_matches([' ', '\t']).eq_ignore_ascii_case(value))
+        String::from_utf8_lossy(v.as_bytes())
+            .split(',')
+            .any(|t| t.trim_matches([' ', '\t']).eq_ignore_ascii_case(value))
     })
 }
 
@@ -691,8 +701,9 @@ fn origin_allowed(app: &crate::app::App, parts: &Parts) -> bool {
 /// status text), then the handler's `api.web_socket.connect.upgrade.app_error` (400 in the JSON) written after it.
 fn upgrade_error(status: axum::http::StatusCode, origin: &str) -> Response {
     use axum::http::{HeaderValue, header};
-    let e = crate::app::AppError::new(axum::http::StatusCode::BAD_REQUEST, "api.web_socket.connect.upgrade.app_error", "")
-        .with_param("BlockedOrigin", origin);
+    let e =
+        crate::app::AppError::new(axum::http::StatusCode::BAD_REQUEST, "api.web_socket.connect.upgrade.app_error", "")
+            .with_param("BlockedOrigin", origin);
     let rid = e.request_id.clone();
     let json = serde_json::to_string(&e).unwrap_or_default();
     let body = format!("{}\n{json}", status.canonical_reason().unwrap_or(""));
@@ -720,7 +731,9 @@ impl WsRequest {
         let v = serde_json::Deserializer::from_str(text).into_iter::<Value>().next()?.ok()?;
         let o = v.as_object()?;
         let field = |k: &str| {
-            o.get(k).or_else(|| o.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v)).filter(|v| !v.is_null())
+            o.get(k)
+                .or_else(|| o.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v))
+                .filter(|v| !v.is_null())
         };
         Some(WsRequest {
             seq: match field("seq") {
@@ -1082,7 +1095,8 @@ mod tests {
     #[test]
     fn stale_after_invalidation_or_expiry() {
         let now = now_ms();
-        let (c, _rx) = conn(Session { user_id: "u".into(), token: "t".into(), expires_at: now + 60_000, ..Default::default() });
+        let (c, _rx) =
+            conn(Session { user_id: "u".into(), token: "t".into(), expires_at: now + 60_000, ..Default::default() });
         assert!(!c.is_stale(now));
         // InvalidateCache
         c.generation.fetch_add(1, Ordering::AcqRel);
