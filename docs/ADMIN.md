@@ -93,6 +93,14 @@ one given, with `session_user=` appended). The Rust server writes the same rows 
 - **Differs:** a valid license would be stored and served by `/license/client`, but the licensed features stay
   unported: the server keeps answering them as Team Edition.
 
+## Analytics (`src/admin.rs`)
+
+`GET /analytics/old` with Go's names and rows. `total_master_db_connections` is the pool's, so it differs from Go's.
+
+- **Go bug fixed:** `name=extra_counts&team_id=...` answers 500 `app.webhooks.analytics_outgoing_count.app_error` in
+  Go: `AnalyticsOutgoingCount` builds `Where("TeamId", teamId)` (a bare column, not `TeamId = ?`), which Postgres
+  refuses ("argument of AND must be type boolean"). Rust counts the team's outgoing webhooks.
+
 ## User reports
 
 `GET /reports/users` takes `date_range` (`last_30_days`, `previous_month`, `last_6_months`): post statistics count

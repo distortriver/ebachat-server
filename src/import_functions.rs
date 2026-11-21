@@ -1204,6 +1204,14 @@ impl Ctx {
         .await
         .map_err(|e| IErr::new("UpdateTeamMemberRoles", "app.team.save_member.save.app_error", 500).wrap(e))?;
         self.app.clear_sessions_for_user(&m.user_id);
+        // sendUpdatedTeamMemberEvent: both role updates of the import tell the member.
+        if let Ok(Some(tm)) = self.app.team_member(&m.team_id, &m.user_id).await {
+            self.app.hub.publish(
+                "memberrole_updated",
+                serde_json::json!({"member": serde_json::to_string(&tm).unwrap_or_default()}),
+                crate::hub::Broadcast { user_id: m.user_id.clone(), ..Default::default() },
+            );
+        }
         Ok(())
     }
 
@@ -1917,10 +1925,8 @@ impl Ctx {
             if !p.id.is_empty() && !p.is_remote() {
                 return Err((Some(i), IErr::new("importMultiplePostLines", "app.post.save.existing.app_error", 400).wrap(format!("invalid input: entity: Post field: id value: {}", p.id))));
             }
+            // Post.PreSave leaves RemoteId nil: an imported post's RemoteId is NULL, as Go's SaveMultiple writes it.
             p.pre_save(now_ms());
-            if p.remote_id.is_none() {
-                p.remote_id = Some(String::new());
-            }
             app.validate_post(p, max).map_err(|e| (Some(i), IErr::from(e)))?;
             let count = if p.excludes_from_message_count() { 0 } else { 1 };
             let root = p.root_id.is_empty();

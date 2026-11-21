@@ -523,6 +523,15 @@ async fn write_part(app: &App, mut us: UploadSession, data: Vec<u8>) -> ApiResul
         let _ = app.files.remove(&upload_path).await;
     }
     file_api::save_file_info(app, &info).await?;
+    // UploadData: the text extracted in the background (`FileSettings.ExtractContent`), for an import upload too.
+    if app.cfg.bool("FileSettings.ExtractContent")
+        && let Some(a) = app.hub.app()
+    {
+        let (id, name, path, mime) = (info.id.clone(), info.name.clone(), info.path.clone(), info.mime_type.clone());
+        tokio::spawn(async move {
+            let _ = a.extract_content_from_file_info(&id, &name, &path, &mime, "").await;
+        });
+    }
     let _ = sqlx::query("DELETE FROM UploadSessions WHERE Id = $1").bind(&us.id).execute(&app.db).await;
     Ok(Some(info))
 }

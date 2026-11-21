@@ -812,7 +812,7 @@ async fn migrations_job(app: &State, job: Job) {
         let r = if key == PHASE_2 {
             phase_2_batch(app, &last_done).await
         } else {
-            Err(jobs::go_error("MigrationsWorker.runMigration", "migrations.worker.run_migration.unknown_key", ""))
+            Err(jobs::job_error("migrations.worker.run_migration.unknown_key", ""))
         };
         match r {
             Err(e) => {
@@ -821,7 +821,7 @@ async fn migrations_job(app: &State, job: Job) {
             }
             Ok((true, _)) => {
                 if let Err(e) = sqlx::query("INSERT INTO Systems (Name, Value) VALUES ($1, 'true')").bind(&key).execute(&app.db).await {
-                    let _ = jobs::set_error(app, &mut job, Some(jobs::go_error("runMigration", "migrations.system.save.app_error", &e.to_string()))).await;
+                    let _ = jobs::set_error(app, &mut job, Some(jobs::job_error("migrations.system.save.app_error", &e.to_string()))).await;
                     return;
                 }
                 if let Err(e) = jobs::set_success(app, &job).await {
@@ -853,7 +853,7 @@ struct Phase2 {
 /// roles moved out of `Roles` into the `Scheme*` columns.
 async fn phase_2_batch(app: &App, last_done: &str) -> Result<(bool, String), String> {
     let zero = "0".repeat(26);
-    let invalid = |p: &str| jobs::go_error("MigrationsWorker.runAdvancedPermissionsPhase2Migration", "migrations.worker.run_advanced_permissions_phase_2_migration.invalid_progress", p);
+    let invalid = |p: &str| jobs::job_error("migrations.worker.run_advanced_permissions_phase_2_migration.invalid_progress", p);
     let mut p = if last_done.is_empty() {
         Phase2 { current_table: "TeamMembers".into(), last_team_id: zero.clone(), last_channel_id: zero.clone(), last_user: zero.clone() }
     } else {
@@ -874,7 +874,7 @@ async fn phase_2_batch(app: &App, last_done: &str) -> Result<(bool, String), Str
     let (admin, user, guest) =
         if table == "TeamMembers" { ("team_admin", "team_user", "team_guest") } else { ("channel_admin", "channel_user", "channel_guest") };
     let err_id = if table == "TeamMembers" { "app.team.migrate_team_members.update.app_error" } else { "app.channel.migrate_channel_members.select.app_error" };
-    let fail = |e: sqlx::Error| jobs::go_error("MigrationsWorker.runAdvancedPermissionsPhase2Migration", err_id, &e.to_string());
+    let fail = |e: sqlx::Error| jobs::job_error(err_id, &e.to_string());
     let mut tx = app.db.begin().await.map_err(fail)?;
     type Member = (String, String, String, Option<bool>, Option<bool>, Option<bool>);
     let members: Vec<Member> = sqlx::query_as(sqlx::AssertSqlSafe(format!(

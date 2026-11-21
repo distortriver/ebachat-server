@@ -165,10 +165,17 @@ written to the job's data as Go does.
 - **Bulk import:**
   - the uploads of import files were stored under `%2E/import/` (the `./import` of the config, uncleaned) and so
     never found by the job or `/imports`; their path is cleaned as Go's `filepath.Join` cleans it.
+  - imported posts kept `RemoteId` NULL, as Go's `SaveMultiple` writes them (they were written `""`, so
+    clients saw `remote_id: ""` where Go sends none); team member role updates of the import send
+    `memberrole_updated` as Go's `updateTeamMemberRolesInternal` and `UpdateTeamMemberSchemeRoles` do.
+  - a finished upload (an import file too) has its text extracted (`FileSettings.ExtractContent`), as Go's
+    `UploadData` does: for a zip, the names of its entries.
   - a bot's welcome post (`CreateBot`) no longer marks the bot's direct channel viewed: Go's `CreatePostAsUser`
     skips that for posts `from_bot`.
 - **Extraction:** a pdf without `pdftotext` gives no text (Go falls back to a Go PDF reader). Text cut at 1 MB stays valid UTF-8 (Go may cut inside a
   character and then fail to save it).
+- **Migrations worker:** its job error was `Where: message`; now `AppError.Message` (then " — " and the wrapped
+  error), as Go's `SetJobError` writes it.
 - **`job_updated` to non-admins** with the required permission works through each connection's session.
 - `LOG_JOBS=1` logs each job the Rust server ran.
 

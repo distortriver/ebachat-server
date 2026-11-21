@@ -428,6 +428,17 @@ pub fn go_error(where_: &str, id: &str, detail: &str) -> String {
     s
 }
 
+/// `Job.Data["error"]` of `SetJobError(job, NewAppError(where, id, ...).Wrap(err))`: the message, then the wrapped
+/// error after " — " (`AppError.Message`, not `Error()`, so `where` does not appear).
+pub fn job_error(id: &str, wrapped: &str) -> String {
+    let mut s = crate::i18n::t(id).unwrap_or(id).to_string();
+    if !wrapped.is_empty() {
+        s += " — ";
+        s += wrapped;
+    }
+    s
+}
+
 // ---------- watcher, workers and schedulers ----------
 
 /// Job types whose worker is busy with a job (a Go worker takes one job at a time from an unbuffered channel).
