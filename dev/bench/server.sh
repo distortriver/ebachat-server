@@ -11,7 +11,6 @@ fi
 [ "${1:-}" = stop ] && exit 0
 impl=$1 cores=${2:-$SRV_MAX}
 cpus=0-$((cores - 1))
-ulimit -n 1048576
 case $impl in
   go)
     cd "$BENCH/go"  # i18n, templates and client are found relative to it

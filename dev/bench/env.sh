@@ -4,6 +4,8 @@ BENCH=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$BENCH/../.." && pwd)
 RUN=$BENCH/run
 mkdir -p "$RUN/results" "$RUN/data"
+# 500 websockets plus the HTTP connections of a thousand requests a second: far beyond the default 1024.
+ulimit -n "$(ulimit -Hn)"
 N=$(nproc)
 Q=$((N / 4))
 SRV_MAX=$((N / 2))

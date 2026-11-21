@@ -611,7 +611,7 @@ async fn steps(base: String, pid: u32, plan: Vec<(u32, u32)>, seconds: u64) {
     let online = sockets.len() as u64;
     eprintln!("{online} websockets in {:.1} s", t_conn.elapsed().as_secs_f64());
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let (rss_ws, _) = proc_stat(pid).unwrap();
+    let (rss_ws, _) = proc_stat(pid).unwrap_or_default();
     println!("server {base}  pid {pid}  {online} clients online  RSS start {} MB, with websockets {} MB", rss0 / 1024, rss_ws / 1024);
     println!(
         "{:>5} {:>4} | {:>7} {:>5} | {:>6} {:>6} {:>6} | {:>5} {:>8} {:>8} {:>8} {:>9} | {:>6} {:>6} {:>5} {:>5} {:>5}",
@@ -628,7 +628,7 @@ async fn steps(base: String, pid: u32, plan: Vec<(u32, u32)>, seconds: u64) {
     stages.extend(plan.iter().map(|&(r, p)| (r, p, seconds)));
     for (si, &(rps, pps, secs)) in stages.iter().enumerate() {
         cur.store(si, Ordering::Relaxed);
-        let st_cpu0 = (proc_stat(pid).unwrap().1, pg_cpu(), machine_cpu(), proc_stat(std::process::id()).map(|p| p.1).unwrap_or(0.0));
+        let st_cpu0 = (proc_stat(pid).map(|p| p.1).unwrap_or(0.0), pg_cpu(), machine_cpu(), proc_stat(std::process::id()).map(|p| p.1).unwrap_or(0.0));
         let t0 = Instant::now();
         let end = t0 + Duration::from_secs(secs);
         let mut rss_max = 0;
@@ -723,7 +723,11 @@ async fn steps(base: String, pid: u32, plan: Vec<(u32, u32)>, seconds: u64) {
         let wall = t0.elapsed().as_secs_f64();
         // Let the last posts' events arrive before the next step takes over the counters.
         tokio::time::sleep(Duration::from_millis(if pps > 0 { 1500 } else { 200 })).await;
-        let (srv1, pg1, m1, lg1) = (proc_stat(pid).unwrap().1, pg_cpu(), machine_cpu(), proc_stat(std::process::id()).map(|p| p.1).unwrap_or(0.0));
+        let Some((_, srv1)) = proc_stat(pid) else {
+            println!("server pid {pid} gone (or no file descriptors left): stopping");
+            break;
+        };
+        let (pg1, m1, lg1) = (pg_cpu(), machine_cpu(), proc_stat(std::process::id()).map(|p| p.1).unwrap_or(0.0));
         if si == 0 {
             continue;
         }
