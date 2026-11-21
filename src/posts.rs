@@ -1405,11 +1405,9 @@ impl App {
         if let Some(md) = rpost.metadata.as_mut()
             && md.priority.is_none()
         {
-            md.priority = post.metadata.as_ref().and_then(|m| m.priority.clone()).map(|mut p| {
-                p.post_id = post.id.clone();
-                p.channel_id = post.channel_id.clone();
-                p
-            });
+            // The priority as the client sent it: Go saves a copy with PostId and ChannelId and answers (and sends
+            // `posted`) with the one passed in, without them.
+            md.priority = post.metadata.as_ref().and_then(|m| m.priority.clone());
         }
         if self.cfg.bool("ServiceSettings.ThreadAutoFollow") && !rpost.root_id.is_empty() {
             let _ = self
@@ -2490,7 +2488,8 @@ async fn edit_history(St(app): St<State>, Auth(s): Auth, Path(post_id): Path<Str
     let sql = format!("SELECT {}, 0::bigint AS replycount FROM Posts p WHERE p.OriginalId = $1 ORDER BY p.EditAt DESC", pc("p"));
     let posts: Vec<WithCount> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&post_id).fetch_all(&app.db).await?;
     if posts.is_empty() {
-        return Err(AppError::not_found("app.post.get_edit_history_for_post.app_error", "Unable to get the post."));
+        // `GetEditHistoryForPost`: a post never edited is a NotFound from the store, answered as app.post.get.app_error.
+        return Err(AppError::not_found("app.post.get.app_error", "Unable to get the post."));
     }
     let mut out = vec![];
     for WithCount(p) in posts {
@@ -2825,6 +2824,39 @@ async fn set_reminder(
     .bind(b.target_time)
     .execute(&app.db)
     .await?;
+    // The acknowledgement, to the user alone (`SetPostReminder`): an ephemeral post in the thread of the reminded post,
+    // with what the client needs to render it in the user's timezone. GetPostReminderMetadata: the channel, its
+    // team's name ('' for DMs) and the author's username.
+    let (team_name, username): (String, String) = sqlx::query_as(
+        "SELECT COALESCE(t.Name, ''), u.Username FROM Posts p JOIN Channels c ON p.ChannelId = c.Id
+         LEFT JOIN Teams t ON c.TeamId = t.Id JOIN Users u ON p.UserId = u.Id WHERE p.Id = $1",
+    )
+    .bind(&post.id)
+    .fetch_one(&app.db)
+    .await?;
+    let site_url = app.cfg.str("ServiceSettings.SiteURL").to_string();
+    let permalink = if team_name.is_empty() {
+        format!("{site_url}/pl/{}", post.id)
+    } else {
+        format!("{site_url}/{team_name}/pl/{}", post.id)
+    };
+    // time.RFC822 in UTC: "02 Jan 06 15:04 UTC".
+    let parsed = chrono::DateTime::from_timestamp(b.target_time, 0)
+        .map(|t| t.format("%d %b %y %H:%M UTC").to_string())
+        .unwrap_or_default();
+    let mut eph = Post {
+        user_id: user_id.clone(),
+        root_id: if post.root_id.is_empty() { post.id.clone() } else { post.root_id.clone() },
+        channel_id: post.channel_id.clone(),
+        message: format!("You will be reminded about {permalink} by @{username} at {parsed}"),
+        ..Default::default()
+    };
+    eph.props.0.insert("target_time".into(), json!(b.target_time));
+    eph.props.0.insert("team_name".into(), json!(team_name));
+    eph.props.0.insert("post_id".into(), json!(post.id));
+    eph.props.0.insert("username".into(), json!(username));
+    eph.props.0.insert("type".into(), json!("reminder"));
+    app.send_ephemeral(&user_id, eph).await;
     Ok(ok())
 }
 
