@@ -222,7 +222,7 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
     if !q.role.is_empty() || !q.roles.is_empty() || !q.channel_roles.is_empty() || !q.team_roles.is_empty() {
         let all: Vec<(String,)> = sqlx::query_as("SELECT Name FROM Roles").fetch_all(&app.db).await?;
         let known = |names: &[String]| names.iter().all(|n| all.iter().any(|(a,)| a == n));
-        if !q.role.is_empty() && (clean_role_names(&q.role).is_none() || q.role.contains(',') || !known(&[q.role.clone()])) {
+        if !q.role.is_empty() && (clean_role_names(&q.role).is_none() || q.role.contains(',') || !known(std::slice::from_ref(&q.role))) {
             return Err(AppError::invalid_param("role"));
         }
         for (raw, name, scope, out) in [
