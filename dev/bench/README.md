@@ -27,7 +27,7 @@ All seven at once (about ten minutes):
 p=8100; for t in core files posts admin live chan reads; do SQLDIFF_SCENARIO=$t ./dev/bench/sqldiff.sh $t $p > run/$t.txt 2>&1 & p=$((p+2)); done; wait
 ```
 
-Differences that remain on purpose (2026-11-21):
+Differences that remain on purpose (2026-11-21, each confirmed by the project owner):
 - Go 12.1 without a license refuses to create or activate users beyond 250 (`user_limit.exceeded`, `limits/server`);
   Rust has no such cap (`core` user_activate, `admin` bot enable, `reads` limits).
 - After a team join, Go sends the default channels' `posted`/`user_added` 0 or 1 times depending on its connection's
@@ -37,5 +37,7 @@ Differences that remain on purpose (2026-11-21):
   (docs/CHANNELS.md). A PUT with no display name: Go posts a "display name changed" message for a name it keeps.
 - Files of a post: the released Go binary returns them in a changing order; Rust keeps the post's `file_ids` order,
   as the 12.1.0 source's `orderFileInfosByID` does.
+- `GiphySdkKey` in `config/client`: a release Go build answers Mattermost's own embedded GIPHY key; Rust answers the
+  configured `ServiceSettings.GiphySdkKey` (empty unless an admin sets one), never Mattermost's key.
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
   each run's timing; image bytes (encoders differ, sizes and formats match).
