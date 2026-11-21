@@ -47,6 +47,15 @@ pub fn is_system_emoji(name: &str) -> bool {
     NAMES.get_or_init(|| include_str!("../data/system_emojis.txt").lines().collect()).contains(name)
 }
 
+/// `GetSystemEmojiId`: the code point sequence a system emoji's image is named after.
+pub fn system_emoji_code(name: &str) -> Option<&'static str> {
+    static CODES: OnceLock<std::collections::HashMap<&'static str, &'static str>> = OnceLock::new();
+    CODES
+        .get_or_init(|| include_str!("../data/emoji_codes.txt").lines().filter_map(|l| l.split_once(' ')).collect())
+        .get(name)
+        .copied()
+}
+
 /// `IsValidEmojiName`.
 pub(crate) fn check_name(name: &str) -> ApiResult<()> {
     let ok = !name.is_empty()
@@ -86,6 +95,20 @@ impl App {
             self.cache_emoji(&e);
             e
         }))
+    }
+
+    /// `GetEmojiStaticURL`: a system emoji's image under `/static/emoji`, a custom one's under `/api/v4/emoji`,
+    /// below the site's subpath.
+    pub async fn emoji_static_url(&self, name: &str) -> Option<String> {
+        let sub = crate::web::subpath(self.cfg.str("ServiceSettings.SiteURL"));
+        let sub = sub.trim_end_matches('/');
+        if let Some(code) = system_emoji_code(name) {
+            return Some(format!("{sub}/static/emoji/{code}.png"));
+        }
+        match self.emoji_by_name(name).await {
+            Ok(Some(e)) => Some(format!("{sub}/api/v4/emoji/{}/image", e.id)),
+            _ => None,
+        }
     }
 
     /// `EmojiStore.GetByName` through the name cache.
@@ -476,4 +499,14 @@ async fn delete(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> Ap
         .await;
     }
     Ok(crate::users::ok())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn system_emoji_codes() {
+        assert_eq!(super::system_emoji_code("ghost"), Some("1f47b"));
+        assert_eq!(super::system_emoji_code("+1"), Some("1f44d"));
+        assert_eq!(super::system_emoji_code("no_such_emoji"), None);
+    }
 }

@@ -135,8 +135,24 @@ async fn with_terms(app: &App, u: &mut User) -> ApiResult<()> {
     Ok(())
 }
 
-/// `getUser` (and `/users/me`): one's own record in full, others' as the privacy settings allow.
-async fn one_user(app: &App, s: &Session, u: Arc<User>) -> ApiResult<Json<User>> {
+/// `User.Etag` under the privacy settings.
+fn user_etag(app: &App, u: &User) -> String {
+    format!(
+        "{}.{}.{}.{}.{}.{}.{}.{}",
+        crate::SERVER_VERSION,
+        u.id,
+        u.update_at,
+        u.terms_of_service_id,
+        u.terms_of_service_create_at,
+        app.cfg.bool("PrivacySettings.ShowFullName"),
+        app.cfg.bool("PrivacySettings.ShowEmailAddress"),
+        u.bot_last_icon_update
+    )
+}
+
+/// `getUser` (and `/users/me`): one's own record in full, others' as the privacy settings allow; 304 when the
+/// client has this version.
+async fn one_user(app: &App, s: &Session, u: Arc<User>, headers: &HeaderMap) -> ApiResult<Response> {
     if !app.can_see_user(s, &u.id).await? {
         return Err(AppError::forbidden_perm(crate::perm::VIEW_MEMBERS));
     }
@@ -145,36 +161,40 @@ async fn one_user(app: &App, s: &Session, u: Arc<User>) -> ApiResult<Json<User>>
     if show.admin || s.user_id == u.id {
         with_terms(app, &mut u).await?;
     }
+    let etag = user_etag(app, &u);
+    if let Some(r) = crate::teams::not_modified(headers, &etag) {
+        return Ok(r);
+    }
     if u.id == s.user_id {
         u.sanitize_own();
     } else {
         u.sanitize_profile(show);
     }
-    Ok(Json(u))
+    Ok(crate::teams::with_etag(Json(u), &etag))
 }
 
-async fn get_me(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<User>> {
+async fn get_me(St(app): St<State>, Auth(s): Auth, headers: HeaderMap) -> ApiResult<Response> {
     let u = app.user(&s.user_id).await?.ok_or_else(missing_account)?;
-    one_user(&app, &s, u).await
+    one_user(&app, &s, u, &headers).await
 }
 
-/// `getUser`: the session's activity recorded on success, as Go does (`UpdateLastActivityAtIfNeeded`), which the idle
-/// session timeout and the last-activity column of the system console read.
-async fn get_user(St(app): St<State>, Auth(s): Auth, id: Path<String>) -> ApiResult<Json<User>> {
-    let r = get_user_inner(St(app.clone()), Auth(s.clone()), id).await;
-    if r.is_ok() {
+/// `getUser`: the session's activity recorded when the user is sent (`UpdateLastActivityAtIfNeeded`),
+/// which the idle session timeout and the last-activity column of the system console read.
+async fn get_user(St(app): St<State>, Auth(s): Auth, id: Path<String>, headers: HeaderMap) -> ApiResult<Response> {
+    let r = get_user_inner(&app, &s, id, &headers).await;
+    if r.as_ref().is_ok_and(|r| r.status() == StatusCode::OK) {
         app.touch_session(&s).await;
     }
     r
 }
 
-async fn get_user_inner(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Json<User>> {
+async fn get_user_inner(app: &App, s: &Session, Path(id): Path<String>, headers: &HeaderMap) -> ApiResult<Response> {
     let id = s.resolve(&id);
     if !is_valid_id(&id) {
         return Err(AppError::invalid_url_param("user_id"));
     }
     let u = app.user(&id).await?.ok_or_else(missing_account)?;
-    one_user(&app, &s, u).await
+    one_user(app, s, u, headers).await
 }
 
 /// A missing user under view restrictions is a permission error (`getUserByUsername`, `getUserByEmail`).
@@ -186,7 +206,12 @@ async fn missing_or_restricted(app: &App, s: &Session, missing: AppError) -> App
     }
 }
 
-async fn get_by_username(St(app): St<State>, Auth(s): Auth, Path(name): Path<String>) -> ApiResult<Json<User>> {
+async fn get_by_username(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     if !crate::user_edit::valid_username(&name) {
         return Err(AppError::invalid_param("username"));
     }
@@ -197,10 +222,15 @@ async fn get_by_username(St(app): St<State>, Auth(s): Auth, Path(name): Path<Str
         );
         return Err(missing_or_restricted(&app, &s, missing).await);
     };
-    one_user(&app, &s, Arc::new(u)).await
+    one_user(&app, &s, Arc::new(u), &headers).await
 }
 
-async fn get_by_email(St(app): St<State>, Auth(s): Auth, Path(email): Path<String>) -> ApiResult<Json<User>> {
+async fn get_by_email(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(email): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     let email = email.to_lowercase();
     if !crate::user_edit::valid_email(&email) {
         return Err(AppError::invalid_url_param("email"));
@@ -215,9 +245,13 @@ async fn get_by_email(St(app): St<State>, Auth(s): Auth, Path(email): Path<Strin
     if !app.can_see_user(&s, &u.id).await? {
         return Err(AppError::forbidden_perm(crate::perm::VIEW_MEMBERS));
     }
+    let etag = user_etag(&app, &u);
+    if let Some(r) = crate::teams::not_modified(&headers, &etag) {
+        return Ok(r);
+    }
     let mut u = u;
     u.sanitize_profile(show);
-    Ok(Json(u))
+    Ok(crate::teams::with_etag(Json(u), &etag))
 }
 
 #[derive(Deserialize)]
@@ -485,9 +519,10 @@ async fn start_session(app: &State, headers: &HeaderMap, b: &LoginBody, user: Us
     }
     app.save_session(&mut s).await?;
     app.clear_imported_inactive(&user).await;
-    sqlx::query("UPDATE Users SET LastLogin = $1 WHERE Id = $2")
+    sqlx::query("UPDATE Users SET LastLogin = $1, UpdateAt = $3 WHERE Id = $2")
         .bind(s.create_at)
         .bind(&user.id)
+        .bind(now_ms())
         .execute(&app.db)
         .await?;
     app.invalidate_user(&user.id);

@@ -259,9 +259,21 @@ async fn handle(app: &State, id: &str, headers: &HeaderMap, req: axum::extract::
     let form_err = |id_: &str, e: String| {
         AppError::bad_request(id_, "").with_params(&[("hook_id", id), ("media_type", &media)]).detail(e)
     };
-    let body = axum::body::to_bytes(req.into_body(), 64 << 20)
-        .await
-        .map_err(|e| form_err("web.incoming_webhook.parse_form.app_error", e.to_string()))?;
+    // ServiceSettings.MaximumPayloadSizeBytes plus 512 bytes: a runaway payload is refused, not split into a
+    // flood of posts. A form too large is 413, a JSON body that cannot be read whole a decode error.
+    let max = usize::try_from(app.cfg.i64("ServiceSettings.MaximumPayloadSizeBytes")).unwrap_or(0).saturating_add(512);
+    let body = axum::body::to_bytes(req.into_body(), max).await.map_err(|e| {
+        if media == "application/x-www-form-urlencoded" || media == "multipart/form-data" {
+            AppError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "api.context.request_body_too_large.app_error",
+                "Unable to process request. Request body too large.",
+            )
+            .detail("Use the setting `MaximumPayloadSizeBytes` in the config to configure allowed payload limit.")
+        } else {
+            form_err("web.incoming_webhook.decode.app_error", e.to_string())
+        }
+    })?;
     let r = if media == "application/x-www-form-urlencoded" {
         let payload = form_value(&body, "payload").unwrap_or_default();
         decode_request(payload.as_bytes()).map_err(|e| AppError { status_code: 400, ..decode_err(e) })?

@@ -10,8 +10,8 @@ use std::sync::{Arc, LazyLock};
 
 use crate::app::Query;
 use axum::extract::{Path, State as St};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use regex::Regex;
@@ -885,6 +885,14 @@ impl App {
     /// priority and acknowledgements.
     pub async fn prepare_post(&self, original: &Post, o: Prep) -> Post {
         let mut post = original.clone();
+        // OverrideIconURLIfEmoji: an emoji icon shows as its image.
+        if let Some(Value::String(name)) = post.props.0.get("override_icon_emoji")
+            && !name.is_empty()
+            && self.cfg.bool("ServiceSettings.EnablePostIconOverride")
+            && let Some(url) = self.emoji_static_url(&name.replace(':', "")).await
+        {
+            post.props.0.insert("override_icon_url".into(), url.into());
+        }
         let mut md = PostMetadata::default();
         if post.delete_at > 0 && !o.retain_content {
             post.message.clear();
@@ -1189,55 +1197,153 @@ impl App {
     /// `publishWebsocketEventForPost`: the post without permalink embeds and without its channel mentions for
     /// everyone; the mentions go back in per recipient (`channelMentionsBroadcastHook`), as stored (with the
     /// channel id), those of the channels the recipient may resolve (`HasPermissionToResolveChannelMention`).
-    /// Mentions without a channel id, or whose channel is gone, are dropped.
+    /// Mentions without a channel id, or whose channel is gone, are dropped. The permalink preview goes back in
+    /// for the recipients who may read its channel (`permalinkBroadcastHook`), with its post's mentions filtered
+    /// the same way.
     pub async fn post_for_broadcast(&self, post: &Post) -> BroadcastPost {
         let mut p = post.clone();
-        if let Some(md) = p.metadata.as_mut() {
+        let preview = p.metadata.as_mut().and_then(|md| {
+            let pp = md.embeds.iter().find_map(|e| match &e.data {
+                Some(EmbedData::Permalink(pp)) if e.r#type == "permalink" => Some((**pp).clone()),
+                _ => None,
+            });
             md.embeds.retain(|e| e.r#type != "permalink");
+            pp
+        });
+        let prop = p.props.0.remove("previewed_post");
+        let mentions = match p.props.0.remove("channel_mentions") {
+            Some(Value::Object(m)) => self.mention_channels(m).await,
+            _ => vec![],
+        };
+        let mut permalink = None;
+        if let (Some(preview), Some(Value::String(prop))) = (preview, prop)
+            && is_valid_id(&prop)
+            && let Ok(Some(channel)) = self.channel(&preview.channel_id).await
+        {
+            let mentions = match preview.post.as_ref().and_then(|x| x.props.0.get("channel_mentions")) {
+                Some(Value::Object(m)) => self.mention_channels(m.clone()).await,
+                _ => vec![],
+            };
+            permalink = Some(Arc::new(Permalink { prop, preview, channel, mentions }));
         }
-        p.props.0.remove("previewed_post");
-        let mut mentions = vec![];
-        if let Some(Value::Object(m)) = p.props.0.remove("channel_mentions") {
-            for (name, v) in m {
-                let Some(id) = v.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()) else { continue };
-                let Ok(Some(c)) = self.channel(id).await else { continue };
-                mentions.push((name, v, c));
+        BroadcastPost { post: p, mentions: Arc::new(mentions), permalink }
+    }
+
+    /// Channel mentions with the channel each names; those without a channel id, or whose channel is gone, left out.
+    async fn mention_channels(&self, m: serde_json::Map<String, Value>) -> Mentions {
+        let mut out = vec![];
+        for (name, v) in m {
+            let Some(id) = v.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()) else { continue };
+            let Ok(Some(c)) = self.channel(id).await else { continue };
+            out.push((name, v, c));
+        }
+        out
+    }
+
+    /// The mentions `user_id` may resolve.
+    async fn resolvable(&self, user_id: &str, mentions: &Mentions) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        for (name, v, c) in mentions {
+            if self.user_resolve_mention(user_id, &c.id, &c.r#type, &c.team_id).await {
+                m.insert(name.clone(), v.clone());
             }
         }
-        BroadcastPost { post: p, mentions: Arc::new(mentions) }
+        m
     }
 }
 
-/// A post for its websocket events: `post` for every recipient, and with the channel mentions each recipient may
-/// resolve (`hook`).
+type Mentions = Vec<(String, Value, Arc<Channel>)>;
+
+/// A permalink preview taken out of a broadcast post: the `previewed_post` prop, the embed's preview, the channel
+/// it shows and its post's channel mentions.
+struct Permalink {
+    prop: String,
+    preview: PreviewPost,
+    channel: Arc<Channel>,
+    mentions: Mentions,
+}
+
+/// A post for its websocket events: `post` for every recipient, and with the channel mentions and the permalink
+/// preview each recipient may see (`hook`).
 pub struct BroadcastPost {
     pub post: Post,
-    mentions: Arc<Vec<(String, Value, Arc<Channel>)>>,
+    mentions: Arc<Mentions>,
+    permalink: Option<Arc<Permalink>>,
 }
 
 impl BroadcastPost {
-    /// `channelMentionsBroadcastHook`: the post's JSON for one recipient, when some mention is theirs to see.
+    /// `permalinkBroadcastHook` and `channelMentionsBroadcastHook`: the post's JSON for one recipient, when some
+    /// mention or the preview is theirs to see.
     pub fn hook(&self) -> Option<crate::hub::PostHook> {
-        if self.mentions.is_empty() {
+        if self.mentions.is_empty() && self.permalink.is_none() {
             return None;
         }
-        let (base, mentions) = (self.post.clone(), self.mentions.clone());
+        let (base, mentions, permalink) = (self.post.clone(), self.mentions.clone(), self.permalink.clone());
         Some(Arc::new(move |app: State, uid: String| {
-            let (mut p, mentions) = (base.clone(), mentions.clone());
+            let (mut p, mentions, permalink) = (base.clone(), mentions.clone(), permalink.clone());
             Box::pin(async move {
-                let mut m = serde_json::Map::new();
-                for (name, v, c) in mentions.iter() {
-                    if app.user_resolve_mention(&uid, &c.id, &c.r#type, &c.team_id).await {
-                        m.insert(name.clone(), v.clone());
+                let mut changed = false;
+                if let Some(pl) = permalink.as_deref()
+                    && app.user_read_channel(&uid, &pl.channel).await.0
+                {
+                    let mut preview = pl.preview.clone();
+                    if let Some(post) = preview.post.as_mut()
+                        && post.props.0.contains_key("channel_mentions")
+                    {
+                        let m = app.resolvable(&uid, &pl.mentions).await;
+                        if m.is_empty() {
+                            post.props.0.remove("channel_mentions");
+                        } else {
+                            post.props.0.insert("channel_mentions".into(), Value::Object(m));
+                        }
                     }
+                    p.props.0.insert("previewed_post".into(), pl.prop.clone().into());
+                    let embed = PostEmbed::new("permalink", "", Some(EmbedData::Permalink(Box::new(preview))));
+                    p.metadata.get_or_insert_with(Default::default).embeds.push(embed);
+                    changed = true;
                 }
-                if m.is_empty() {
+                let m = app.resolvable(&uid, &mentions).await;
+                if !m.is_empty() {
+                    p.props.0.insert("channel_mentions".into(), Value::Object(m));
+                    changed = true;
+                }
+                if !changed {
                     return None;
                 }
-                p.props.0.insert("channel_mentions".into(), Value::Object(m));
                 serde_json::to_string(&p).ok()
             })
         }))
+    }
+}
+
+/// `Post.Etag`.
+pub fn post_etag(p: &Post) -> String {
+    format!("{}.{}.{}", crate::SERVER_VERSION, p.id, p.update_at)
+}
+
+/// `PostList.Etag`: the first post in order and the post updated last (on a tie, the greatest id).
+pub fn list_etag(l: &PostList) -> String {
+    let (mut id, mut t) = ("0", 0i64);
+    for p in l.posts.values() {
+        if p.update_at > t || (p.update_at == t && p.id.as_str() > id) {
+            (id, t) = (&p.id, p.update_at);
+        }
+    }
+    let first = l.order.first().map_or("", String::as_str);
+    format!("{}.{first}.{id}.{t}", crate::SERVER_VERSION)
+}
+
+impl App {
+    /// `GetPostsEtag`: the channel's latest post update (now, when there is none) and its join/leave setting.
+    pub async fn posts_etag(&self, c: &Channel) -> String {
+        let t: Option<i64> =
+            sqlx::query_scalar("SELECT UpdateAt FROM Posts WHERE ChannelId = $1 ORDER BY UpdateAt DESC LIMIT 1")
+                .bind(&c.id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+        format!("{}.{}.{}", crate::SERVER_VERSION, t.unwrap_or_else(now_ms), c.disable_join_leave_messages)
     }
 }
 
@@ -1636,7 +1742,8 @@ impl App {
         if p.create_at == 0 {
             p.create_at = now_ms();
         }
-        let mut p = self.prepare_post(&p, Prep { is_new: true, ..Default::default() }).await;
+        let mut p =
+            self.prepare_post_full(&p, Prep { is_new: true, include_priority: true, ..Default::default() }).await;
         if (p.props.0.contains_key("attachments") || p.props.0.contains_key("mm_blocks_actions"))
             && let Ok(k) = self.integration_keys().await
         {
@@ -2180,7 +2287,14 @@ async fn create_post_h(
         ));
     }
     let flags = CreateFlags { set_online, trigger_webhooks: true, silent, ..Default::default() };
-    let rp = app.create_post_in(post, &c, flags, Some(&s)).await?;
+    let rp = app.create_post_in(post, &c, flags, Some(&s)).await.map_err(|mut e| {
+        // A bad root is the request's fault here.
+        if e.id == "api.post.create_post.root_id.app_error" || e.id == "api.post.create_post.channel_root_id.app_error"
+        {
+            e.status_code = 400;
+        }
+        e
+    })?;
     let from_bot_or_hook = rp.prop("from_webhook").is_some() || rp.prop("from_bot").is_some();
     let crt = app.crt_for_user(&s.user_id).await;
     if !from_bot_or_hook && !(crt && !rp.root_id.is_empty()) {
@@ -2226,8 +2340,9 @@ async fn posts_for_channel(
     St(app): St<State>,
     Auth(s): Auth,
     Path(channel_id): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<PostsQuery>,
-) -> ApiResult<Json<PostList>> {
+) -> ApiResult<Response> {
     if !is_valid_id(&channel_id) {
         return Err(AppError::invalid_url_param("channel_id"));
     }
@@ -2263,6 +2378,13 @@ async fn posts_for_channel(
         exclude_membership: excludes_membership(&c),
         ..Default::default()
     };
+    // Pages (not `since`) carry the channel's ETag; a client that has this version gets 304.
+    let etag = if since > 0 { None } else { Some(app.posts_etag(&c).await) };
+    if let Some(e) = &etag
+        && let Some(r) = crate::teams::not_modified(&headers, e)
+    {
+        return Ok(r);
+    }
     let list = if since > 0 {
         app.get_posts_since(&o, since).await?
     } else if !q.after.is_empty() {
@@ -2288,7 +2410,11 @@ async fn posts_for_channel(
         o.exclude_membership,
     )
     .await;
-    Ok(Json(app.sanitize_list_for_user(list, &s.user_id).await))
+    let body = Json(app.sanitize_list_for_user(list, &s.user_id).await);
+    Ok(match etag {
+        Some(e) => crate::teams::with_etag(body, &e),
+        None => body.into_response(),
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -2301,8 +2427,9 @@ async fn get_post(
     St(app): St<State>,
     Auth(s): Auth,
     Path(post_id): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<IncludeDeleted>,
-) -> ApiResult<Json<Post>> {
+) -> ApiResult<Response> {
     if !is_valid_id(&post_id) {
         return Err(AppError::invalid_url_param("post_id"));
     }
@@ -2311,8 +2438,12 @@ async fn get_post(
         return Err(AppError::forbidden_perm(perm::MANAGE_SYSTEM));
     }
     let (p, _) = app.post_if_authorized(&s, &post_id, include_deleted).await?;
+    let etag = post_etag(&p);
+    if let Some(r) = crate::teams::not_modified(&headers, &etag) {
+        return Ok(r);
+    }
     let p = app.prepare_post_full(&p, Prep { include_priority: true, ..Default::default() }).await;
-    Ok(Json(app.sanitize_for_user(p, &s.user_id).await))
+    Ok(crate::teams::with_etag(Json(app.sanitize_for_user(p, &s.user_id).await), &etag))
 }
 
 /// `model.SortedArrayFromJSON`: a JSON array of strings (`null` is empty), sorted without duplicates, or Go's
@@ -2391,8 +2522,9 @@ async fn get_post_thread(
     St(app): St<State>,
     Auth(s): Auth,
     Path(post_id): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<ThreadQuery>,
-) -> ApiResult<Json<PostList>> {
+) -> ApiResult<Response> {
     if !is_valid_id(&post_id) {
         return Err(AppError::invalid_url_param("post_id"));
     }
@@ -2442,8 +2574,12 @@ async fn get_post_thread(
         return Err(AppError::invalid_url_param("post_id"));
     }
     app.post_if_authorized(&s, &post_id, false).await?;
+    let etag = list_etag(&list);
+    if let Some(r) = crate::teams::not_modified(&headers, &etag) {
+        return Ok(r);
+    }
     let list = app.prepare_list(list).await;
-    Ok(Json(app.sanitize_list_for_user(list, &s.user_id).await))
+    Ok(crate::teams::with_etag(Json(app.sanitize_list_for_user(list, &s.user_id).await), &etag))
 }
 
 /// `postEditTimeLimitExpired`.
@@ -2579,7 +2715,12 @@ async fn unpin_post(St(app): St<State>, Auth(s): Auth, Path(post_id): Path<Strin
 }
 
 /// `getPinnedPosts`.
-async fn pinned_posts(St(app): St<State>, Auth(s): Auth, Path(channel_id): Path<String>) -> ApiResult<Json<PostList>> {
+async fn pinned_posts(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(channel_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     if !is_valid_id(&channel_id) {
         return Err(AppError::invalid_url_param("channel_id"));
     }
@@ -2598,8 +2739,12 @@ async fn pinned_posts(St(app): St<State>, Auth(s): Auth, Path(channel_id): Path<
         list.add_ordered(p);
     }
     app.filter_membership(&mut list).await?;
+    let etag = list_etag(&list);
+    if let Some(r) = crate::teams::not_modified(&headers, &etag) {
+        return Ok(r);
+    }
     let list = app.prepare_list(list).await;
-    Ok(Json(app.sanitize_list_for_user(list, &s.user_id).await))
+    Ok(crate::teams::with_etag(Json(app.sanitize_list_for_user(list, &s.user_id).await), &etag))
 }
 
 #[derive(Deserialize, Default)]
@@ -3103,8 +3248,9 @@ async fn posts_around_unread(
     St(app): St<State>,
     Auth(s): Auth,
     Path((user_id, channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Query(q): Query<AroundQuery>,
-) -> ApiResult<Json<PostList>> {
+) -> ApiResult<Response> {
     let user_id = s.resolve(&user_id);
     if !is_valid_id(&channel_id) {
         return Err(AppError::invalid_url_param("channel_id"));
@@ -3163,8 +3309,15 @@ async fn posts_around_unread(
         .fetch_optional(&app.db)
         .await?
     };
+    // The latest page, which nothing unread falls back to, carries the channel's ETag.
+    let mut etag = None;
     let mut list = match first {
         None => {
+            let e = app.posts_etag(&c).await;
+            if let Some(r) = crate::teams::not_modified(&headers, &e) {
+                return Ok(r);
+            }
+            etag = Some(e);
             let mut l = app.get_posts(&GetPostsOpts { per_page: before, ..o.clone() }).await?;
             l.next_post_id.clear();
             l
@@ -3208,7 +3361,11 @@ async fn posts_around_unread(
         list.prev_post_id = app.post_id_around(&channel_id, t, true, crt, o.exclude_membership).await;
     }
     let list = app.prepare_list(list).await;
-    Ok(Json(app.sanitize_list_for_user(list, &s.user_id).await))
+    let body = Json(app.sanitize_list_for_user(list, &s.user_id).await);
+    Ok(match etag {
+        Some(e) => crate::teams::with_etag(body, &e),
+        None => body.into_response(),
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -3290,5 +3447,24 @@ mod hashtag_tests {
         let out = parse_hashtags(&many.join(" "));
         assert_eq!(out.len(), 991);
         assert!(out.ends_with("#tag123"));
+    }
+}
+
+#[cfg(test)]
+mod etag_tests {
+    use super::{list_etag, post_etag};
+    use crate::model::{Post, PostList};
+
+    #[test]
+    fn etags() {
+        let v = crate::SERVER_VERSION;
+        let p = |id: &str, t: i64| Post { id: id.into(), update_at: t, ..Default::default() };
+        assert_eq!(post_etag(&p("a", 5)), format!("{v}.a.5"));
+        let mut l = PostList::default();
+        assert_eq!(list_etag(&l), format!("{v}..0.0"));
+        for x in [p("b", 7), p("c", 7), p("a", 3)] {
+            l.add_ordered(x);
+        }
+        assert_eq!(list_etag(&l), format!("{v}.b.c.7"));
     }
 }

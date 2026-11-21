@@ -56,6 +56,8 @@ pub struct Conn {
     /// While no socket serves it: its queue and the events last sent, for a reconnect.
     parked: Mutex<Option<Parked>>,
     presence: RwLock<Presence>,
+    /// Connected with `posted_ack=true` (the mobile app): `posted` events it should acknowledge say `should_ack`.
+    posted_ack: bool,
 }
 
 /// The channel and threads the client shows, once it said (`presence`).
@@ -107,6 +109,7 @@ impl Conn {
             inactive_at: AtomicI64::new(0),
             parked: Mutex::new(None),
             presence: RwLock::new(Presence::default()),
+            posted_ack: false,
         };
         c.set_session(session);
         c
@@ -281,6 +284,27 @@ pub struct Broadcast {
     /// when it is not the shared one.
     #[serde(skip)]
     pub post_hook: Option<PostHook>,
+    /// `postedAckBroadcastHook`: which recipients of a `posted` event should acknowledge it.
+    #[serde(skip)]
+    pub posted_ack: Option<Arc<PostedAck>>,
+}
+
+/// The poster, whether the channel is direct, and the users notified of every message in it.
+pub struct PostedAck {
+    pub poster: String,
+    pub direct: bool,
+    pub users: HashSet<String>,
+}
+
+impl PostedAck {
+    /// Whether the user of a connection with `posted_ack=true` should acknowledge: not their own post; mentioned
+    /// or following (`extra` has `mentions` or `followers`), in a direct channel, or one of `users`.
+    fn should_ack(&self, user_id: &str, extra: Option<&serde_json::Map<String, Value>>) -> bool {
+        user_id != self.poster
+            && (extra.is_some_and(|e| e.contains_key("mentions") || e.contains_key("followers"))
+                || self.direct
+                || self.users.contains(user_id))
+    }
 }
 
 /// Fields to add to an event's data for the user of a connection, if any.
@@ -381,6 +405,13 @@ impl Delivery {
         let mut extra = self.b.per_user.as_ref().and_then(|f| f(&c.user_id));
         if let Some(p) = post {
             extra.get_or_insert_with(serde_json::Map::new).insert("post".into(), Value::String(p));
+        }
+        if let Some(a) = &self.b.posted_ack
+            && c.posted_ack
+            && c.is_active()
+            && a.should_ack(&c.user_id, extra.as_ref())
+        {
+            extra.get_or_insert_with(serde_json::Map::new).insert("should_ack".into(), Value::Bool(true));
         }
         let Some(extra) = extra else { return base.clone() };
         let mut d =
@@ -624,8 +655,9 @@ pub async fn connect(St(app): St<State>, req: axum::extract::Request) -> Respons
             .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=').map(str::to_string))
     };
     let resume = query("connection_id").filter(|c| !c.is_empty()).map(|c| (c, query("sequence_number")));
+    let posted_ack = query("posted_ack").as_deref() == Some("true");
     match WebSocketUpgrade::from_request_parts(&mut parts, &app).await {
-        Ok(ws) => ws.max_message_size(8 * 1024).on_upgrade(move |socket| serve(app, socket, token, resume)),
+        Ok(ws) => ws.max_message_size(8 * 1024).on_upgrade(move |socket| serve(app, socket, token, resume, posted_ack)),
         Err(_) => upgrade_error(axum::http::StatusCode::BAD_REQUEST, origin.as_deref().unwrap_or("")),
     }
 }
@@ -770,7 +802,13 @@ async fn challenge(stream: &mut futures_util::stream::SplitStream<WebSocket>) ->
     }
 }
 
-async fn serve(app: State, socket: WebSocket, token: Option<String>, resume: Option<(String, Option<String>)>) {
+async fn serve(
+    app: State,
+    socket: WebSocket,
+    token: Option<String>,
+    resume: Option<(String, Option<String>)>,
+    posted_ack: bool,
+) {
     let (mut sink, mut stream) = socket.split();
     let (token, challenge_seq) = match token {
         Some(t) => (Some(t), 0),
@@ -817,7 +855,9 @@ async fn serve(app: State, socket: WebSocket, token: Option<String>, resume: Opt
             new_hello = Some(hello(&user_id, &connection_id));
         }
     }
-    let conn = Arc::new(Conn::new(app.hub.next.fetch_add(1, Ordering::Relaxed), session.clone(), tx, connection_id));
+    let mut conn = Conn::new(app.hub.next.fetch_add(1, Ordering::Relaxed), session.clone(), tx, connection_id);
+    conn.posted_ack = posted_ack;
+    let conn = Arc::new(conn);
     app.hub.add(conn.clone());
 
     let closing = conn.closing.clone();
@@ -1176,5 +1216,19 @@ mod tests {
         assert!(p.away_from("c"));
         p.thread_view_channel = Some("c".into());
         assert!(!p.away_from("c"));
+    }
+
+    #[test]
+    fn should_ack_mentions_followers_direct_and_notified() {
+        let a = PostedAck { poster: "p".into(), direct: false, users: HashSet::from(["u".to_string()]) };
+        assert!(!a.should_ack("p", None));
+        assert!(a.should_ack("u", None));
+        assert!(!a.should_ack("x", None));
+        let mut extra = serde_json::Map::new();
+        extra.insert("followers".into(), Value::String("[\"x\"]".into()));
+        assert!(a.should_ack("x", Some(&extra)));
+        let d = PostedAck { direct: true, ..a };
+        assert!(d.should_ack("x", None));
+        assert!(!d.should_ack("p", None));
     }
 }

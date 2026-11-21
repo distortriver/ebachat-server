@@ -1483,7 +1483,7 @@ async fn usernames_to_ids(app: &App, names: &[String]) -> Vec<String> {
 }
 
 /// The server's `default_text_search_config`, as Go reads it once.
-async fn text_search_config(app: &App) -> String {
+pub(crate) async fn text_search_config(app: &App) -> String {
     static C: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     C.get_or_init(|| async {
         let c: String = sqlx::query_scalar("SHOW default_text_search_config")
