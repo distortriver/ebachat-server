@@ -1544,7 +1544,9 @@ async fn list_exports(St(app): St<State>, Auth(s): Auth) -> ApiResult<Json<Vec<S
 
 /// `{export_name:.+\\.zip}` and `{import_name:.+\\.zip}`: anything else is the router's 404.
 fn zip_name(path: &str, name: &str) -> ApiResult<()> {
-    if name.len() < 5 || !name.ends_with(".zip") {
+    // A name is one file of the import/export directory: a decoded `/` or `..` (`..%2Fx.zip`) would reach any zip
+    // of the file store. Go's route variable never holds a `/`, so such a path is its 404 too.
+    if name.len() < 5 || !name.ends_with(".zip") || name.contains(['/', '\\']) || name.contains("..") {
         return Err(crate::api::route_not_found(path));
     }
     Ok(())

@@ -263,3 +263,10 @@ on the shared database, with its job schedulers.
 - **Now:** the same deadline: no pong for 100 s ends the connection, which then goes offline as a closed one does.
   A pong also runs `SetStatusAwayIfNeeded` (non-manual), as Go's pong handler: an idle user goes `away` after
   `UserStatusAwayTimeout`. Seen with `tools/diff/scen_live.py` (`ws_no_pong`).
+
+## Import and export file names (2026-11-21)
+
+`GET/DELETE /api/v4/exports/{name}` and `DELETE /api/v4/imports/{name}` joined the URL-decoded name to the export or
+import directory. `files::clean` keeps the result inside the file store, but `..%2F..%2Fsomething.zip` left the
+directory, so a system admin could download or delete any `.zip` in the store (attachments included). Go's route
+variable never holds a `/`. Fixed: a name with `/`, `\` or `..` answers the router's 404.
