@@ -133,7 +133,9 @@ impl App {
     }
 
     /// `App.GetFileInfosForPost`: the post's `file_ids` through the by-id cache, in the post's order, with mini
-    /// previews made for images that have none. The posts code builds `metadata.files` with it.
+    /// previews made for images that have none. The posts code builds `metadata.files` with it. The released 12.1.0
+    /// binary skips `orderFileInfosByID`: its order is `GetByIds`' newest first with cache hits interleaved, so the
+    /// attachments come back in an order that changes from one read to the next; the post's own order is kept here.
     pub async fn file_infos_for_ids(&self, ids: &[String], include_deleted: bool) -> ApiResult<Vec<FileInfo>> {
         let infos = self.file_infos_by_ids(ids, include_deleted).await?;
         let mut by_id: HashMap<String, FileInfo> = infos.into_iter().map(|f| (f.id.clone(), f)).collect();
