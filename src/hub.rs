@@ -55,6 +55,22 @@ pub struct Conn {
     inactive_at: AtomicI64,
     /// While no socket serves it: its queue and the events last sent, for a reconnect.
     parked: Mutex<Option<Parked>>,
+    presence: RwLock<Presence>,
+}
+
+/// The channel and threads the client shows, once it said (`presence`).
+#[derive(Default)]
+struct Presence {
+    channel: Option<String>,
+    rhs_thread_channel: Option<String>,
+    thread_view_channel: Option<String>,
+}
+
+impl Presence {
+    fn away_from(&self, channel_id: &str) -> bool {
+        let other = |v: &Option<String>| v.as_deref().is_some_and(|v| v != channel_id);
+        other(&self.channel) && other(&self.rhs_thread_channel) && other(&self.thread_view_channel)
+    }
 }
 
 /// `sendQueueSize`: events a connection may have waiting. A client that lets it fill is closed, as Go's hub does
@@ -90,6 +106,7 @@ impl Conn {
             active: AtomicBool::new(true),
             inactive_at: AtomicI64::new(0),
             parked: Mutex::new(None),
+            presence: RwLock::new(Presence::default()),
         };
         c.set_session(session);
         c
@@ -97,6 +114,20 @@ impl Conn {
 
     fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
+    }
+
+    fn set_presence(&self, data: &Value) {
+        let mut p = self.presence.write().unwrap();
+        if let Some(c) = data["channel_id"].as_str() {
+            p.channel = Some(c.to_string());
+        }
+        if let Some(t) = data["thread_channel_id"].as_str() {
+            if data["is_thread_view"].as_bool() == Some(true) {
+                p.thread_view_channel = Some(t.to_string());
+            } else {
+                p.rhs_thread_channel = Some(t.to_string());
+            }
+        }
     }
 
     /// `SetSession` and `SetSessionExpiresAt`, with what the filters read from the session.
@@ -287,6 +318,13 @@ impl Delivery {
     /// The checks on the connection's session that need no I/O: sensitive data, the team.
     fn session_allows(&self, c: &Conn) -> bool {
         if self.b.admin_only && self.b.required_permissions.is_empty() && !c.admin.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !self.routed
+            && !self.b.channel_id.is_empty()
+            && matches!(self.event.as_str(), "typing" | "reaction_added" | "reaction_removed")
+            && c.presence.read().unwrap().away_from(&self.b.channel_id)
+        {
             return false;
         }
         if !self.routed && self.b.channel_id.is_empty() && !self.b.team_id.is_empty() {
@@ -820,8 +858,7 @@ async fn serve(app: State, socket: WebSocket, token: Option<String>, resume: Opt
         conn.send(Out::Event(hello(&user_id, &conn.connection_id)));
     }
     if challenge_seq > 0 {
-        let ok = WsReply { status: "OK", seq_reply: challenge_seq, data: None, error: None };
-        conn.send(Out::Reply(serde_json::to_string(&ok).unwrap_or_default()));
+        reply_ok(&conn, challenge_seq, None);
     }
     // `NewWebConn`: `UpdateLastActivityAtIfNeeded` once, with the session just loaded.
     app.touch_session(&session).await;
@@ -857,6 +894,9 @@ async fn serve(app: State, socket: WebSocket, token: Option<String>, resume: Opt
                     reply_error(&conn, req.seq, WsError::NoAction);
                 } else if req.seq <= 0 {
                     reply_error(&conn, req.seq, WsError::BadSeq);
+                } else if req.action == "presence" {
+                    conn.set_presence(&req.data);
+                    reply_ok(&conn, req.seq, None);
                 } else if req.action != "authentication_challenge" {
                     // `ServeWebSocket`: every request gets the session as it is now (cache or database), never the
                     // one of the connect: a revoked session fails, a changed one carries its new roles.
@@ -1004,16 +1044,19 @@ async fn action(app: &State, s: &Arc<Session>, conn: &Conn, req: &WsRequest) {
         "ping" => Ok(Some(
             json!({"text": "pong", "version": crate::SERVER_VERSION_FULL, "server_time": now_ms(), "node_id": ""}),
         )),
+        "posted_notify_ack" => Ok(None),
         // `WebSocketRouter.ServeWebSocket`: no handler for the action.
         _ => Err(WsError::BadAction),
     };
     match reply {
-        Ok(data) => {
-            let msg = WsReply { status: "OK", seq_reply: req.seq, data, error: None };
-            conn.send(Out::Reply(serde_json::to_string(&msg).unwrap_or_default()));
-        }
+        Ok(data) => reply_ok(conn, req.seq, data),
         Err(e) => reply_error(conn, req.seq, e),
     }
+}
+
+fn reply_ok(conn: &Conn, seq_reply: i64, data: Option<Value>) {
+    let msg = WsReply { status: "OK", seq_reply, data, error: None };
+    conn.send(Out::Reply(serde_json::to_string(&msg).unwrap_or_default()));
 }
 
 /// `PublishUserTyping`.
@@ -1106,5 +1149,18 @@ mod tests {
         assert!(hub.take_parked("other", &c.connection_id).is_none());
         assert!(hub.take_parked("u", &c.connection_id).is_some());
         assert!(hub.take_parked("u", &c.connection_id).is_none());
+    }
+
+    #[test]
+    fn presence_filters_only_when_every_view_is_elsewhere() {
+        let mut p = Presence::default();
+        assert!(!p.away_from("c"));
+        p.channel = Some("d".into());
+        assert!(!p.away_from("c"));
+        p.rhs_thread_channel = Some("d".into());
+        p.thread_view_channel = Some(String::new());
+        assert!(p.away_from("c"));
+        p.thread_view_channel = Some("c".into());
+        assert!(!p.away_from("c"));
     }
 }
