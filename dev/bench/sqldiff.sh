@@ -9,7 +9,10 @@ tag=${1:-main} port=${2:-8065}
 docker exec bench-db psql -qAt -U mmuser -d mattermost -c "SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'" | grep -q 1 \
   || { PGSS=1 "$BENCH/db.sh" restart; }
 pg() { docker exec bench-db psql -qAt -U mmuser -d postgres -c "$1"; }
-# The snapshot is the bench data as they stand (mattermost), taken once per tag.
+# The snapshot is the bench data as they stand (mattermost), taken once per tag. CREATE DATABASE ... TEMPLATE fails
+# while anyone else reads the template, so parallel runs take their copies one at a time.
+exec 9>"$RUN/sqldiff.lock"
+flock 9
 pg "DROP DATABASE IF EXISTS sqldiff_${tag}_snap"
 pg "CREATE DATABASE sqldiff_${tag}_snap TEMPLATE mattermost" 2>/dev/null || {
   # mattermost busy (a server on it): copy through a dump instead
@@ -21,6 +24,7 @@ for impl in go rust; do
   db=sqldiff_${tag}_$impl
   pg "DROP DATABASE IF EXISTS $db WITH (FORCE)"
   pg "CREATE DATABASE $db TEMPLATE sqldiff_${tag}_snap"
+  [ "$impl" = rust ] && flock -u 9
   # each server on its own cores out of the server half
   PORT=$((port + i)) DB=$db NAME=sqldiff-$tag-$impl CPUS=$((i * 2))-$((i * 2 + 1)) "$BENCH/server.sh" "$impl" 2 &
   i=$((i + 1))
