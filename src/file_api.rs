@@ -380,6 +380,22 @@ impl Upload {
     }
 }
 
+/// The name cut to `max` bytes, its extension kept.
+fn fit_name(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let ext = name.rfind('.').map(|i| &name[i..]).filter(|e| e.len() <= 64).unwrap_or("");
+    let mut end = max - ext.len();
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ext}", &name[..end])
+}
+
+/// Room on disk for `_preview.jpg` and the store's `#N` staging suffix within one 255-byte path component.
+const DISK_NAME_MAX: usize = 230;
+
 /// `UploadFileX`: streamed to the store (images kept in memory to process), then the info saved.
 pub(crate) async fn upload_file_x<S, E>(app: &App, t: Upload, mut input: S) -> ApiResult<FileInfo>
 where
@@ -393,18 +409,20 @@ where
     if t.content_length > max {
         return Err(too_large(&t.name, t.content_length, max));
     }
-    let ext = t.name.rfind('.').map(|i| &t.name[i..]).unwrap_or("");
+    let name = fit_name(&t.name, 255);
+    let disk_name = fit_name(&t.name, DISK_NAME_MAX);
+    let ext = name.rfind('.').map(|i| &name[i..]).unwrap_or("");
     let mut f = FileInfo {
         id: new_id(),
         creator_id: t.user_id.clone(),
         channel_id: t.channel_id.clone(),
         create_at: t.timestamp,
-        name: t.name.clone(),
+        name: name.clone(),
         extension: ext.trim_start_matches('.').to_lowercase(),
         mime_type: mime_type(ext),
         ..Default::default()
     };
-    f.path = format!("{}{}", t.prefix(&f.id), t.name);
+    f.path = format!("{}{}", t.prefix(&f.id), disk_name);
     let limit = if t.content_length > 0 { t.content_length } else { max };
     let is_image = f.mime_type.starts_with("image");
 
@@ -443,7 +461,7 @@ where
     f.size = written;
 
     let prefix = t.prefix(&f.id);
-    if is_image && let Err(e) = process_image(app, &mut f, &t.name, &prefix, kept).await {
+    if is_image && let Err(e) = process_image(app, &mut f, &disk_name, &prefix, kept).await {
         let _ = app.files.remove(&f.path).await;
         return Err(e);
     }
@@ -1490,6 +1508,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_names_fit() {
+        assert_eq!(fit_name("a.txt", 255), "a.txt");
+        let long = format!("{}.txt", "ж".repeat(200));
+        let f = fit_name(&long, DISK_NAME_MAX);
+        assert!(f.len() <= DISK_NAME_MAX && f.ends_with(".txt") && f.starts_with("жж"));
+        assert_eq!(fit_name(&"x".repeat(300), 255).len(), 255);
+    }
 
     #[test]
     fn ranges() {
