@@ -277,7 +277,8 @@ impl App {
         };
         let parsed: Value = serde_json::from_str(&v).unwrap_or_default();
         let key = parsed["key"].as_str().and_then(|k| B64.decode(k).ok()).filter(|k| k.len() == 32);
-        let key = key.ok_or_else(|| AppError::internal("app.post_action_cookie_secret", "bad PostActionCookieSecret"))?;
+        let key =
+            key.ok_or_else(|| AppError::internal("app.post_action_cookie_secret", "bad PostActionCookieSecret"))?;
         Ok(key.try_into().unwrap())
     }
 
@@ -303,7 +304,8 @@ impl App {
                 self.system_insert("AsymmetricSigningKey", &v).await?
             }
         };
-        let d = big_int_field(&v, "d").ok_or_else(|| AppError::internal("app.signing_key", "bad AsymmetricSigningKey"))?;
+        let d =
+            big_int_field(&v, "d").ok_or_else(|| AppError::internal("app.signing_key", "bad AsymmetricSigningKey"))?;
         p256::ecdsa::SigningKey::from_slice(&d).map_err(|e| AppError::internal("app.signing_key", e.to_string()))
     }
 }
@@ -367,7 +369,9 @@ pub fn decrypt_cookie(encoded: &str, key: &[u8; 32]) -> Result<String, String> {
         return Err("cookie too short".into());
     }
     let c = Aes256Gcm::new(key.into());
-    let plain = c.decrypt(&Nonce::try_from(&raw[..12]).map_err(|_| "bad nonce".to_string())?, &raw[12..]).map_err(|e| e.to_string())?;
+    let plain = c
+        .decrypt(&Nonce::try_from(&raw[..12]).map_err(|_| "bad nonce".to_string())?, &raw[12..])
+        .map_err(|e| e.to_string())?;
     String::from_utf8(plain).map_err(|e| e.to_string())
 }
 
@@ -720,7 +724,15 @@ async fn do_post_action(
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
     let (trigger_id, goto) = app
-        .do_post_action(&s, &post_id, &action_id, &b.selected_option, cookie, b.query.unwrap_or_default(), &b.integration_format)
+        .do_post_action(
+            &s,
+            &post_id,
+            &action_id,
+            &b.selected_option,
+            cookie,
+            b.query.unwrap_or_default(),
+            &b.integration_format,
+        )
         .await?;
     Ok(Json(ActionApiResponse { status: "OK", trigger_id, goto_location: goto }))
 }
@@ -751,7 +763,10 @@ impl App {
         if query.len() > 50 || query.iter().any(|(k, v)| k.len() > 128 || v.len() > 2048) {
             return Err(AppError::bad_request("api.post.do_action.query.app_error", ""));
         }
-        let mut setup = Setup { req: ActionRequest { user_id: s.user_id.clone(), post_id: post_id.into(), ..Default::default() }, ..Default::default() };
+        let mut setup = Setup {
+            req: ActionRequest { user_id: s.user_id.clone(), post_id: post_id.into(), ..Default::default() },
+            ..Default::default()
+        };
         let post = self.get_single_post(post_id, false).await?;
         match post {
             None => {
@@ -799,7 +814,11 @@ impl App {
                 setup.req.team_id = channel.team_id.clone();
                 match format.trim().to_lowercase().as_str() {
                     "mm_block" | "block" | "card" => {
-                        match resolve_block(block_spec(p.props.0.get("mm_blocks_actions"), action_id), action_id, &query)? {
+                        match resolve_block(
+                            block_spec(p.props.0.get("mm_blocks_actions"), action_id),
+                            action_id,
+                            &query,
+                        )? {
                             Resolved::Goto(u) => return Ok((String::new(), u)),
                             Resolved::External(u, ctx) => {
                                 preserve(&p, &mut setup);
@@ -888,12 +907,15 @@ impl App {
         let to_plugins = site.as_ref().and_then(|s| s.host_str()) == u.host_str()
             && u.host_str().is_some()
             && u.path().starts_with("/plugins");
-        let timeout = Duration::from_secs(self.cfg.i64("ServiceSettings.OutgoingIntegrationRequestsTimeout").max(1) as u64);
+        let timeout =
+            Duration::from_secs(self.cfg.i64("ServiceSettings.OutgoingIntegrationRequestsTimeout").max(1) as u64);
         let mut req = if to_plugins {
             self.trusted_client().post(u.clone()).bearer_auth(&s.token)
         } else {
             if !self.untrusted_url_allowed(&u) {
-                return Err(action_error("address forbidden, you may need to set AllowedUntrustedInternalConnections to allow an integration access to your internal network"));
+                return Err(action_error(
+                    "address forbidden, you may need to set AllowedUntrustedInternalConnections to allow an integration access to your internal network",
+                ));
             }
             self.integration_client().post(u.clone())
         };
@@ -1062,7 +1084,8 @@ fn dialog_json(d: &OpenDialogRequest) -> String {
         #[serde(skip_serializing_if = "str::is_empty")]
         channel_id: &'a str,
     }
-    serde_json::to_string(&R { trigger_id: &d.trigger_id, url: &d.url, dialog: &d.dialog, channel_id: &d.channel_id }).unwrap()
+    serde_json::to_string(&R { trigger_id: &d.trigger_id, url: &d.url, dialog: &d.dialog, channel_id: &d.channel_id })
+        .unwrap()
 }
 
 /// `SubmitDialogRequest`, in Go's order.
@@ -1117,7 +1140,9 @@ impl App {
         let mut seen = std::collections::HashSet::new();
         r.file_ids.retain(|f| seen.insert(f.clone()));
         if r.file_ids.len() > 10 {
-            return Err(AppError::bad_request("app.submit_interactive_dialog.too_many_file_ids", "").with_param("Max", "10"));
+            return Err(
+                AppError::bad_request("app.submit_interactive_dialog.too_many_file_ids", "").with_param("Max", "10")
+            );
         }
         if !r.file_ids.is_empty() {
             let found: Vec<(String, String)> =
@@ -1125,16 +1150,23 @@ impl App {
                     .bind(&r.file_ids)
                     .fetch_all(&self.db)
                     .await
-                    .map_err(|e| AppError::internal("app.submit_interactive_dialog.get_file_info_error", e.to_string()))?;
+                    .map_err(|e| {
+                        AppError::internal("app.submit_interactive_dialog.get_file_info_error", e.to_string())
+                    })?;
             for (id, creator) in &found {
                 if creator != &r.user_id {
-                    return Err(AppError::new(StatusCode::FORBIDDEN, "app.submit_interactive_dialog.file_not_owned", "")
-                        .with_param("FileId", id));
+                    return Err(AppError::new(
+                        StatusCode::FORBIDDEN,
+                        "app.submit_interactive_dialog.file_not_owned",
+                        "",
+                    )
+                    .with_param("FileId", id));
                 }
             }
             for id in &r.file_ids {
                 if !found.iter().any(|(f, _)| f == id) {
-                    return Err(AppError::bad_request("app.submit_interactive_dialog.invalid_file_id", "").with_param("FileId", id));
+                    return Err(AppError::bad_request("app.submit_interactive_dialog.invalid_file_id", "")
+                        .with_param("FileId", id));
                 }
             }
         }
@@ -1142,14 +1174,24 @@ impl App {
         let mut candidates: Vec<String> = vec![];
         let declared: std::collections::HashSet<&String> = r.file_ids.iter().collect();
         let mut over = false;
-        fn collect(v: &Value, depth: usize, declared: &std::collections::HashSet<&String>, out: &mut Vec<String>, over: &mut bool) {
+        fn collect(
+            v: &Value,
+            depth: usize,
+            declared: &std::collections::HashSet<&String>,
+            out: &mut Vec<String>,
+            over: &mut bool,
+        ) {
             if depth > 100 || *over {
                 return;
             }
             match v {
                 Value::String(s) => {
                     for tok in s.split(',').map(str::trim) {
-                        if tok.is_empty() || declared.contains(&tok.to_string()) || out.iter().any(|x| x == tok) || !is_valid_id(tok) {
+                        if tok.is_empty()
+                            || declared.contains(&tok.to_string())
+                            || out.iter().any(|x| x == tok)
+                            || !is_valid_id(tok)
+                        {
                             continue;
                         }
                         if out.len() >= 256 {
@@ -1170,7 +1212,8 @@ impl App {
             }
         }
         if over {
-            return Err(AppError::bad_request("app.submit_interactive_dialog.too_many_submission_ids", "").with_param("Max", "256"));
+            return Err(AppError::bad_request("app.submit_interactive_dialog.too_many_submission_ids", "")
+                .with_param("Max", "256"));
         }
         if !candidates.is_empty()
             && let Ok(found) = sqlx::query_as::<_, (String, String)>(
@@ -1182,12 +1225,17 @@ impl App {
         {
             for (id, creator) in &found {
                 if creator != &r.user_id {
-                    return Err(AppError::new(StatusCode::FORBIDDEN, "app.submit_interactive_dialog.file_not_owned", "")
-                        .with_param("FileId", id));
+                    return Err(AppError::new(
+                        StatusCode::FORBIDDEN,
+                        "app.submit_interactive_dialog.file_not_owned",
+                        "",
+                    )
+                    .with_param("FileId", id));
                 }
             }
             if declared.len() + found.len() > 10 {
-                return Err(AppError::bad_request("app.submit_interactive_dialog.too_many_file_ids", "").with_param("Max", "10"));
+                return Err(AppError::bad_request("app.submit_interactive_dialog.too_many_file_ids", "")
+                    .with_param("Max", "10"));
             }
         }
         if r.kind != "refresh" {

@@ -8,10 +8,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, OnceLock};
 
+use crate::app::Query;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State as St};
-use crate::app::Query;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -103,7 +103,8 @@ impl App {
                 sql += " AND DeleteAt = 0";
             }
             sql += " ORDER BY CreateAt DESC";
-            let found: Vec<FileInfo> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&fetch).fetch_all(&self.db).await?;
+            let found: Vec<FileInfo> =
+                sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&fetch).fetch_all(&self.db).await?;
             for mut f in found {
                 f.archived = false;
                 self.caches.file_infos.put(format!("{}_{include_deleted}", f.id), Arc::new(vec![f.clone()]));
@@ -295,8 +296,11 @@ impl App {
 // ---------- uploads ----------
 
 fn read_request(detail: impl Into<String>) -> AppError {
-    AppError::bad_request("api.file.upload_file.read_request.app_error", "Unable to upload file(s). Error reading or parsing request data.")
-        .detail(detail)
+    AppError::bad_request(
+        "api.file.upload_file.read_request.app_error",
+        "Unable to upload file(s). Error reading or parsing request data.",
+    )
+    .detail(detail)
 }
 
 fn too_large(name: &str, len: i64, limit: i64) -> AppError {
@@ -404,7 +408,11 @@ where
 {
     let max = app.cfg.i64("FileSettings.MaxFileSize");
     if app.cfg.str("FileSettings.DriverName").is_empty() {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "api.file.upload_file.storage.app_error", "Unable to upload file. Image storage is not configured."));
+        return Err(AppError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "api.file.upload_file.storage.app_error",
+            "Unable to upload file. Image storage is not configured.",
+        ));
     }
     if t.content_length > max {
         return Err(too_large(&t.name, t.content_length, max));
@@ -426,7 +434,11 @@ where
     let limit = if t.content_length > 0 { t.content_length } else { max };
     let is_image = f.mime_type.starts_with("image");
 
-    let mut w = app.files.writer(&f.path).await.map_err(|e| AppError::internal("api.file.upload_file.storage.app_error", e.to_string()))?;
+    let mut w = app
+        .files
+        .writer(&f.path)
+        .await
+        .map_err(|e| AppError::internal("api.file.upload_file.storage.app_error", e.to_string()))?;
     let mut written: i64 = 0;
     let mut kept: Vec<u8> = vec![];
     while let Some(chunk) = input.next().await {
@@ -473,7 +485,8 @@ where
         && t.extract.unwrap_or(true)
         && let Some(a) = app.hub.app()
     {
-        let (id, name, path, mime, post) = (f.id.clone(), f.name.clone(), f.path.clone(), f.mime_type.clone(), f.post_id.clone());
+        let (id, name, path, mime, post) =
+            (f.id.clone(), f.name.clone(), f.path.clone(), f.mime_type.clone(), f.post_id.clone());
         tokio::spawn(async move {
             let _ = a.extract_content_from_file_info(&id, &name, &path, &mime, &post).await;
         });
@@ -516,7 +529,13 @@ pub(crate) async fn save_file_info(app: &App, f: &FileInfo) -> ApiResult<()> {
 
 /// `preprocessImage` + `postprocessImage`: size, resolution limit, orientation, and the thumbnail, preview and
 /// mini preview.
-pub(crate) async fn process_image(app: &App, f: &mut FileInfo, name: &str, prefix: &str, data: Vec<u8>) -> ApiResult<()> {
+pub(crate) async fn process_image(
+    app: &App,
+    f: &mut FileInfo,
+    name: &str,
+    prefix: &str,
+    data: Vec<u8>,
+) -> ApiResult<()> {
     if f.mime_type == "image/svg+xml" {
         if let Some((w, h)) = images::svg_size(&data) {
             (f.width, f.height) = (w as i32, h as i32);
@@ -582,7 +601,11 @@ async fn upload(
     body: Body,
 ) -> ApiResult<Response> {
     if !app.cfg.bool("FileSettings.EnableFileAttachments") {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.attachments.disabled.app_error", "File attachments have been disabled on this server."));
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "api.file.attachments.disabled.app_error",
+            "File attachments have been disabled on this server.",
+        ));
     }
     // Go's `r.ContentLength`: -1 for a chunked body, 0 for none.
     let chunked = headers.get(header::TRANSFER_ENCODING).is_some();
@@ -670,7 +693,10 @@ async fn check_upload_channel(app: &App, s: &Session, channel_id: &str, restrict
         AppError::bad_request("api.file.upload_file.get_channel.app_error", "Cannot upload file to restricted DM")
     })?;
     if restricted_check && app.restricted_dm(&c).await? {
-        return Err(AppError::bad_request("api.file.upload_file.restricted_dm.error", "Cannot upload file to restricted DM"));
+        return Err(AppError::bad_request(
+            "api.file.upload_file.restricted_dm.error",
+            "Cannot upload file to restricted DM",
+        ));
     }
     Ok(())
 }
@@ -693,7 +719,15 @@ async fn upload_simple(
     check_upload_channel(app, s, &channel_id, true).await?;
     let client_id = q.get("client_id").cloned().unwrap_or_default();
     let user_id = if bookmark(q) { BOOKMARK_OWNER.to_string() } else { s.user_id.clone() };
-    let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id, timestamp: now_ms(), content_length, team_id: NO_TEAM.into(), extract: None };
+    let t = Upload {
+        name: base(&filename),
+        channel_id: base(&channel_id),
+        user_id,
+        timestamp: now_ms(),
+        content_length,
+        team_id: NO_TEAM.into(),
+        extract: None,
+    };
     let info = upload_file_x(app, t, body.into_data_stream()).await?;
     Ok(UploadResponse { file_infos: vec![info], client_ids: (!client_id.is_empty()).then(|| vec![client_id]) })
 }
@@ -736,7 +770,10 @@ async fn upload_multipart(
             match formname.as_str() {
                 "channel_id" => {
                     if !channel_id.is_empty() && channel_id != v {
-                        return Err(AppError::bad_request("api.file.upload_file.multiple_channel_ids.app_error", "Unable to upload file(s). Multiple conflicting channel_ids."));
+                        return Err(AppError::bad_request(
+                            "api.file.upload_file.multiple_channel_ids.app_error",
+                            "Unable to upload file(s). Multiple conflicting channel_ids.",
+                        ));
                     }
                     if !v.is_empty() {
                         channel_id = v;
@@ -757,7 +794,10 @@ async fn upload_multipart(
         if channel_id.is_empty() || legacy.is_some() {
             let data = field.bytes().await.map_err(|e| read_request(e.to_string()))?;
             if data.len() as i64 > max {
-                return Err(AppError::internal("api.file.upload_file.read_request.app_error", "multipart: message too large"));
+                return Err(AppError::internal(
+                    "api.file.upload_file.read_request.app_error",
+                    "multipart: message too large",
+                ));
             }
             if formname == "files" {
                 legacy.get_or_insert_with(Vec::new).push((filename, data));
@@ -781,7 +821,15 @@ async fn upload_multipart(
         } else {
             String::new()
         };
-        let t = Upload { name: base(&filename), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1, team_id: NO_TEAM.into(), extract: None };
+        let t = Upload {
+            name: base(&filename),
+            channel_id: base(&channel_id),
+            user_id: user_id.clone(),
+            timestamp,
+            content_length: -1,
+            team_id: NO_TEAM.into(),
+            extract: None,
+        };
         infos.push(upload_file_x(app, t, field).await?);
         if expect_client_ids {
             resp_ids.push(client_id);
@@ -796,7 +844,15 @@ async fn upload_multipart(
             return Err(wrong_client_ids(client_ids.len(), files.len()));
         }
         for (i, (name, data)) in files.into_iter().enumerate() {
-            let t = Upload { name: base(&name), channel_id: base(&channel_id), user_id: user_id.clone(), timestamp, content_length: -1, team_id: NO_TEAM.into(), extract: None };
+            let t = Upload {
+                name: base(&name),
+                channel_id: base(&channel_id),
+                user_id: user_id.clone(),
+                timestamp,
+                content_length: -1,
+                team_id: NO_TEAM.into(),
+                extract: None,
+            };
             let one = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(data)]);
             infos.push(upload_file_x(app, t, one).await?);
             if let Some(c) = client_ids.get(i).filter(|c| !c.is_empty()) {
@@ -840,7 +896,18 @@ fn path_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'='
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'$'
+            | b'&'
+            | b'+'
+            | b':'
+            | b'='
             | b'@' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -949,7 +1016,9 @@ async fn serve_file(
         h.insert(k, HeaderValue::from_static(v));
     }
     file_headers(&mut h, content_type, force_download, filename);
-    let not_found = |e: anyhow::Error| AppError::not_found("api.file.file_reader.app_error", "Unable to get a file reader.").detail(e.to_string());
+    let not_found = |e: anyhow::Error| {
+        AppError::not_found("api.file.file_reader.app_error", "Unable to get a file reader.").detail(e.to_string())
+    };
     let size = app.files.size(path).await.map_err(not_found)?;
     let modified = update_at / 1000;
     if update_at > 0 {
@@ -1042,9 +1111,24 @@ async fn get_thumbnail(
 ) -> ApiResult<Response> {
     let f = app.readable_file_info(&s, &id).await?;
     if f.thumbnail_path.is_empty() {
-        return Err(AppError::bad_request("api.file.get_file_thumbnail.no_thumbnail.app_error", "File doesn't have a thumbnail image.").detail(format!("file_id={}", f.id)));
+        return Err(AppError::bad_request(
+            "api.file.get_file_thumbnail.no_thumbnail.app_error",
+            "File doesn't have a thumbnail image.",
+        )
+        .detail(format!("file_id={}", f.id)));
     }
-    serve_file(&app, &f.thumbnail_path, &f.name, THUMBNAIL_TYPE, f.update_at, truthy(&q.download), &method, &headers, None).await
+    serve_file(
+        &app,
+        &f.thumbnail_path,
+        &f.name,
+        THUMBNAIL_TYPE,
+        f.update_at,
+        truthy(&q.download),
+        &method,
+        &headers,
+        None,
+    )
+    .await
 }
 
 async fn get_preview(
@@ -1057,9 +1141,24 @@ async fn get_preview(
 ) -> ApiResult<Response> {
     let f = app.readable_file_info(&s, &id).await?;
     if f.preview_path.is_empty() {
-        return Err(AppError::bad_request("api.file.get_file_preview.no_preview.app_error", "File doesn't have a preview image.").detail(format!("file_id={}", f.id)));
+        return Err(AppError::bad_request(
+            "api.file.get_file_preview.no_preview.app_error",
+            "File doesn't have a preview image.",
+        )
+        .detail(format!("file_id={}", f.id)));
     }
-    serve_file(&app, &f.preview_path, &f.name, THUMBNAIL_TYPE, f.update_at, truthy(&q.download), &method, &headers, None).await
+    serve_file(
+        &app,
+        &f.preview_path,
+        &f.name,
+        THUMBNAIL_TYPE,
+        f.update_at,
+        truthy(&q.download),
+        &method,
+        &headers,
+        None,
+    )
+    .await
 }
 
 async fn get_info(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<Response> {
@@ -1089,16 +1188,29 @@ fn site_url(app: &App, req: &HeaderMap) -> String {
     format!("{proto}://{host}")
 }
 
-async fn get_link(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>, headers: HeaderMap) -> ApiResult<Response> {
+async fn get_link(
+    St(app): St<State>,
+    Auth(s): Auth,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     if !is_valid_id(&id) {
         return Err(AppError::invalid_url_param("file_id"));
     }
     if !app.cfg.bool("FileSettings.EnablePublicLink") {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled."));
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "api.file.get_public_link.disabled.app_error",
+            "Public links have been disabled.",
+        ));
     }
     let f = app.readable_file_info(&s, &id).await?;
     if f.post_id.is_empty() && f.creator_id != BOOKMARK_OWNER {
-        return Err(AppError::bad_request("api.file.get_public_link.no_post.app_error", "Unable to get public link for file. File must be attached to a post that can be read by the current user.").detail(format!("file_id={}", f.id)));
+        return Err(AppError::bad_request(
+            "api.file.get_public_link.no_post.app_error",
+            "Unable to get public link for file. File must be attached to a post that can be read by the current user.",
+        )
+        .detail(format!("file_id={}", f.id)));
     }
     let hash = public_link_hash(&f.id, app.cfg.str("FileSettings.PublicLinkSalt"));
     let link = format!("{}/files/{}/public?h={hash}", site_url(&app, &headers), f.id);
@@ -1126,17 +1238,30 @@ async fn get_public(
     }
 }
 
-async fn public_file(app: &App, id: &str, q: &DownloadQuery, method: &Method, headers: &HeaderMap) -> ApiResult<Response> {
+async fn public_file(
+    app: &App,
+    id: &str,
+    q: &DownloadQuery,
+    method: &Method,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
     if !is_valid_id(id) {
         return Err(AppError::invalid_url_param("file_id"));
     }
     if !app.cfg.bool("FileSettings.EnablePublicLink") {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "api.file.get_public_link.disabled.app_error", "Public links have been disabled."));
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "api.file.get_public_link.disabled.app_error",
+            "Public links have been disabled.",
+        ));
     }
     let f = app.file_info(id).await?.ok_or_else(get_info_error)?;
     let want = public_link_hash(&f.id, app.cfg.str("FileSettings.PublicLinkSalt"));
     if q.h.is_empty() || !constant_eq(q.h.as_bytes(), want.as_bytes()) {
-        return Err(AppError::bad_request("api.file.get_file.public_invalid.app_error", "The public link does not appear to be valid."));
+        return Err(AppError::bad_request(
+            "api.file.get_file.public_invalid.app_error",
+            "The public link does not appear to be valid.",
+        ));
     }
     serve_file(app, &f.path, &f.name, &f.mime_type, f.update_at, false, method, headers, None).await
 }
@@ -1203,7 +1328,12 @@ pub struct FileInfoList {
     pub first_inaccessible_file_time: i64,
 }
 
-async fn search_in_team(St(app): St<State>, BusyAuth(s): BusyAuth, Path(team_id): Path<String>, body: Bytes) -> ApiResult<Response> {
+async fn search_in_team(
+    St(app): St<State>,
+    BusyAuth(s): BusyAuth,
+    Path(team_id): Path<String>,
+    body: Bytes,
+) -> ApiResult<Response> {
     if !is_valid_id(&team_id) {
         return Err(AppError::invalid_url_param("team_id"));
     }
@@ -1219,14 +1349,19 @@ async fn search_all_teams(St(app): St<State>, BusyAuth(s): BusyAuth, body: Bytes
 
 async fn search_files(app: &App, s: &Session, team_id: &str, body: &[u8]) -> ApiResult<Response> {
     let b: SearchBody = serde_json::from_slice(body).map_err(|e| {
-        AppError::bad_request("api.post.search_files.invalid_body.app_error", "Unable to parse the request body.").detail(e.to_string())
+        AppError::bad_request("api.post.search_files.invalid_body.app_error", "Unable to parse the request body.")
+            .detail(e.to_string())
     })?;
     let terms = b.terms.unwrap_or_default();
     if terms.is_empty() {
         return Err(AppError::invalid_param("terms"));
     }
     if !app.cfg.bool("ServiceSettings.EnableFileSearch") {
-        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "store.sql_file_info.search.disabled", "Searching files has been disabled on this server. Please contact your System Administrator."));
+        return Err(AppError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "store.sql_file_info.search.disabled",
+            "Searching files has been disabled on this server. Please contact your System Administrator.",
+        ));
     }
     let include_deleted = b.include_deleted_channels.unwrap_or(false);
     let mut list = Vec::new();
@@ -1237,7 +1372,8 @@ async fn search_files(app: &App, s: &Session, team_id: &str, body: &[u8]) -> Api
             continue;
         }
         p.in_channels = channel_names_to_ids(app, &p.in_channels, &s.user_id, team_id, include_deleted).await;
-        p.excluded_channels = channel_names_to_ids(app, &p.excluded_channels, &s.user_id, team_id, include_deleted).await;
+        p.excluded_channels =
+            channel_names_to_ids(app, &p.excluded_channels, &s.user_id, team_id, include_deleted).await;
         p.from_users = usernames_to_ids(app, &p.from_users).await;
         p.excluded_users = usernames_to_ids(app, &p.excluded_users).await;
         list.push(p);
@@ -1273,7 +1409,13 @@ async fn search_files(app: &App, s: &Session, team_id: &str, body: &[u8]) -> Api
 
 /// `parseAndFetchChannelIdByNameFromInFilter` over a list: names, `@user` (an existing DM) or `@a,b` (an
 /// existing group); unknown names stay as they are.
-async fn channel_names_to_ids(app: &App, names: &[String], user_id: &str, team_id: &str, include_deleted: bool) -> Vec<String> {
+async fn channel_names_to_ids(
+    app: &App,
+    names: &[String],
+    user_id: &str,
+    team_id: &str,
+    include_deleted: bool,
+) -> Vec<String> {
     let mut out = Vec::with_capacity(names.len());
     for n in names {
         let clean = n.trim_start_matches('~');
@@ -1309,7 +1451,13 @@ async fn channel_names_to_ids(app: &App, names: &[String], user_id: &str, team_i
                 if !deleted {
                     sql += " AND DeleteAt = 0";
                 }
-                sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(team).bind(name).fetch_optional(&app.db).await.ok().flatten()
+                sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                    .bind(team)
+                    .bind(name)
+                    .fetch_optional(&app.db)
+                    .await
+                    .ok()
+                    .flatten()
             }
             None => None,
         };
@@ -1323,8 +1471,12 @@ async fn usernames_to_ids(app: &App, names: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(names.len());
     for n in names {
         let name = n.trim_start_matches('@');
-        let id: Option<(String,)> =
-            sqlx::query_as("SELECT Id FROM Users WHERE Username = $1").bind(name).fetch_optional(&app.db).await.ok().flatten();
+        let id: Option<(String,)> = sqlx::query_as("SELECT Id FROM Users WHERE Username = $1")
+            .bind(name)
+            .fetch_optional(&app.db)
+            .await
+            .ok()
+            .flatten();
         out.push(id.map(|i| i.0).unwrap_or_else(|| n.clone()));
     }
     out
@@ -1460,7 +1612,8 @@ async fn search_store(app: &App, list: &[SearchParams], user_id: &str, team_id: 
     }
 }
 
-static WILDCARD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\*($| )").unwrap());
+static WILDCARD: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\*($| )").unwrap());
 
 enum Arg {
     S(String),
@@ -1492,12 +1645,17 @@ async fn get_image(St(app): St<State>, _: Auth, Query(q): Query<HashMap<String, 
 impl App {
     /// The local image proxy: another site's picture, fetched as link previews are, served as an image.
     async fn proxy_image(&self, url: &reqwest::Url) -> ApiResult<Response> {
-        let fail = |d: String| AppError::bad_request("api.image.get.app_error", "Requested image url cannot be parsed.").detail(d);
+        let fail = |d: String| {
+            AppError::bad_request("api.image.get.app_error", "Requested image url cannot be parsed.").detail(d)
+        };
         let (body, ct) = self.fetch_image(url).await.map_err(fail)?;
         let mut h = HeaderMap::new();
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=259200, public"));
         h.insert("X-Content-Type-Options", HeaderValue::from_static("nosniff"));
-        h.insert("Content-Security-Policy", HeaderValue::from_static("default-src 'none'; img-src data:; style-src 'unsafe-inline'"));
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static("default-src 'none'; img-src data:; style-src 'unsafe-inline'"),
+        );
         if let Ok(v) = HeaderValue::from_str(&ct) {
             h.insert(header::CONTENT_TYPE, v);
         }

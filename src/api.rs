@@ -1,9 +1,9 @@
 //! REST API v4: the routes of every area, and what is answered as a server without plugins or a license.
 
+use axum::Router;
 use axum::http::Uri;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 
 use crate::app::{AppError, State};
 
@@ -16,7 +16,8 @@ async fn not_found(
     uri: Uri,
 ) -> axum::response::Response {
     let api = uri.path().starts_with("/api/");
-    if !api && crate::web::static_enabled() && (method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
+    if !api && crate::web::static_enabled() && (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
+    {
         return crate::web::root_for(&app, &headers, &uri).await;
     }
     if !api {
@@ -285,7 +286,8 @@ pub fn router(app: State) -> Router {
     crate::push::spawn(app.clone());
     crate::email::spawn_batching(app.clone());
     let cors = crate::cors::Cors::from_config(&app.cfg);
-    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(request_limit(app.db.options().get_max_connections())));
+    let permits =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(request_limit(app.db.options().get_max_connections())));
     let r = routes(app.clone())
         .layer(axum::middleware::from_fn_with_state(app, crate::audit::layer))
         .layer(axum::middleware::from_fn(move |req, next| limit_requests(permits.clone(), req, next)))
@@ -296,7 +298,11 @@ pub fn router(app: State) -> Router {
         Some(c) => r.layer(axum::middleware::from_fn(move |req, next| crate::cors::layer(c.clone(), req, next))),
         None => r,
     };
-    if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") { r.layer(axum::middleware::from_fn(log_request)) } else { r }
+    if std::env::var("LOG_REQUESTS").is_ok_and(|v| v == "1") {
+        r.layer(axum::middleware::from_fn(log_request))
+    } else {
+        r
+    }
 }
 
 /// Every cache's size and hit, miss and invalidation counters (Go exports them as Prometheus metrics); system

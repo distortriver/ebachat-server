@@ -52,7 +52,8 @@ impl FileStore {
 
     /// The object's path with its name as given (`Path::from` would percent-encode non-ASCII, `%`, `#` and more).
     fn path(&self, p: &str) -> Path {
-        let full = if self.prefix.is_empty() { p.to_string() } else { format!("{}/{p}", self.prefix.trim_end_matches('/')) };
+        let full =
+            if self.prefix.is_empty() { p.to_string() } else { format!("{}/{p}", self.prefix.trim_end_matches('/')) };
         Path::parse(&full).unwrap_or_else(|_| Path::from(full))
     }
 
