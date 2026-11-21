@@ -18,14 +18,14 @@ for impl in $impls; do
   (cd "$REPO" && taskset -c "$LG_CPUS" ./target/release/loadgen steps http://localhost:8065 "$(cat "$RUN/server.pid")" "$step" "$secs") 2>&1 | tee -a "$out"
   {
     echo "== $impl: Postgres totals (websocket connects, 10 s warm-up and the step)"
-    psql -c "SELECT sum(calls) AS calls, round(sum(total_exec_time)) AS exec_ms, round(sum(total_exec_time) / sum(calls)::numeric, 3) AS ms_per_call,
+    psql -c "SELECT sum(calls) AS calls, round(sum(total_exec_time)::numeric) AS exec_ms, round((sum(total_exec_time) / sum(calls))::numeric, 3) AS ms_per_call,
                     sum(rows) AS rows, sum(shared_blks_hit + shared_blks_read) AS blocks FROM pg_stat_statements"
     echo "== $impl: top 40 by total time"
-    psql -c "SELECT calls, round(total_exec_time) AS total_ms, round(mean_exec_time::numeric, 3) AS mean_ms, rows,
+    psql -c "SELECT calls, round(total_exec_time::numeric) AS total_ms, round(mean_exec_time::numeric, 3) AS mean_ms, rows,
                     left(regexp_replace(query, '\s+', ' ', 'g'), 230) AS query
              FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 40"
     echo "== $impl: top 25 by calls"
-    psql -c "SELECT calls, round(total_exec_time) AS total_ms, rows, left(regexp_replace(query, '\s+', ' ', 'g'), 230) AS query
+    psql -c "SELECT calls, round(total_exec_time::numeric) AS total_ms, rows, left(regexp_replace(query, '\s+', ' ', 'g'), 230) AS query
              FROM pg_stat_statements ORDER BY calls DESC LIMIT 25"
     echo
   } | tee -a "$out"
