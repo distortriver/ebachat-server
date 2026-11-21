@@ -19,6 +19,9 @@ pg "CREATE DATABASE sqldiff_${tag}_snap TEMPLATE mattermost" 2>/dev/null || {
   pg "CREATE DATABASE sqldiff_${tag}_snap"
   docker exec bench-db sh -c "pg_dump -U mmuser mattermost | psql -q -U mmuser sqldiff_${tag}_snap" >/dev/null
 }
+# Settings the selected scenario modules need from the environment (an env override wins over PUT /config).
+SERVER_ENV=$(cd "$REPO/tools/diff" && python3 sqldiff.py env)
+export SERVER_ENV
 i=0
 for impl in go rust; do
   db=sqldiff_${tag}_$impl

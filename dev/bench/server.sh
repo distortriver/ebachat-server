@@ -6,6 +6,8 @@
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 PORT=${PORT:-8065} DB=${DB:-mattermost} NAME=${NAME:-server}
+# SERVER_ENV="K=V K=V": settings over env.sh's (a scenario that needs them, see sqldiff.py env).
+for kv in ${SERVER_ENV:-}; do export "$kv"; done
 pidf=$RUN/$NAME.pid
 if [ -f "$pidf" ]; then
   kill "$(cat "$pidf")" 2>/dev/null || true

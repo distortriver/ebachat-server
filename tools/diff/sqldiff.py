@@ -11,6 +11,7 @@ itself, normalized (see normalize), compared by value: the first differing paths
     sqldiff.py run <impl> <out.json>         against SQLDIFF_URL (default :8065); SQLDIFF_SCENARIO=core,... picks
                                              the scenario modules (tools/diff/scen_<name>.py, default core)
     sqldiff.py compare <go.json> <rust.json> the differences, step by step
+    sqldiff.py env                           the MM_* settings the selected modules need (dev/bench/sqldiff.sh)
 
 Stdlib and websocket-client only.
 """
@@ -322,8 +323,19 @@ def main_compare(go_path, rust_path):
     print(f"\n{n_diff} of {len(r['steps'])} steps differ")
 
 
+def main_env():
+    """K=V settings the selected modules need on the servers' environment (their SERVER_ENV dicts): env.sh's
+    MM_* overrides win over PUT /config, so a scenario cannot turn them on from inside."""
+    env = {}
+    for name in os.environ.get("SQLDIFF_SCENARIO", "core").split(","):
+        env.update(getattr(importlib.import_module(f"scen_{name}"), "SERVER_ENV", {}))
+    print(" ".join(f"{k}={v}" for k, v in env.items()))
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "run":
+    if sys.argv[1] == "env":
+        main_env()
+    elif sys.argv[1] == "run":
         main_run(sys.argv[2], sys.argv[3])
     else:
         main_compare(sys.argv[2], sys.argv[3])
