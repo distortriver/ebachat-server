@@ -99,12 +99,27 @@ impl Keywords {
     }
 }
 
-/// `StandardMentionParser.ProcessText` over a post's texts (code left out, as the Markdown parser does).
+static REF_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]]+\]:.*$").unwrap());
+static LINK_DESTINATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\]\([^)]*\)").unwrap());
+static URL_AUTOLINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[^a-z0-9])(?:https?|ftp|mailto|tel)://[^\s\p{P}]\S*").unwrap());
+static WWW_AUTOLINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|[\s*_~)<(>])www[0-9]{0,3}\.\S*").unwrap());
+
+/// Text where mentions count: without code and links.
+fn mention_text(s: &str) -> String {
+    let s = without_code(s);
+    let s = REF_DEFINITION.replace_all(&s, " ");
+    let s = LINK_DESTINATION.replace_all(&s, "] ");
+    let s = URL_AUTOLINK.replace_all(&s, "${1} ");
+    WWW_AUTOLINK.replace_all(&s, "${1} ").into_owned()
+}
+
+/// `StandardMentionParser.ProcessText` over a post's texts.
 pub fn explicit_mentions(post: &Post, k: &Keywords) -> Mentions {
     let mut r = Mentions::default();
     let multibyte: Vec<&String> = k.0.keys().filter(|w| w.len() != w.chars().count()).collect();
     for s in all_strings(post) {
-        let text = without_code(&s);
+        let text = mention_text(&s);
         for word in text.split(|c: char| !(c == ':' || c == '.' || c == '-' || c == '_' || c == '@' || c.is_alphanumeric())) {
             if word.is_empty() {
                 continue;
@@ -893,5 +908,30 @@ mod tests {
         assert_eq!(m.users.len(), 2);
         let m = explicit_mentions(&p("ask @carol.smith"), &k);
         assert_eq!(m.other_potential, vec!["carol.smith".to_string()]);
+    }
+
+    #[test]
+    fn mentions_in_links() {
+        let mut k = Keywords::default();
+        k.add_user(&user("a", "alice"), None, Some("online"), true);
+        let p = |m: &str| Post { message: m.into(), ..Default::default() };
+        for (message, mentioned) in [
+            ("https://youtube.com/@alice", false),
+            ("http://x/a?u=@alice", false),
+            ("ftp://x/@alice", false),
+            ("<http://x/@alice>", false),
+            ("text (http://x/@alice)", false),
+            ("see:http://x/@alice", false),
+            ("www.x.com/@alice", false),
+            ("[link](http://x/@alice)", false),
+            ("[x][r]\n\n[r]: http://x/@alice", false),
+            ("http://x/@alice and @alice", true),
+            ("[@alice](http://x)", true),
+            ("![@alice](http://x/y.png)", true),
+            ("x.com/@alice", true),
+            ("http://@alice", true),
+        ] {
+            assert_eq!(explicit_mentions(&p(message), &k).users.contains_key("a"), mentioned, "{message}");
+        }
     }
 }
