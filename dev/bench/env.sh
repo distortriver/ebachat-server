@@ -4,6 +4,8 @@ BENCH=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$BENCH/../.." && pwd)
 RUN=$BENCH/run
 mkdir -p "$RUN/results" "$RUN/data"
+# Lost on reboot: many sockets on loopback.
+sudo sysctl -q -w net.core.somaxconn=8192 net.ipv4.ip_local_port_range="10000 65000" net.ipv4.tcp_tw_reuse=1
 # 500 websockets plus the HTTP connections of a thousand requests a second: far beyond the default 1024.
 ulimit -n "$(ulimit -Hn)"
 N=$(nproc)
