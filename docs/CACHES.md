@@ -54,6 +54,14 @@ These are not caches, but they also take load off Postgres.
   from `ThreadMemberships` by `UserId`, which is indexed, and join `Threads` by its primary key. No index is added.
 - **Websocket recipients.** For each channel event, membership comes from `ChannelMembersForUser`, as Go's
   `WebConn` does with its own copy.
+  - **Go bug, not reproduced: a user who joins a team misses its default channels' events.** Go's connection
+    loads its copy (`allChannelMembers`) at the first channel event it checks. It keeps the copy for 30 minutes,
+    or until `JoinUserToTeam` invalidates the user, which happens after the default channels are joined. During
+    the join, the `posted` (join message) and `user_added` events of Town Square and Off-Topic are checked against
+    the old copy. When the copy was loaded before the join (any channel event anywhere loads it), the joiner gets
+    none of them (join by invite, add to a team). When the first of these events loads it, the joiner gets only
+    the first channel's events (team creation). Rust reads the current membership and delivers all of them, which
+    is correct.
 
 ## Verification
 
