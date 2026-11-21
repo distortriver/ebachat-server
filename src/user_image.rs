@@ -197,6 +197,13 @@ async fn set_image(
         return Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "api.user.upload_profile_user.too_large.app_error", ""));
     }
     let u = app.user(&user_id).await?.ok_or_else(|| AppError::invalid_url_param("user_id"))?;
+    // `SetProfileImageFromMultiPartFile`: `checkImageLimits` reads the dimensions first, so a file that is no image
+    // fails as `check_image_limits` here (as `decode` only on the other paths).
+    image::ImageReader::new(std::io::Cursor::new(&data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .ok_or_else(|| AppError::bad_request("api.user.upload_profile_user.check_image_limits.app_error", ""))?;
     app.set_profile_image_from_bytes(&u.id, &data).await?;
     crate::audit::log(&app, Some(&s), "").await;
     Ok(ok())
