@@ -429,7 +429,8 @@ struct PageQuery {
     include_total_count: bool,
 }
 
-/// `getAllTeams`: what the session may list.
+/// `getAllTeams`: what the session may list, archived teams included (`GetAllPage` and `AnalyticsTeamCount` with
+/// options have no `DeleteAt` filter).
 async fn all_teams(St(app): St<State>, Auth(s): Auth, Query(q): Query<PageQuery>) -> ApiResult<Response> {
     let private = app.has_perm(&s, "list_private_teams").await;
     let public = app.has_perm(&s, "list_public_teams").await;
@@ -447,7 +448,7 @@ async fn all_teams(St(app): St<State>, Auth(s): Auth, Query(q): Query<PageQuery>
     };
     let per_page = q.per_page.unwrap_or(60).clamp(0, 200);
     let sql = format!(
-        "{} WHERE DeleteAt = 0{filter} ORDER BY DisplayName LIMIT $1 OFFSET $2",
+        "{} WHERE true{filter} ORDER BY DisplayName LIMIT $1 OFFSET $2",
         Team::SELECT
     );
     let mut teams: Vec<Team> =
@@ -456,7 +457,7 @@ async fn all_teams(St(app): St<State>, Auth(s): Auth, Query(q): Query<PageQuery>
         app.sanitize_team(&s, t).await;
     }
     if q.include_total_count {
-        let sql = format!("SELECT COUNT(*) FROM Teams WHERE DeleteAt = 0{filter}");
+        let sql = format!("SELECT COUNT(*) FROM Teams WHERE true{filter}");
         let (n,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql)).fetch_one(&app.db).await?;
         return Ok(Json(json!({"teams": teams, "total_count": n})).into_response());
     }
