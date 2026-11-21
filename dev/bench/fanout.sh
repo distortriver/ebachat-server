@@ -7,7 +7,7 @@ impls=${1:-"rust go"}
 cores=${2:-$SRV_MAX}
 steps=${3:-"100:1,100:5,100:10,100:20,100:50,100:100,100:200"}
 secs=${4:-20}
-"$BENCH/db.sh"
+"$BENCH/db.sh" analyze
 out=$RUN/results/fanout-$(date +%m%d-%H%M).txt
 for impl in $impls; do
   for c in $cores; do
