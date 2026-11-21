@@ -95,6 +95,14 @@ impl<K: Hash + Eq, V: Clone> Lru<K, V> {
         self.invalidations.fetch_add(1, Relaxed);
         self.m.lock().unwrap().clear();
     }
+    /// The values that have not expired, as Go's `Scan` with `GetMulti`.
+    pub fn values(&self) -> Vec<V> {
+        let m = self.m.lock().unwrap();
+        m.iter()
+            .filter(|(_, (_, at))| !self.ttl.is_some_and(|t| at.elapsed() > t))
+            .map(|(_, (v, _))| v.clone())
+            .collect()
+    }
     /// Drops every entry `f` says to.
     pub fn remove_where(&self, f: impl Fn(&K, &V) -> bool)
     where

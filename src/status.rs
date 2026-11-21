@@ -42,6 +42,14 @@ impl App {
         Ok(crate::db::one(&self.db, "userid = $1", user_id).await?)
     }
 
+    /// `GetAllStatuses`: the cached statuses, as user id -> status; none while statuses are off.
+    pub fn all_cached_statuses(&self) -> Vec<(String, Value)> {
+        if !self.statuses_on() {
+            return vec![];
+        }
+        self.caches.status.values().into_iter().map(|s| (s.user_id, Value::String(s.status))).collect()
+    }
+
     /// `GetUserStatusesByIds`: the cache, then the database (cached), then offline for the rest.
     pub async fn statuses(&self, ids: &[String]) -> ApiResult<Vec<Status>> {
         if !self.statuses_on() {
