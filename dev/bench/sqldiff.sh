@@ -3,6 +3,8 @@
 # sqldiff.sh [TAG] [PORT]: TAG (default main) names the databases, logs and results, so several runs can go at once;
 # Go listens on PORT (default 8065), Rust on PORT+1. SQLDIFF_ONLY / SQLDIFF_UPTO pass through to sqldiff.py.
 # Output: run/results/sqldiff-TAG-{go,rust}.json and sqldiff-TAG.txt.
+# B_IMPL=go runs Go in the second slot too (files still named -rust): a step that differs Go against Go is
+# nondeterministic in Go itself.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 tag=${1:-main} port=${2:-8065}
@@ -29,7 +31,8 @@ for impl in go rust; do
   pg "CREATE DATABASE $db TEMPLATE sqldiff_${tag}_snap"
   [ "$impl" = rust ] && flock -u 9
   # each server on its own cores out of the server half
-  PORT=$((port + i)) DB=$db NAME=sqldiff-$tag-$impl CPUS=$((i * 2))-$((i * 2 + 1)) "$BENCH/server.sh" "$impl" 2 &
+  run=$impl; [ "$impl" = rust ] && run=${B_IMPL:-rust}
+  PORT=$((port + i)) DB=$db NAME=sqldiff-$tag-$impl CPUS=$((i * 2))-$((i * 2 + 1)) "$BENCH/server.sh" "$run" 2 &
   i=$((i + 1))
 done
 wait
