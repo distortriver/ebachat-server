@@ -2812,9 +2812,7 @@ async fn set_reminder(
         return Err(AppError::forbidden_perm(perm::READ_CHANNEL_CONTENT));
     }
     let post = app.single_post(&post_id, false).await?;
-    if b.target_time <= 0 {
-        return Err(AppError::bad_request("model.post_reminder.is_valid.target_time.app_error", "Invalid target time."));
-    }
+    // Go takes any target time (setPostReminder decodes it and stores it as is); a past one fires at the next run.
     sqlx::query(
         "INSERT INTO PostReminders (PostId, UserId, TargetTime) VALUES ($1, $2, $3)
          ON CONFLICT (PostId, UserId) DO UPDATE SET TargetTime = EXCLUDED.TargetTime",
