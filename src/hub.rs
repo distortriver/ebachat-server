@@ -253,7 +253,10 @@ impl Delivery {
             }
         }
         if !self.routed && !self.b.channel_id.is_empty() {
-            match app.member_roles(&c.user_id, false).await {
+            // Archived channels count: Go checks the connection's own copy of the memberships, loaded before the
+            // archive (an archive invalidates no user), so the "archived the channel" post still reaches the
+            // members. Nothing else can be posted to an archived channel.
+            match app.member_roles(&c.user_id, true).await {
                 Ok(m) if m.contains_key(&self.b.channel_id) => {}
                 _ => return false,
             }
