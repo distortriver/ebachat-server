@@ -41,6 +41,9 @@ struct UsersQuery {
     inactive: String,
     active: String,
     role: String,
+    roles: String,
+    team_roles: String,
+    channel_roles: String,
     sort: String,
     page: Option<i64>,
     per_page: Option<i64>,
@@ -81,6 +84,87 @@ fn role_filter(cond: &mut String, args: &mut Vec<Arg>, role: &str) {
     if !role.is_empty() {
         args.push(Arg::S(format!("%{}%", like_escape(role, '\\'))));
         cond.push_str(&format!(" AND u.Roles LIKE LOWER(${})", args.len()));
+    }
+}
+
+/// `model.CleanRoleNames` over a comma-separated list: blanks dropped; `None` when one is not a role name.
+fn clean_role_names(names: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    for n in names.split(',') {
+        if n.trim().is_empty() {
+            continue;
+        }
+        if n.len() > 64 || !n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            return None;
+        }
+        out.push(n.to_string());
+    }
+    Some(out)
+}
+
+/// The system, team and channel roles a list is narrowed to (`Roles`, `TeamRoles`, `ChannelRoles`).
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct MultiRoles {
+    #[serde(rename = "roles", deserialize_with = "null_vec")]
+    system: Vec<String>,
+    #[serde(rename = "team_roles", deserialize_with = "null_vec")]
+    team: Vec<String>,
+    #[serde(rename = "channel_roles", deserialize_with = "null_vec")]
+    channel: Vec<String>,
+}
+
+fn null_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
+}
+
+impl MultiRoles {
+    /// `applyMultiRoleFilters`: any of the roles. `system_user` matches users who are nothing more; the team and
+    /// channel roles look at the scheme flags of the list's `tm` / `cm` join, system admins left out.
+    fn apply(&self, cond: &mut String, args: &mut Vec<Arg>) {
+        let mut or: Vec<String> = vec![];
+        let not_admin = |args: &mut Vec<Arg>| {
+            args.push(Arg::S("%system_admin%".into()));
+            format!("u.Roles NOT ILIKE ${}", args.len())
+        };
+        if self.system.first().is_some_and(|r| !r.is_empty()) {
+            for r in &self.system {
+                match r.as_str() {
+                    "system_user" => {
+                        args.push(Arg::S(r.clone()));
+                        or.push(format!("u.Roles = ${}", args.len()));
+                    }
+                    "system_guest" | "system_admin" | "system_user_manager" | "system_read_only_admin" | "system_manager"
+                    | "system_custom_group_admin" | "shared_channel_manager" => {
+                        args.push(Arg::S(format!("%{r}%").to_lowercase()));
+                        or.push(format!("u.Roles ILIKE ${}", args.len()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (roles, alias, admin, user, guest) in [
+            (&self.channel, "cm", "channel_admin", "channel_user", "channel_guest"),
+            (&self.team, "tm", "team_admin", "team_user", "team_guest"),
+        ] {
+            if !roles.first().is_some_and(|r| !r.is_empty()) {
+                continue;
+            }
+            for r in roles {
+                if r == admin {
+                    let na = not_admin(args);
+                    or.push(format!("({alias}.SchemeAdmin = true AND {na})"));
+                } else if r == user {
+                    let na = not_admin(args);
+                    or.push(format!("({alias}.SchemeUser = true AND {alias}.SchemeAdmin = false AND {na})"));
+                } else if r == guest {
+                    or.push(format!("{alias}.SchemeGuest = true"));
+                }
+            }
+        }
+        if !or.is_empty() {
+            cond.push_str(&format!(" AND ({})", or.join(" OR ")));
+        }
     }
 }
 
@@ -132,6 +216,29 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
     if active && inactive {
         return Err(AppError::invalid_url_param("inactive"));
     }
+    // MM-47378: `role`, `roles`, `team_roles` (with in_team) and `channel_roles` (with in_channel) must be role
+    // names that exist.
+    let mut multi = MultiRoles::default();
+    if !q.role.is_empty() || !q.roles.is_empty() || !q.channel_roles.is_empty() || !q.team_roles.is_empty() {
+        let all: Vec<(String,)> = sqlx::query_as("SELECT Name FROM Roles").fetch_all(&app.db).await?;
+        let known = |names: &[String]| names.iter().all(|n| all.iter().any(|(a,)| a == n));
+        if !q.role.is_empty() && (clean_role_names(&q.role).is_none() || q.role.contains(',') || !known(&[q.role.clone()])) {
+            return Err(AppError::invalid_param("role"));
+        }
+        for (raw, name, scope, out) in [
+            (&q.roles, "roles", "x", &mut multi.system),
+            (&q.channel_roles, "channelRoles", q.in_channel.as_str(), &mut multi.channel),
+            (&q.team_roles, "teamRoles", q.in_team.as_str(), &mut multi.team),
+        ] {
+            if raw.is_empty() || scope.is_empty() {
+                continue;
+            }
+            match clean_role_names(raw) {
+                Some(v) if known(&v) => *out = v,
+                _ => return Err(AppError::invalid_param(name)),
+            }
+        }
+    }
     if !q.in_team.is_empty() && !app.has_team_perm(&s, &q.in_team, perm::VIEW_TEAM).await {
         return Err(AppError::forbidden_perm(perm::VIEW_TEAM));
     }
@@ -148,6 +255,7 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
         && q.not_in_channel.is_empty()
         && !truthy(&q.without_team)
         && q.role.is_empty()
+        && multi.system.is_empty()
         && !active
         && !inactive;
     if plain && page == 0 && per == 100 && app.sees_everyone(&s).await {
@@ -203,6 +311,7 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
             _ => {}
         }
         role_filter(&mut cond, &mut args, &q.role);
+        multi.apply(&mut cond, &mut args);
         activity(&mut cond, active, inactive);
     } else if !q.in_channel.is_empty() {
         if !app.channel_perm(&s, &q.in_channel, perm::READ_CHANNEL).await?.0 {
@@ -222,6 +331,10 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
         }
         cond.push_str(" AND cm.ChannelId = $1");
         activity(&mut cond, active, inactive);
+        // Only GetProfilesInChannel (no sort) applies the role filters.
+        if sort.is_empty() {
+            multi.apply(&mut cond, &mut args);
+        }
         // GetProfilesInChannel has no view restriction filter.
         let tail = format!("{order} LIMIT {per} OFFSET {}", page * per);
         let users = query_users(&app, &joins, &cond, &tail, args).await?;
@@ -229,6 +342,7 @@ async fn get_users_inner(St(app): St<State>, Auth(s): Auth, Query(q): Query<User
     } else {
         joins = String::new();
         role_filter(&mut cond, &mut args, &q.role);
+        multi.apply(&mut cond, &mut args);
         activity(&mut cond, active, inactive);
     }
     restrict(&app, &s, &mut cond).await?;
@@ -306,11 +420,12 @@ async fn perform_search(
     mut cond: String,
     mut args: Vec<Arg>,
     term: &str,
-    role: &str,
+    role: (&str, &MultiRoles),
     o: SearchOpts,
 ) -> ApiResult<Vec<User>> {
     let term = like_escape(term.trim(), '*');
-    role_filter(&mut cond, &mut args, role);
+    role_filter(&mut cond, &mut args, role.0);
+    role.1.apply(&mut cond, &mut args);
     if !o.allow_inactive {
         cond.push_str(" AND u.DeleteAt = 0");
     }
@@ -331,7 +446,7 @@ async fn perform_search(
     Ok(dedup(query_users(app, joins, &cond, &tail, args).await?))
 }
 
-async fn search_in_team(app: &App, s: &Session, team: &str, term: &str, role: &str, o: SearchOpts) -> ApiResult<Vec<User>> {
+async fn search_in_team(app: &App, s: &Session, team: &str, term: &str, role: (&str, &MultiRoles), o: SearchOpts) -> ApiResult<Vec<User>> {
     if team.is_empty() {
         return perform_search(app, s, "", "true".into(), vec![], term, role, o).await;
     }
@@ -339,7 +454,7 @@ async fn search_in_team(app: &App, s: &Session, team: &str, term: &str, role: &s
     perform_search(app, s, joins, "true".into(), vec![Arg::S(team.into())], term, role, o).await
 }
 
-async fn search_in_channel(app: &App, s: &Session, channel: &str, term: &str, role: &str, o: SearchOpts) -> ApiResult<Vec<User>> {
+async fn search_in_channel(app: &App, s: &Session, channel: &str, term: &str, role: (&str, &MultiRoles), o: SearchOpts) -> ApiResult<Vec<User>> {
     let joins = "JOIN ChannelMembers cm ON (cm.UserId = u.Id AND cm.ChannelId = $1)";
     perform_search(app, s, joins, "true".into(), vec![Arg::S(channel.into())], term, role, o).await
 }
@@ -350,7 +465,7 @@ async fn search_not_in_channel(
     team: &str,
     channel: &str,
     term: &str,
-    role: &str,
+    role: (&str, &MultiRoles),
     o: SearchOpts,
 ) -> ApiResult<Vec<User>> {
     let mut joins = "LEFT JOIN ChannelMembers cm ON (cm.UserId = u.Id AND cm.ChannelId = $1)".to_string();
@@ -398,6 +513,7 @@ async fn autocomplete(
     if !q.in_team.is_empty() && !app.has_team_perm(&s, &q.in_team, perm::VIEW_TEAM).await {
         return Err(AppError::forbidden_perm(perm::VIEW_TEAM));
     }
+    let none = MultiRoles::default();
     let sanitize = |v: Vec<User>| v.iter().map(|u| sanitized(u, show)).collect::<Vec<_>>();
     if !q.in_channel.is_empty() {
         if q.in_team.is_empty() {
@@ -408,12 +524,12 @@ async fn autocomplete(
             ));
         }
         let (a, b) = tokio::join!(
-            search_in_channel(&app, &s, &q.in_channel, &q.name, "", o),
-            search_not_in_channel(&app, &s, &q.in_team, &q.in_channel, &q.name, "", o)
+            search_in_channel(&app, &s, &q.in_channel, &q.name, ("", &none), o),
+            search_not_in_channel(&app, &s, &q.in_team, &q.in_channel, &q.name, ("", &none), o)
         );
         return Ok(Json(Autocomplete { users: sanitize(a?), out_of_channel: Some(sanitize(b?)) }));
     }
-    let users = search_in_team(&app, &s, &q.in_team, &q.name, "", o).await?;
+    let users = search_in_team(&app, &s, &q.in_team, &q.name, ("", &none), o).await?;
     Ok(Json(Autocomplete { users: sanitize(users), out_of_channel: None }))
 }
 
@@ -432,6 +548,8 @@ struct UserSearch {
     without_team: bool,
     limit: i64,
     role: String,
+    #[serde(flatten)]
+    multi: MultiRoles,
 }
 
 /// `searchUsers`.
@@ -463,17 +581,17 @@ async fn search(St(app): St<State>, BusyAuth(s): BusyAuth, Body(p): Body<UserSea
     let o = SearchOpts { emails: show.email, full_names: show.fullname, allow_inactive: p.allow_inactive, limit };
     let users = if p.without_team {
         let cond = "NOT EXISTS (SELECT 1 FROM TeamMembers t WHERE t.UserId = u.Id AND t.DeleteAt = 0)".to_string();
-        perform_search(&app, &s, "", cond, vec![], &p.term, &p.role, o).await?
+        perform_search(&app, &s, "", cond, vec![], &p.term, (&p.role, &p.multi), o).await?
     } else if !p.in_channel_id.is_empty() {
-        search_in_channel(&app, &s, &p.in_channel_id, &p.term, &p.role, o).await?
+        search_in_channel(&app, &s, &p.in_channel_id, &p.term, (&p.role, &p.multi), o).await?
     } else if !p.not_in_channel_id.is_empty() {
-        search_not_in_channel(&app, &s, &p.team_id, &p.not_in_channel_id, &p.term, &p.role, o).await?
+        search_not_in_channel(&app, &s, &p.team_id, &p.not_in_channel_id, &p.term, (&p.role, &p.multi), o).await?
     } else if !p.not_in_team_id.is_empty() {
         let joins = "LEFT JOIN TeamMembers tm ON (tm.UserId = u.Id AND tm.DeleteAt = 0 AND tm.TeamId = $1)";
         let args = vec![Arg::S(p.not_in_team_id.clone())];
-        perform_search(&app, &s, joins, "tm.UserId IS NULL".into(), args, &p.term, &p.role, o).await?
+        perform_search(&app, &s, joins, "tm.UserId IS NULL".into(), args, &p.term, (&p.role, &p.multi), o).await?
     } else {
-        search_in_team(&app, &s, &p.team_id, &p.term, &p.role, o).await?
+        search_in_team(&app, &s, &p.team_id, &p.term, (&p.role, &p.multi), o).await?
     };
     Ok(Json(users.iter().map(|u| sanitized(u, show)).collect()))
 }
@@ -500,43 +618,61 @@ struct FilteredQuery {
     include_deleted: String,
     include_bots: String,
     include_remote_users: String,
+    roles: String,
+    team_roles: String,
+    channel_roles: String,
 }
 
-/// `getFilteredUsersStats` (system console).
+/// `getFilteredUsersStats` (system console): the role lists checked for their form first (not against the
+/// existing roles, unlike `getUsers`), `team_roles` with `in_team` only, `channel_roles` with `in_channel` only.
 async fn stats_filtered(
     St(app): St<State>,
     Auth(s): Auth,
     Query(q): Query<FilteredQuery>,
 ) -> ApiResult<Json<UsersStats>> {
+    let mut multi = MultiRoles::default();
+    for (raw, name, scope, out) in [
+        (&q.roles, "roles", "x", &mut multi.system),
+        (&q.channel_roles, "channelRoles", q.in_channel.as_str(), &mut multi.channel),
+        (&q.team_roles, "teamRoles", q.in_team.as_str(), &mut multi.team),
+    ] {
+        if raw.is_empty() || scope.is_empty() {
+            continue;
+        }
+        *out = clean_role_names(raw).ok_or_else(|| AppError::invalid_param(name))?;
+    }
     app.require(&s, perm::SYSCONSOLE_READ_USERMANAGEMENT_USERS).await?;
     let mut sql = "SELECT COUNT(*) FROM Users u".to_string();
-    let mut cond = vec![];
-    let mut args: Vec<String> = vec![];
+    let mut cond = "true".to_string();
+    let mut args: Vec<Arg> = vec![];
     if !truthy(&q.include_deleted) {
-        cond.push("u.DeleteAt = 0".to_string());
+        cond.push_str(" AND u.DeleteAt = 0");
     }
     if !truthy(&q.include_remote_users) {
-        cond.push("COALESCE(u.RemoteId, '') = ''".into());
+        cond.push_str(" AND COALESCE(u.RemoteId, '') = ''");
     }
     if !truthy(&q.include_bots) {
         sql.push_str(" LEFT JOIN Bots b ON u.Id = b.UserId");
-        cond.push("b.UserId IS NULL".into());
+        cond.push_str(" AND b.UserId IS NULL");
     }
     if !q.in_team.is_empty() {
-        args.push(q.in_team.clone());
+        args.push(Arg::S(q.in_team.clone()));
         sql.push_str(" LEFT JOIN TeamMembers tm ON u.Id = tm.UserId");
-        cond.push(format!("tm.TeamId = ${} AND tm.DeleteAt = 0", args.len()));
+        cond.push_str(&format!(" AND tm.TeamId = ${} AND tm.DeleteAt = 0", args.len()));
     } else if !q.in_channel.is_empty() {
-        args.push(q.in_channel.clone());
+        args.push(Arg::S(q.in_channel.clone()));
         sql.push_str(" LEFT JOIN ChannelMembers cm ON u.Id = cm.UserId");
-        cond.push(format!("cm.ChannelId = ${}", args.len()));
+        cond.push_str(&format!(" AND cm.ChannelId = ${}", args.len()));
     }
-    if !cond.is_empty() {
-        sql = format!("{sql} WHERE {}", cond.join(" AND "));
-    }
+    multi.apply(&mut cond, &mut args);
+    let sql = format!("{sql} WHERE {cond}");
     let mut query = sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(sql));
     for a in args {
-        query = query.bind(a);
+        query = match a {
+            Arg::S(v) => query.bind(v),
+            Arg::V(v) => query.bind(v),
+            Arg::I(v) => query.bind(v),
+        };
     }
     let (n,) = query.fetch_one(&app.db).await?;
     Ok(Json(UsersStats { total_users_count: n }))
