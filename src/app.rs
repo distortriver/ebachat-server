@@ -308,7 +308,7 @@ impl AppError {
     pub fn new(status: StatusCode, id: &str, message: &str) -> AppError {
         AppError {
             id: id.into(),
-            message: crate::i18n::t(id).unwrap_or(message).into(),
+            message: crate::i18n::t(id).map(Into::into).unwrap_or_else(|| crate::brand::apply(message).into_owned()),
             detailed_error: String::new(),
             request_id: new_id(),
             status_code: status.as_u16(),

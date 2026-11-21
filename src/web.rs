@@ -593,10 +593,8 @@ async fn root_page(app: &State) -> Response {
     };
     let esc = html_escape;
     let original = format!("<title>{}</title>", esc("Mattermost"));
-    let site_name = match app.cfg.str("TeamSettings.SiteName") {
-        "" => "Mattermost",
-        s => s,
-    };
+    // Go falls back to "Mattermost"; this server names the site (`crate::brand`).
+    let site_name = crate::brand::name();
     let description = app.cfg.str("TeamSettings.CustomDescriptionText");
     let mut modified = format!("<title>{}</title>", esc(site_name));
     if !description.is_empty() {

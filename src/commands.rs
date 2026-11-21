@@ -794,8 +794,32 @@ fn builtin_autocompletes(app: &App, c: &Command) -> bool {
             && app.cfg.bool("ServiceSettings.EnableEmailInvitations")
 }
 
+/// A built-in as listed, its texts naming the site (`crate::brand`).
 fn builtin_listed(c: &Command) -> Command {
-    Command { auto_complete: true, ..c.clone() }
+    let mut c = Command { auto_complete: true, ..c.clone() };
+    for s in [&mut c.auto_complete_desc, &mut c.auto_complete_hint, &mut c.description, &mut c.display_name] {
+        if let std::borrow::Cow::Owned(b) = crate::brand::apply(s) {
+            *s = b;
+        }
+    }
+    if let Some(d) = c.autocomplete_data.as_mut() {
+        brand_json(d);
+    }
+    c
+}
+
+/// Every string in `v` naming the site.
+fn brand_json(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            if let std::borrow::Cow::Owned(b) = crate::brand::apply(s) {
+                *s = b;
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(brand_json),
+        Value::Object(m) => m.values_mut().for_each(brand_json),
+        _ => {}
+    }
 }
 
 #[derive(Deserialize, Default)]

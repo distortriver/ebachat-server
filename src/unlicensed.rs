@@ -81,7 +81,7 @@ fn parse(line: &'static str) -> (Method, Spec) {
 fn error(code: StatusCode, id: &str, msg: Option<&str>) -> AppError {
     let mut e = AppError::new(code, id, msg.unwrap_or(id));
     if let Some(m) = msg {
-        e.message = m.to_string();
+        e.message = crate::brand::apply(m).into_owned();
     }
     e
 }
