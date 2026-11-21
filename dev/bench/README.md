@@ -41,6 +41,9 @@ Differences that remain on purpose (2026-11-21, each confirmed by the project ow
   as the 12.1.0 source's `orderFileInfosByID` does.
 - `GiphySdkKey` in `config/client`: a release Go build answers Mattermost's own embedded GIPHY key; Rust answers the
   configured `ServiceSettings.GiphySdkKey` (empty unless an admin sets one), never Mattermost's key.
+- Guests (`guests`, the demotion done in the database since neither server demotes without a license): Go counts a
+  guest's `users/stats` once per shared channel, and joins a promoted user to the default channels as a guest;
+  Rust does neither (docs/USERS.md).
 - Noise: `config/client` build fields of the bench's dev Go build; ordering by `last_activity_at`, which depends on
   each run's timing; image bytes (encoders differ, sizes and formats match). Adding several members at once: Go
   posts each "added to the channel" message from a goroutine, so a member added later in the same request may or

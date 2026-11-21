@@ -142,15 +142,12 @@ impl App {
     /// `JoinUserToTeam`: the membership (new, or the old one restored), sidebar categories, default channels,
     /// caches, `added_to_team`. Returns the member and whether it was there already.
     pub async fn join_user_to_team(&self, team: &Team, user: &User, requestor: &str) -> ApiResult<TeamMember> {
-        let email = user.email.to_lowercase();
-        if !user.is_bot {
-            let restrict = self.cfg.str("TeamSettings.RestrictCreationToDomains").to_string();
-            if !email_allowed(&email, &[&team.allowed_domains, &restrict]) {
-                return Err(AppError::bad_request(
-                    "api.team.join_user_to_team.allowed_domains.app_error",
-                    "The user cannot be added as the domain associated with the account is not permitted. Contact your System Administrator for additional details.",
-                ));
-            }
+        // `IsTeamEmailAllowed`: a guest against the guests' domains only, not the team's.
+        if !self.team_email_allowed(user, team) {
+            return Err(AppError::bad_request(
+                "api.team.join_user_to_team.allowed_domains.app_error",
+                "The user cannot be added as the domain associated with the account is not permitted. Contact your System Administrator for additional details.",
+            ));
         }
         let guest = user.is_guest();
         let admin = !guest && team.email == user.email;
@@ -614,13 +611,14 @@ async fn team_stats(St(app): St<State>, Auth(s): Auth, Path(team_id): Path<Strin
         return Err(AppError::invalid_url_param("team_id"));
     }
     app.require_team(&s, &team_id, perm::VIEW_TEAM).await?;
-    let (total, active): (i64, i64) = sqlx::query_as(
+    // `GetTeamStats` with the session's `GetViewUsersRestrictions` (`applyTeamMemberViewRestrictionsFilterForStats`):
+    // a guest counts only the members it can see.
+    let restrict = app.restriction_cond(&s).await?.map(|c| format!(" AND {c}")).unwrap_or_default();
+    let sql = format!(
         "SELECT COUNT(DISTINCT tm.UserId), COUNT(DISTINCT tm.UserId) FILTER (WHERE u.DeleteAt = 0)
-         FROM TeamMembers tm JOIN Users u ON tm.UserId = u.Id WHERE tm.DeleteAt = 0 AND tm.TeamId = $1",
-    )
-    .bind(&team_id)
-    .fetch_one(&app.db)
-    .await?;
+         FROM TeamMembers tm JOIN Users u ON tm.UserId = u.Id WHERE tm.DeleteAt = 0 AND tm.TeamId = $1{restrict}"
+    );
+    let (total, active): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(&team_id).fetch_one(&app.db).await?;
     #[derive(Serialize)]
     struct TeamStats {
         team_id: String,

@@ -343,19 +343,24 @@ fn reloaded_caches(app: &App) {
     set_license(app, current());
 }
 
-/// `LoadLicense`, at start and after every cache invalidation: `MM_LICENSE`, else the active license of the database (or the license file, saved).
-pub async fn load(app: &App) {
+/// `LoadLicense`, at start: `MM_LICENSE`, else the active license of the database (or the license file, saved).
+/// Whether a license (or none) was set, which is when Go's `SetLicense` runs its listeners.
+pub async fn load(app: &App) -> bool {
     if let Ok(s) = std::env::var("MM_LICENSE")
         && !s.is_empty()
     {
         match license_from_bytes(s.as_bytes()) {
             Ok(l) => {
-                set_license(app, Some(l));
+                *CURRENT.write().unwrap() = Some(l).map(|mut l| {
+                    l.features.get_or_insert_with(Default::default).set_defaults();
+                    l
+                });
                 crate::logs::info("License key from ENV is valid, unlocking enterprise features.", &[]);
+                return true;
             }
             Err(e) => crate::logs::error("Failed to read license set in environment.", &[("error", e.id.into())]),
         }
-        return;
+        return false;
     }
     let mut id: String = sqlx::query_scalar("SELECT Value FROM Systems WHERE Name = 'ActiveLicenseId'")
         .fetch_optional(&app.db)
@@ -380,27 +385,26 @@ pub async fn load(app: &App) {
             },
         }
     }
-    let bytes: Option<String> = match sqlx::query_scalar("SELECT Bytes FROM Licenses WHERE Id = $1")
+    let bytes: Option<String> = sqlx::query_scalar("SELECT Bytes FROM Licenses WHERE Id = $1")
         .bind(&id)
         .fetch_optional(&app.db)
         .await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            // A store failure keeps the license in use (it reruns later).
-            crate::logs::error("Failed to read the license from the database, keeping the current license.", &[("error", e.to_string().into())]);
-            return;
-        }
-    };
+        .ok()
+        .flatten();
     let Some(bytes) = bytes else {
-        set_license(app, None);
-        return;
+        *CURRENT.write().unwrap() = None;
+        return true;
     };
     if let Ok(l) = license_from_bytes(bytes.as_bytes()) {
-        set_license(app, Some(l));
+        *CURRENT.write().unwrap() = Some(l).map(|mut l| {
+            l.features.get_or_insert_with(Default::default).set_defaults();
+            l
+        });
         crate::logs::info("License key is valid, unlocking enterprise features.", &[]);
+        true
     } else {
         crate::logs::info("License key is invalid.", &[]);
+        false
     }
 }
 

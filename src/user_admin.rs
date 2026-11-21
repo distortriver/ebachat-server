@@ -1015,13 +1015,20 @@ impl App {
             }
         }
         self.send_updated_user_event(&promoted);
+        // `UpdateSessionsIsGuest`: the sessions' roles (`Session().UpdateRoles`), then their `is_guest` prop.
+        sqlx::query("UPDATE Sessions SET Roles = $1 WHERE UserId = $2")
+            .bind(&promoted.roles)
+            .bind(&user.id)
+            .execute(&self.db)
+            .await
+            .ok();
         sqlx::query("UPDATE Sessions SET Props = jsonb_set(Props::jsonb, '{is_guest}', to_jsonb($1::text))::text::jsonb WHERE UserId = $2")
             .bind(promoted.is_guest().to_string())
             .bind(&user.id)
             .execute(&self.db)
             .await
             .ok();
-        let members = crate::perm::team_members(self, "tm.userid = $1", &[&user.id]).await?;
+        let members = crate::perm::team_members(self, "tm.userid = $1 AND tm.deleteat = 0", &[&user.id]).await?;
         for m in members {
             let mut sm = m.clone();
             crate::teams::sanitize_member(&mut sm, &user.id);
@@ -1030,9 +1037,10 @@ impl App {
                 json!({"member": serde_json::to_string(&sm).unwrap_or_default()}),
                 Broadcast { user_id: m.user_id.clone(), ..Default::default() },
             );
+            // `GetChannelMembersForUser`: the team's channels (archived too) and the DMs and GMs, once per team.
             let channel_members = self
                 .channel_members_where(
-                    "cm.userid = $1 AND c.teamid = ANY($2) AND c.deleteat = 0",
+                    "cm.userid = $1 AND (t.id = ANY($2) OR t.id = '' OR t.id IS NULL) AND c.type <> 'S'",
                     &user.id,
                     std::slice::from_ref(&m.team_id),
                 )
@@ -1048,6 +1056,7 @@ impl App {
             }
         }
         self.invalidate_user_teams(&user.id).await;
+        self.clear_sessions_for_user(&user.id);
         Ok(())
     }
 }

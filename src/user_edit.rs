@@ -219,10 +219,19 @@ impl App {
         pre_update(&mut user);
         user.create_at = old.create_at;
         check_user(&user)?;
-        if user.email != old.email {
+        // Users against the team list, guests against the guests' list; directory users are not checked.
+        let directory = old.auth_service == "ldap" || old.auth_service == "saml";
+        if user.email != old.email && !directory {
             let restrict = self.cfg.str("TeamSettings.RestrictCreationToDomains");
             if !email_domain_ok(&user.email, restrict) && !old.is_guest() {
                 return Err(AppError::bad_request("api.user.update_user.accepted_domain.app_error", "Email is not from an accepted domain."));
+            }
+            let restrict = self.cfg.str("GuestAccountsSettings.RestrictCreationToDomains");
+            if !email_domain_ok(&user.email, restrict) && old.is_guest() {
+                return Err(AppError::bad_request(
+                    "api.user.update_user.accepted_guest_domain.app_error",
+                    "Email is not from an accepted guest domain.",
+                ));
             }
         }
         // With verification required the new address waits for the user to verify it.

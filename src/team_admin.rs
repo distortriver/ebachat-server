@@ -230,7 +230,7 @@ impl App {
     }
 
     /// `IsTeamEmailAllowed`.
-    fn team_email_allowed(&self, user: &User, t: &Team) -> bool {
+    pub(crate) fn team_email_allowed(&self, user: &User, t: &Team) -> bool {
         if user.is_bot {
             return true;
         }

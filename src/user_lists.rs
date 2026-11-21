@@ -480,6 +480,7 @@ async fn search_not_in_channel(
 #[derive(Serialize)]
 struct Autocomplete {
     users: Vec<User>,
+    /// `omitempty`: missing when nobody is out of the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
     out_of_channel: Option<Vec<User>>,
 }
@@ -527,7 +528,8 @@ async fn autocomplete(
             search_in_channel(&app, &s, &q.in_channel, &q.name, ("", &none), o),
             search_not_in_channel(&app, &s, &q.in_team, &q.in_channel, &q.name, ("", &none), o)
         );
-        return Ok(Json(Autocomplete { users: sanitize(a?), out_of_channel: Some(sanitize(b?)) }));
+        let out = sanitize(b?);
+        return Ok(Json(Autocomplete { users: sanitize(a?), out_of_channel: Some(out).filter(|v| !v.is_empty()) }));
     }
     let users = search_in_team(&app, &s, &q.in_team, &q.name, ("", &none), o).await?;
     Ok(Json(Autocomplete { users: sanitize(users), out_of_channel: None }))
