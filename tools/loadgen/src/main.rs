@@ -597,7 +597,8 @@ async fn steps(base: String, pid: u32, plan: Vec<(u32, u32)>, seconds: u64) {
                         let st = &all[cur.load(Ordering::Relaxed)];
                         st.events.fetch_add(1, Ordering::Relaxed);
                         if let Ok(text) = m.to_text()
-                            && text.contains("\"event\":\"posted\"")
+                            // Go writes `{"event": "posted", ...` (with a space), Rust without.
+                            && text.contains("\"posted\"")
                             && let Some(sent) = marker(text)
                         {
                             st.delivery.add(now_us().saturating_sub(sent));
