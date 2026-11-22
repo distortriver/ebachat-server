@@ -41,7 +41,8 @@ fn unpack(bundle: &[u8], dest: &Path) -> Result<(), String> {
         if path.is_absolute() || path.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
             return Err(format!("invalid path {}", path.display()));
         }
-        let to = dest.join(&path);
+        // Normal components only: `./jira/...` and the bundle's `.` itself.
+        let to = dest.join(path.components().filter(|c| matches!(c, Component::Normal(_))).collect::<PathBuf>());
         match entry.header().entry_type() {
             tar::EntryType::Directory => std::fs::create_dir_all(&to).map_err(|e| e.to_string())?,
             tar::EntryType::Regular | tar::EntryType::Continuous => {
@@ -114,13 +115,19 @@ fn extract(bundle: &[u8], tmp: &Path) -> ApiResult<(J, PathBuf)> {
 
 /// Installs a bundle: unpacked into the plugins directory (replacing an installed plugin of the same id only when
 /// `replace`), started if enabled, and kept in the file store. Its manifest.
-pub async fn install(app: &State, bundle: Bytes, replace: bool) -> ApiResult<J> {
+pub async fn install(app: &State, bundle: Bytes, signature: Option<Bytes>, replace: bool) -> ApiResult<J> {
     let tmp = std::env::temp_dir().join(format!("plugintmp-{}", crate::app::new_id()));
     let r = install_locally(app, bundle.clone(), replace, tmp.clone()).await;
     let _ = tokio::fs::remove_dir_all(&tmp).await;
     let manifest = r?;
     let id = manifest_id(&manifest).to_string();
     crate::logs::info("Persisting plugin to filestore", &[("plugin_id", id.clone().into())]);
+    if let Some(sig) = signature {
+        app.files
+            .write(&format!("{}.sig", store_path(&id)), sig)
+            .await
+            .map_err(|e| AppError::internal("app.plugin.store_signature.app_error", e.to_string()))?;
+    }
     app.files
         .write(&store_path(&id), bundle)
         .await
@@ -189,20 +196,26 @@ fn conflict(existing: &J, uploaded: &J) -> AppError {
     e
 }
 
+/// A strict semver version: major, minor, patch and the pre-release part.
+fn semver(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p.split('+').next().unwrap_or("").to_string())),
+        None => (v.split('+').next().unwrap_or(""), None),
+    };
+    let number =
+        |x: &str| (!x.is_empty() && !(x.len() > 1 && x.starts_with('0'))).then(|| x.parse::<u64>().ok()).flatten();
+    let mut n = core.split('.').map(number);
+    let v = (n.next()??, n.next()??, n.next()??, pre);
+    n.next().is_none().then_some(v)
+}
+
+pub fn strict_semver(v: &str) -> bool {
+    semver(v).is_some()
+}
+
 /// Whether `to` is the same version as `from`, newer or older, by strict semver.
 fn version_direction(from: &str, to: &str) -> &'static str {
-    let parse = |v: &str| -> Option<(u64, u64, u64, Option<String>)> {
-        let (core, pre) = match v.split_once('-') {
-            Some((c, p)) => (c, Some(p.split('+').next().unwrap_or("").to_string())),
-            None => (v.split('+').next().unwrap_or(""), None),
-        };
-        let mut n = core
-            .split('.')
-            .map(|x| (!x.is_empty() && !(x.len() > 1 && x.starts_with('0'))).then(|| x.parse::<u64>().ok()).flatten());
-        let v = (n.next()??, n.next()??, n.next()??, pre);
-        n.next().is_none().then_some(v)
-    };
-    let (Some(a), Some(b)) = (parse(from), parse(to)) else { return "unknown" };
+    let (Some(a), Some(b)) = (semver(from), semver(to)) else { return "unknown" };
     let rank = |p: &Option<String>| p.clone().map_or((1, String::new()), |s| (0, s));
     match ((b.0, b.1, b.2), rank(&b.3)).cmp(&((a.0, a.1, a.2), rank(&a.3))) {
         std::cmp::Ordering::Equal => "same",
@@ -255,6 +268,13 @@ pub async fn unpack_stored(app: &State) {
         }
         let r = async {
             let bundle = app.files.read(&path).await.map_err(|e| e.to_string())?;
+            if app.cfg.bool("PluginSettings.RequirePluginSignature") {
+                let sig = app.files.read(&format!("{path}.sig")).await.map_err(|e| e.to_string())?;
+                let (a, b) = (app.clone(), bundle.clone());
+                if !tokio::task::spawn_blocking(move || super::signature::verify(&a, &b, &sig)).await.unwrap_or(false) {
+                    return Err("invalid plugin signature".to_string());
+                }
+            }
             let tmp = std::env::temp_dir().join(format!("plugintmp-{}", crate::app::new_id()));
             let dest = plugins_dir(app);
             let r = tokio::task::spawn_blocking({
@@ -290,7 +310,8 @@ mod tests {
             let mut h = tar::Header::new_gnu();
             h.set_size(data.len() as u64);
             h.set_mode(*mode);
-            h.set_entry_type(tar::EntryType::Regular);
+            let dir = path.ends_with('/');
+            h.set_entry_type(if dir { tar::EntryType::Directory } else { tar::EntryType::Regular });
             // Written raw: `set_path` refuses `..`, which is what is tested.
             let name = h.as_old_mut().name.as_mut();
             name[..path.len()].copy_from_slice(path.as_bytes());
@@ -307,6 +328,21 @@ mod tests {
         assert_eq!(version_direction("2.0.0", "1.9.9"), "downgrade");
         assert_eq!(version_direction("1.0.0-rc.1", "1.0.0"), "upgrade");
         assert_eq!(version_direction("v1.0.0", "1.0.0"), "unknown");
+        assert!(
+            strict_semver("2.1.0") && strict_semver("1.0.0-rc.1") && !strict_semver("1.0") && !strict_semver("01.0.0")
+        );
+    }
+
+    /// A real bundle (`PLUGIN_BUNDLE`) unpacks.
+    #[test]
+    #[ignore]
+    fn real_bundle_unpacks() {
+        let bundle = std::fs::read(std::env::var("PLUGIN_BUNDLE").unwrap()).unwrap();
+        let dir = std::env::temp_dir().join(format!("ebachat-real-{}", crate::app::new_id()));
+        let r = extract(&bundle, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let (m, _) = r.map_err(|e| e.detailed_error).unwrap();
+        assert!(!manifest_id(&m).is_empty());
     }
 
     #[test]
@@ -326,6 +362,11 @@ mod tests {
         let dir2 = dir.join("second");
         assert_eq!(extract(&evil, &dir2).unwrap_err().id, "app.plugin.extract.app_error");
         assert!(!dir.join("escape").exists());
+        // As `tar -C dir .` writes it: `./` first, then `./p/...`.
+        let dotted =
+            bundle(&[("./", b"", 0o700), ("./p/", b"", 0o755), ("./p/plugin.json", br#"{"id": "com.x.z"}"#, 0o600)]);
+        let (m, root) = extract(&dotted, &dir.join("dotted")).unwrap();
+        assert_eq!((m["id"].as_str(), root), (Some("com.x.z"), dir.join("dotted/p")));
         let bad_id = bundle(&[("plugin.json", br#"{"id": "a/b"}"#, 0o644)]);
         assert_eq!(extract(&bad_id, &dir.join("third")).unwrap_err().id, "app.plugin.invalid_id.app_error");
         std::fs::remove_dir_all(&dir).unwrap();

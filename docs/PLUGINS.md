@@ -34,7 +34,27 @@ Upload Plugin), `mmctl plugin add` or the API:
 A bundle is at most `FileSettings.MaxFileSize`. It is unpacked into `PluginSettings.Directory/<id>`, started if
 enabled, and kept in the file store (local or S3) as `plugins/<id>.tar.gz`. At start, the stored bundles the
 directory lacks are unpacked. Enabling is a separate step (System Console or `POST /api/v4/plugins/{id}/enable`),
-as is copying an extracted bundle into the directory by hand. The marketplace answers 501.
+as is copying an extracted bundle into the directory by hand.
+
+### Marketplace
+
+With `PluginSettings.EnableMarketplace` (and `EnableRemoteMarketplace` for the remote list), the App Marketplace
+and `mmctl plugin marketplace` work:
+
+- `GET /api/v4/plugins/marketplace`: the plugins `PluginSettings.MarketplaceURL` lists for this server version and
+  platform, with the installed version of each, and the installed plugins it does not list (labelled `Local`);
+  `filter`, `local_only`, `remote_only` (without it, `sysconsole_read_plugins` is needed).
+- `POST /api/v4/plugins/marketplace` `{"id": ...}`: the latest version listed is downloaded, its detached
+  signature checked, and installed over the installed one (201 with the manifest). The signature is kept beside
+  the bundle as `plugins/<id>.tar.gz.sig`.
+
+A signature is good when it verifies with the built-in plugin signing key (`data/plugin_keys/production.asc`),
+the second built-in key while `FeatureFlags.EnableMFIPluginSignaturePublicKey` is on (`mfi.asc`), or one of the
+key files in `PluginSettings.SignaturePublicKeyFiles` (next to `config.json` unless absolute). A bad one answers
+500 `api.plugin.verify_plugin.app_error` and nothing is installed. With `RequirePluginSignature`, uploads are
+refused and a stored bundle is unpacked at start only with a good signature. The marketplace is reached like an
+integration: an internal address needs `ServiceSettings.AllowedUntrustedInternalConnections`. Plugins
+prepackaged with another server's image are not offered.
 
 ## Docker
 

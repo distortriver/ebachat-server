@@ -8,8 +8,10 @@ pub mod api;
 pub mod http;
 pub mod install;
 mod kv;
+pub mod marketplace;
 pub mod schema;
 mod schema_gen;
+mod signature;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

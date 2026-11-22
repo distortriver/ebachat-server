@@ -25,6 +25,7 @@ pub fn routes() -> Router<State> {
         .route("/plugins/{plugin_id}/{*rest}", any(plugin_request_route))
         .route("/api/v4/plugins", get(list).post(upload))
         .route("/api/v4/plugins/install_from_url", post(install_from_url))
+        .route("/api/v4/plugins/marketplace", get(marketplace_list).post(marketplace_install))
         .route("/api/v4/plugins/{plugin_id}", axum::routing::delete(remove_plugin))
         .route("/api/v4/plugins/statuses", get(statuses))
         .route("/api/v4/plugins/webapp", get(webapp))
@@ -511,7 +512,7 @@ async fn upload_bundle(app: State, req: Request) -> ApiResult<Response> {
     }
     let bundle = bundle.ok_or_else(|| AppError::bad_request("api.plugin.upload.no_file.app_error", ""))?;
     directory_conflict(&app)?;
-    Ok(created(super::install::install(&app, bundle, force).await?))
+    Ok(created(super::install::install(&app, bundle, None, force).await?))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -555,10 +556,10 @@ async fn install_from_url(
     }
     let bundle = bundle.ok_or_else(|| failed(last))?;
     directory_conflict(&app)?;
-    Ok(created(super::install::install(&app, bundle, force).await?))
+    Ok(created(super::install::install(&app, bundle, None, force).await?))
 }
 
-async fn download(app: &App, url: &reqwest::Url, max: usize) -> Result<bytes::Bytes, String> {
+pub(crate) async fn download(app: &App, url: &reqwest::Url, max: usize) -> Result<bytes::Bytes, String> {
     use futures_util::StreamExt;
     let r = app.trusted_client().get(url.clone()).send().await.map_err(|e| e.to_string())?;
     if !r.status().is_success() {
@@ -574,6 +575,59 @@ async fn download(app: &App, url: &reqwest::Url, max: usize) -> Result<bytes::By
         data.extend_from_slice(&chunk);
     }
     Ok(data.freeze())
+}
+
+fn marketplace_on(app: &App) -> ApiResult<()> {
+    plugins_on(app)?;
+    if !app.cfg.bool("PluginSettings.EnableMarketplace") {
+        return Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "app.plugin.marketplace_disabled.app_error", ""));
+    }
+    Ok(())
+}
+
+/// Marketplace plugins merged with the installed ones; without `remote_only`, for those who may read plugins.
+async fn marketplace_list(
+    St(app): St<State>,
+    Auth(s): Auth,
+    crate::app::Query(q): crate::app::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<axum::Json<J>> {
+    marketplace_on(&app)?;
+    let bad = |d: String| AppError::internal("app.plugin.marshal.app_error", d);
+    for k in ["page", "per_page"] {
+        if q.get(k).is_some_and(|v| !v.is_empty() && v.parse::<i64>().is_err()) {
+            return Err(bad(format!("failed to parse {k} as integer")));
+        }
+    }
+    let flag = |k: &str| matches!(q.get(k).map(String::as_str), Some("1" | "t" | "T" | "true" | "TRUE" | "True"));
+    let f = super::marketplace::Filter {
+        filter: q.get("filter").cloned().unwrap_or_default(),
+        local_only: flag("local_only"),
+        remote_only: flag("remote_only"),
+    };
+    if f.local_only && f.remote_only {
+        return Err(bad("local_only and remote_only cannot be both true".into()));
+    }
+    if !f.remote_only {
+        app.require(&s, crate::perm::SYSCONSOLE_READ_PLUGINS).await?;
+    }
+    Ok(axum::Json(super::marketplace::list(&app, &f).await?))
+}
+
+/// The latest compatible version of a marketplace plugin, installed: `{"id": ...}`.
+async fn marketplace_install(St(app): St<State>, Auth(s): Auth, body: axum::body::Bytes) -> ApiResult<Response> {
+    marketplace_on(&app)?;
+    app.require(&s, crate::perm::SYSCONSOLE_WRITE_PLUGINS).await?;
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        id: String,
+    }
+    let r: Option<Req> = serde_json::from_slice(&body).map_err(|e| {
+        AppError::new(StatusCode::NOT_IMPLEMENTED, "app.plugin.marketplace_plugin_request.app_error", "")
+            .detail(e.to_string())
+    })?;
+    let id = r.map(|r| r.id).unwrap_or_default();
+    Ok(created(super::marketplace::install(&app, &id).await?))
 }
 
 async fn remove_plugin(St(app): St<State>, Auth(s): Auth, Path(id): Path<String>) -> ApiResult<axum::Json<J>> {
