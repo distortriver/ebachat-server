@@ -19,8 +19,40 @@ routes, key-value store).
 - **Logs:** the plugin's hclog lines and its API log calls go to the server log with `plugin_id`.
 - **Environment:** a plugin gets only `PATH`, `HOME`, `TZ`, the locale, `TMPDIR`, the CA and proxy variables.
 
-Installing is copying the extracted bundle into the directory and enabling it (System Console or
-`POST /api/v4/plugins/{id}/enable`). Uploads, install from URL, the marketplace and removal answer 501.
+## Installing
+
+With `PluginSettings.EnableUploads` (set in `config.json` or `MM_PLUGINSETTINGS_ENABLEUPLOADS`; it cannot be
+changed through the API), a system admin installs a bundle from the System Console (Plugins → Plugin Management →
+Upload Plugin), `mmctl plugin add` or the API:
+
+- `POST /api/v4/plugins`: the `.tar.gz` as the multipart field `plugin`; `force=true` replaces an installed plugin
+  of the same id (without it, 400 `app.plugin.install_id.app_error`). Answers 201 with the manifest.
+- `POST /api/v4/plugins/install_from_url?plugin_download_url=...&force=true`: the same, downloaded (https unless
+  `AllowInsecureDownloadURL`).
+- `DELETE /api/v4/plugins/{id}`: disabled, stopped, deleted from the directory and the file store.
+
+A bundle is at most `FileSettings.MaxFileSize`. It is unpacked into `PluginSettings.Directory/<id>`, started if
+enabled, and kept in the file store (local or S3) as `plugins/<id>.tar.gz`. At start, the stored bundles the
+directory lacks are unpacked. Enabling is a separate step (System Console or `POST /api/v4/plugins/{id}/enable`),
+as is copying an extracted bundle into the directory by hand. The marketplace answers 501.
+
+## Docker
+
+The image runs from `/ebachat`, so the directory is `/ebachat/plugins`. Bundles installed through the API come
+back from the file store, but plugins that exist only unpacked (copied by hand, or prepackaged with another
+server's image and never stored) live in the directory alone: mount it as a volume to keep them. The container
+can run with a read-only root and `/tmp` as tmpfs (plugins open their sockets there):
+
+```yaml
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - config:/ebachat/config
+      - data:/ebachat/data
+      - logs:/ebachat/logs
+      - plugins:/ebachat/plugins
+      - client:/ebachat/client:ro
+```
 
 ## What they get
 

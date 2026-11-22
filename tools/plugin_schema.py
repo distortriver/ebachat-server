@@ -13,7 +13,7 @@ import sys
 ROOTS = [
     "Post", "User", "Channel", "ChannelMember", "Team", "TeamMember", "Bot", "BotPatch", "Command", "CommandArgs",
     "CommandResponse", "AutocompleteData", "Status", "FileInfo", "AppError", "PluginStatus", "PluginKVSetOptions",
-    "WebsocketBroadcast", "OpenDialogRequest", "MessageAttachment", "Config",
+    "WebsocketBroadcast", "OpenDialogRequest", "MessageAttachment", "Config", "Manifest",
     # The concrete types of AutocompleteArg.Data (an interface).
     "AutocompleteTextArg", "AutocompleteStaticListArg", "AutocompleteDynamicListArg",
 ]
