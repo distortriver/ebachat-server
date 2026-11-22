@@ -995,7 +995,8 @@ impl App {
         p.r#type = crate::model::post::kind::EPHEMERAL.into();
         p.update_at = now_ms();
         generate_action_ids(&mut p.props.0);
-        let mut p = self.prepare_post(&p, crate::posts::Prep { is_new: true, ..Default::default() }).await;
+        let prep = crate::posts::Prep { is_new: true, include_priority: true, ..Default::default() };
+        let mut p = self.prepare_post_full(&p, prep).await;
         if let Ok(k) = self.integration_keys().await {
             add_action_cookies(&mut p, &k.cookie);
         }
