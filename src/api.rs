@@ -341,6 +341,7 @@ fn routes(app: State) -> Router {
         .merge(crate::license::routes())
         .merge(crate::cpa::routes())
         .merge(crate::unlicensed::routes())
+        .merge(crate::plugins::http::routes())
         .merge(crate::properties::routes())
         .merge(crate::commands::routes())
         .merge(crate::command_admin::routes())

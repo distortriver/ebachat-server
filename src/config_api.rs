@@ -60,6 +60,9 @@ impl App {
     pub async fn config_changed(&self, old: &Value, new: &Value) {
         crate::job_workers::config_changed(self, old, new).await;
         crate::logs::configure(new);
+        if let Some(app) = self.hub.app() {
+            crate::plugins::config_changed(app);
+        }
         let strip = |v: &Value| {
             let mut v = v.clone();
             if let Some(m) = v.as_object_mut() {

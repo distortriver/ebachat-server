@@ -1365,6 +1365,8 @@ pub struct CreateFlags {
     /// `FromIncomingWebhook`: `from_webhook`, and the display-identity overrides below re-injected.
     pub from_incoming_webhook: bool,
     pub allow_mm_blocks_actions: bool,
+    /// A plugin's post: `from_plugin`.
+    pub from_plugin: bool,
     pub override_username: String,
     pub override_icon_url: String,
     pub override_icon_emoji: String,
@@ -1443,6 +1445,9 @@ impl App {
         }
         if flags.from_incoming_webhook {
             p.insert("from_webhook".into(), "true".into());
+        }
+        if flags.from_plugin {
+            p.insert("from_plugin".into(), "true".into());
         }
         if flags.force_notification {
             p.insert("force_notification".into(), crate::app::new_id().into());
