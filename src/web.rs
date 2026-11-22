@@ -509,6 +509,11 @@ async fn static_files(Path(rel): Path<String>, req: Request) -> Response {
 }
 
 async fn static_plugins(AxState(app): AxState<State>, Path(rel): Path<String>, req: Request) -> Response {
+    let head = req.method() == Method::HEAD;
+    // An active plugin's webapp, served from its bundle.
+    if let Some((dir, file)) = crate::plugins::http::webapp_file(&rel) {
+        return serve(dir, &file, req.uri().path(), req.headers(), head).await;
+    }
     let dir = match app.cfg.str("PluginSettings.ClientDirectory") {
         "" => "./client/plugins".to_string(),
         d => d.to_string(),

@@ -149,7 +149,7 @@ pub type ApiHandler = Arc<dyn Fn(String, Value) -> rpc::Reply + Send + Sync>;
 
 /// A running plugin.
 pub struct Plugin {
-    child: Child,
+    child: tokio::sync::Mutex<Child>,
     pub broker: Arc<Broker>,
     control: Arc<rpc::Client<StreamHandle>>,
     pub hooks: Arc<rpc::Client<StreamHandle>>,
@@ -251,7 +251,7 @@ impl Plugin {
             Value::List(l) => l.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             v => bail!("bad Implemented reply: {v:?}"),
         };
-        Ok(Plugin { child, broker, control, hooks, implemented })
+        Ok(Plugin { child: tokio::sync::Mutex::new(child), broker, control, hooks, implemented })
     }
 
     pub fn implements(&self, hook: &str) -> bool {
@@ -342,16 +342,30 @@ impl Plugin {
         Ok(r)
     }
 
-    /// Asks the plugin to exit (go-plugin's `Control.Quit`), then makes sure it does.
-    pub async fn stop(mut self) {
-        let _ = self.deactivate().await;
+    /// go-plugin's `Control.Ping`: the plugin process answers.
+    pub async fn ping(&self) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), self.control.call("Control.Ping", &Ty::Bool, &Value::Bool(true)))
+            .await
+            .map_err(|_| anyhow!("ping timed out"))??;
+        Ok(())
+    }
+
+    /// Whether the plugin process has exited.
+    pub async fn exited(&self) -> bool {
+        self.child.lock().await.try_wait().is_ok_and(|s| s.is_some())
+    }
+
+    /// `OnDeactivate`, then go-plugin's `Control.Quit`, then makes sure the process is gone.
+    pub async fn stop(&self) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.deactivate()).await;
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
             self.control.call("Control.Quit", &Ty::Bool, &Value::Bool(true)),
         )
         .await;
-        if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
-            let _ = self.child.kill().await;
+        let mut child = self.child.lock().await;
+        if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            let _ = child.kill().await;
         }
     }
 }

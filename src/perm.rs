@@ -475,6 +475,8 @@ pub const USE_SLASH_COMMANDS: &str = "use_slash_commands";
 pub const GET_PUBLIC_LINK: &str = "get_public_link";
 pub const MANAGE_OAUTH: &str = "manage_oauth";
 pub const SYSCONSOLE_READ_USERMANAGEMENT_USERS: &str = "sysconsole_read_user_management_users";
+pub const SYSCONSOLE_READ_PLUGINS: &str = "sysconsole_read_plugins";
+pub const SYSCONSOLE_WRITE_PLUGINS: &str = "sysconsole_write_plugins";
 
 // ---------- by user id (`HasPermissionTo*`), for checks not tied to the request's session ----------
 

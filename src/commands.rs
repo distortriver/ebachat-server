@@ -214,6 +214,11 @@ impl App {
         let (client_trigger_id, trigger_id) = self.generate_trigger_id(&args.user_id, &args.channel_id).await;
         args.trigger_id = trigger_id;
 
+        // Plugins can override built-in and custom commands.
+        if let Some((cmd, mut response)) = self.try_plugin_command(s, args).await? {
+            response.trigger_id = client_trigger_id;
+            return self.handle_command_response(&cmd, args, response, true).await;
+        }
         if let Some((cmd, mut response)) = self.try_custom_command(args, &trigger, &message).await? {
             response.trigger_id = client_trigger_id;
             return self.handle_command_response(&cmd, args, response, false).await;
@@ -231,6 +236,42 @@ impl App {
             shown += "...";
         }
         Err(with_trigger(AppError::not_found("api.command.execute_command.not_found.app_error", ""), &shown))
+    }
+
+    /// The command of an active plugin, with the message's mentions of team members and
+    /// public channels.
+    async fn try_plugin_command(
+        &self,
+        s: &Session,
+        args: &CommandArgs,
+    ) -> ApiResult<Option<(Command, CommandResponse)>> {
+        let first = args.command.split(' ').next().unwrap_or("");
+        let trigger = first.get(1..).unwrap_or("").to_lowercase();
+        let plugins = &crate::plugins::PLUGINS;
+        let Some(cmd) = plugins.commands(&args.team_id).into_iter().find(|c| c.trigger == trigger) else {
+            return Ok(None);
+        };
+        let Some(plugin) = plugins.get(&cmd.plugin_id) else { return Ok(None) };
+        let crashed = |id: &str| {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, id, "")
+                .with_params(&[("Command", &trigger), ("PluginId", &cmd.plugin_id)])
+                .detail(format!("err= Plugin {} crashed due to /{trigger} command", cmd.plugin_id))
+        };
+        let Some(p) = &plugin.process else { return Ok(None) };
+        if p.ping().await.is_err() {
+            return Err(crashed("model.plugin_command_error.error.app_error"));
+        }
+        let users = self.mentions_to_team_members(&args.command, &args.team_id).await;
+        let channels = self.mentions_to_public_channels(&args.command, &args.team_id).await;
+        let (response, err) = crate::plugins::execute_command(p, s, args, users, channels)
+            .await
+            .map_err(|_| crashed("model.plugin_command_crash.error.app_error"))?;
+        if let Some(e) = err {
+            return Err(e);
+        }
+        let mut cmd = cmd;
+        cmd.plugin_id.clear();
+        Ok(response.map(|r| (cmd, r)))
     }
 
     /// `tryExecuteCustomCommand`.
@@ -753,6 +794,13 @@ impl App {
         if !self.cfg.bool("TeamSettings.EnableCustomUserStatuses") {
             seen.push("status".into());
         }
+        for mut c in crate::plugins::PLUGINS.commands(team_id) {
+            if c.auto_complete && !seen.contains(&c.trigger) {
+                c.plugin_id.clear();
+                seen.push(c.trigger.clone());
+                out.push(c);
+            }
+        }
         if self.cfg.bool("ServiceSettings.EnableCommands") {
             for mut c in team_commands(self, team_id).await? {
                 if c.auto_complete && !seen.contains(&c.trigger) {
@@ -783,6 +831,13 @@ impl App {
             }
             seen.push(c.trigger.clone());
             out.push(builtin_listed(c));
+        }
+        for mut c in crate::plugins::PLUGINS.commands(team_id) {
+            if !seen.contains(&c.trigger) {
+                c.plugin_id.clear();
+                seen.push(c.trigger.clone());
+                out.push(c);
+            }
         }
         if self.cfg.bool("ServiceSettings.EnableCommands") {
             for mut c in team_commands(self, team_id).await? {
@@ -896,6 +951,8 @@ struct Suggestion {
 #[serde(default)]
 struct SuggestionQuery {
     user_input: String,
+    channel_id: String,
+    root_id: String,
 }
 
 /// `listCommandAutocompleteSuggestions` / `GetSuggestions`.
@@ -903,6 +960,7 @@ async fn suggestions(
     St(app): St<State>,
     Auth(s): Auth,
     Path(team_id): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<SuggestionQuery>,
 ) -> ApiResult<Json<Vec<Suggestion>>> {
     if !is_valid_id(&team_id) {
@@ -925,7 +983,21 @@ async fn suggestions(
             })
         })
         .collect();
-    let mut out = suggest(&data, "", input, role);
+    // Dynamic lists come from their plugin: the input is parsed again with each round's lists until none is
+    // missing (a list asked for depends on what earlier ones gave).
+    let mut lists = Lists::default();
+    let mut out = suggest(&data, "", input, role, &lists);
+    for _ in 0..4 {
+        let need: Vec<ListKey> = lists.need.take().into_iter().filter(|k| !lists.got.contains_key(k)).collect();
+        if need.is_empty() {
+            break;
+        }
+        for k in need {
+            let items = fetch_list(&app, &s, &k, &team_id, &q, &site_url_header(&headers)).await;
+            lists.got.insert(k, items);
+        }
+        out = suggest(&data, "", input, role, &lists);
+    }
     for sug in out.iter_mut() {
         if let Some(c) = cmds.iter().find(|c| sug.complete.starts_with(&c.trigger)) {
             sug.icon_data = c.autocomplete_icon_data.clone();
@@ -946,8 +1018,54 @@ fn sug(complete: String, suggestion: String, hint: String, description: String) 
     Suggestion { complete, suggestion, hint, description, icon_data: String::new() }
 }
 
+/// A dynamic list's fetch URL with the input parsed and still to parse when it was reached.
+type ListKey = (String, String, String);
+
+/// The dynamic lists fetched for a parse (none when the fetch failed), and those it reached without them.
+#[derive(Default)]
+struct Lists {
+    got: std::collections::HashMap<ListKey, Option<Vec<Value>>>,
+    need: std::cell::RefCell<Vec<ListKey>>,
+}
+
+/// The plugin's list items for the input so far.
+async fn fetch_list(
+    app: &App,
+    s: &Session,
+    key: &ListKey,
+    team_id: &str,
+    q: &SuggestionQuery,
+    site_url: &str,
+) -> Option<Vec<Value>> {
+    let (url, parsed, to_parse) = key;
+    let mut v = crate::gourl::Values::default();
+    for (name, val) in [
+        ("user_input", format!("{parsed}{to_parse}").as_str()),
+        ("parsed", parsed),
+        ("channel_id", &q.channel_id),
+        ("team_id", team_id),
+        ("root_id", &q.root_id),
+        ("parent_id", ""),
+        ("user_id", &s.user_id),
+        ("site_url", site_url),
+    ] {
+        v.add(name, val);
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let full = format!("{url}{sep}{}", v.encode());
+    let items = match crate::plugins::http::plugin_request(app, s, "GET", &full, vec![]).await {
+        // `null` is an empty list.
+        Ok(r) => serde_json::from_slice::<Option<Vec<Value>>>(&r.body).ok().map(Option::unwrap_or_default),
+        Err(_) => None,
+    };
+    if items.is_none() {
+        crate::logs::error("Can not fetch dynamic list arguments", &[("url", url.clone().into())]);
+    }
+    items
+}
+
 /// `getSuggestions` over `AutocompleteData` as Go serializes it.
-fn suggest(commands: &[Value], parsed: &str, to_parse: &str, role: &str) -> Vec<Suggestion> {
+fn suggest(commands: &[Value], parsed: &str, to_parse: &str, role: &str, lists: &Lists) -> Vec<Suggestion> {
     let role_ok = |c: &Value| {
         let r = s(c, "RoleID");
         r == role || role == "system_admin" || role.is_empty()
@@ -968,10 +1086,10 @@ fn suggest(commands: &[Value], parsed: &str, to_parse: &str, role: &str) -> Vec<
         let parsed = format!("{parsed}{}", &to_parse[..=index]);
         let args = arr(c, "Arguments");
         if args.is_empty() {
-            out.extend(suggest(&arr(c, "SubCommands"), &parsed, rest, role));
+            out.extend(suggest(&arr(c, "SubCommands"), &parsed, rest, role, lists));
             continue;
         }
-        let (found, _, _, s) = parse_arguments(&args, &parsed, rest);
+        let (found, _, _, s) = parse_arguments(&args, &parsed, rest, lists);
         if found {
             out.extend(s);
         }
@@ -982,27 +1100,27 @@ fn suggest(commands: &[Value], parsed: &str, to_parse: &str, role: &str) -> Vec<
 type Parsed = (bool, String, String, Vec<Suggestion>);
 
 /// `parseArguments`.
-fn parse_arguments(args: &[Value], parsed: &str, to_parse: &str) -> Parsed {
+fn parse_arguments(args: &[Value], parsed: &str, to_parse: &str, lists: &Lists) -> Parsed {
     let Some(first) = args.first() else { return (false, parsed.into(), to_parse.into(), vec![]) };
     let mut out = vec![];
     if first["Required"].as_bool().unwrap_or(false) {
-        let (found, p, t, s) = parse_argument(first, parsed, to_parse);
+        let (found, p, t, s) = parse_argument(first, parsed, to_parse, lists);
         if found {
             return (true, p, t, s);
         }
-        return parse_arguments(&args[1..], &p, &t);
+        return parse_arguments(&args[1..], &p, &t, lists);
     }
-    let (mut found_with, mut p_with, mut t_with, s_with) = parse_argument(first, parsed, to_parse);
+    let (mut found_with, mut p_with, mut t_with, s_with) = parse_argument(first, parsed, to_parse, lists);
     if found_with {
         out.extend(s_with);
     } else {
-        let (f, p, t, s) = parse_arguments(&args[1..], &p_with, &t_with);
+        let (f, p, t, s) = parse_arguments(&args[1..], &p_with, &t_with, lists);
         if f {
             out.extend(s);
         }
         (found_with, p_with, t_with) = (f, p, t);
     }
-    let (found_without, p_without, t_without, s_without) = parse_arguments(&args[1..], parsed, to_parse);
+    let (found_without, p_without, t_without, s_without) = parse_arguments(&args[1..], parsed, to_parse, lists);
     if found_without {
         out.extend(s_without);
     }
@@ -1015,8 +1133,9 @@ fn parse_arguments(args: &[Value], parsed: &str, to_parse: &str) -> Parsed {
     (found_without, p_without, t_without, out)
 }
 
-/// `parseArgument`: named, text and static list arguments; dynamic lists give nothing here.
-fn parse_argument(arg: &Value, parsed: &str, to_parse: &str) -> Parsed {
+/// `parseArgument`: named, text, static and dynamic list arguments (a dynamic list not fetched yet is noted in
+/// `lists.need` and found nothing).
+fn parse_argument(arg: &Value, parsed: &str, to_parse: &str, lists: &Lists) -> Parsed {
     let (mut parsed, mut to_parse) = (parsed.to_string(), to_parse.to_string());
     let name = s(arg, "Name");
     if !name.is_empty() {
@@ -1078,6 +1197,17 @@ fn parse_argument(arg: &Value, parsed: &str, to_parse: &str) -> Parsed {
             }
         }
         "StaticList" => parse_list_items(&arr(&arg["Data"], "PossibleArguments"), &parsed, &to_parse),
+        "DynamicList" => {
+            let key = (s(&arg["Data"], "FetchURL"), parsed.clone(), to_parse.clone());
+            match lists.got.get(&key) {
+                Some(Some(items)) => parse_list_items(items, &parsed, &to_parse),
+                Some(None) => (false, parsed, to_parse, vec![]),
+                None => {
+                    lists.need.borrow_mut().push(key);
+                    (false, parsed, to_parse, vec![])
+                }
+            }
+        }
         _ => (false, parsed, to_parse, vec![]),
     }
 }
@@ -1187,11 +1317,28 @@ mod tests {
             "Arguments": [{"Name": "", "HelpText": "[text]", "Type": "TextInput", "Required": true, "Data": {"Hint": "[text]", "Pattern": ""}}],
             "SubCommands": []}),
         ];
-        let s = suggest(&data, "", "rename ", "system_user");
+        let s = suggest(&data, "", "rename ", "system_user", &Lists::default());
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].complete, "rename ");
         assert_eq!(s[0].hint, "[text]");
-        assert!(suggest(&data, "", "ren", "system_user")[0].complete == "rename");
+        assert!(suggest(&data, "", "ren", "system_user", &Lists::default())[0].complete == "rename");
+    }
+
+    /// A dynamic list is asked for, then parsed like a static one once fetched.
+    #[test]
+    fn suggestions_from_a_dynamic_list() {
+        let data = vec![json!({"Trigger": "jira", "RoleID": "system_user", "Arguments": [], "SubCommands": [
+            {"Trigger": "assign", "RoleID": "system_user", "SubCommands": [], "Arguments": [
+                {"Name": "", "Type": "DynamicList", "Required": true, "Data": {"FetchURL": "/plugins/jira/issues"}}]}]})];
+        let mut lists = Lists::default();
+        assert!(suggest(&data, "", "jira assign ", "system_user", &lists).is_empty());
+        let need = lists.need.take();
+        assert_eq!(need, vec![("/plugins/jira/issues".to_string(), "jira assign ".to_string(), String::new())]);
+        let items = vec![json!({"Item": "KEY-1", "Hint": "", "HelpText": "first"}), json!({"Item": "OTHER-2"})];
+        lists.got.insert(need[0].clone(), Some(items));
+        let s = suggest(&data, "", "jira assign ", "system_user", &lists);
+        let completes: Vec<&str> = s.iter().map(|x| x.complete.as_str()).collect();
+        assert_eq!(completes, ["jira assign KEY-1", "jira assign OTHER-2"]);
     }
 
     #[test]

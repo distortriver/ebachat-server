@@ -51,6 +51,7 @@ pub mod outgoing;
 pub mod password;
 pub mod perm;
 pub mod permanent;
+pub mod plugins;
 pub mod posts;
 pub mod posts_more;
 pub mod preferences;
