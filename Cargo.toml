@@ -60,7 +60,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 zstd = { version = "0.13.3", default-features = false }
 
 [workspace]
-members = ["macros", "tools/loadgen"]
+members = ["macros", "goplugin", "tools/loadgen"]
 
 [dev-dependencies]
 reqwest = { version = "0.13.5", features = ["json"] }
